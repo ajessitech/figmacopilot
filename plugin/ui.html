@@ -206,13 +206,29 @@
         </div>
 
         <div id="connection-status" class="status disconnected">
-          Not connected to Cursor MCP server
+          Not connected to Figma Bridge
+        </div>
+        
+        <div id="channel-info" class="status info hidden">
+          Channel: <span id="current-channel">None</span>
         </div>
 
         <div class="section">
           <button id="btn-disconnect" class="secondary" disabled>
             Disconnect
           </button>
+        </div>
+        
+        <!-- Phase 1 Chat UI -->
+        <div id="chat-container" class="section hidden">
+          <h2>Chat with Agent</h2>
+          <div id="chat-log" style="height: 200px; overflow-y: auto; background: #2d2d2d; border: 1px solid #444; border-radius: 4px; padding: 8px; margin-bottom: 8px; font-family: monospace; font-size: 12px; line-height: 1.4;">
+            <div style="color: #999;">Chat ready. Type a message below...</div>
+          </div>
+          <div style="display: flex; gap: 8px;">
+            <input type="text" id="prompt-input" placeholder="Type your message..." style="flex: 1;">
+            <button id="send-button">Send</button>
+          </div>
         </div>
         
         <!-- Add Progress Bar Section -->
@@ -268,6 +284,12 @@
       const connectButton = document.getElementById("btn-connect");
       const disconnectButton = document.getElementById("btn-disconnect");
       const connectionStatus = document.getElementById("connection-status");
+      const channelInfo = document.getElementById("channel-info");
+      const currentChannelSpan = document.getElementById("current-channel");
+      const chatContainer = document.getElementById("chat-container");
+      const chatLog = document.getElementById("chat-log");
+      const promptInput = document.getElementById("prompt-input");
+      const sendButton = document.getElementById("send-button");
 
       // Tabs
       const tabs = document.querySelectorAll(".tab");
@@ -286,8 +308,8 @@
         connectionStatus.innerHTML =
           message ||
           (isConnected
-            ? "Connected to Cursor MCP server"
-            : "Not connected to Cursor MCP server");
+            ? "Connected to Figma Bridge"
+            : "Not connected to Figma Bridge");
         connectionStatus.className = `status ${
           isConnected ? "connected" : "disconnected"
         }`;
@@ -295,6 +317,100 @@
         connectButton.disabled = isConnected;
         disconnectButton.disabled = !isConnected;
         portInput.disabled = isConnected;
+        
+        // Show/hide chat UI based on connection status
+        if (isConnected) {
+          chatContainer.classList.remove("hidden");
+        } else {
+          chatContainer.classList.add("hidden");
+          channelInfo.classList.add("hidden");
+        }
+      }
+      
+      // Chat functionality
+      let currentStreamingMessageDiv = null; // Track the current streaming message
+      
+      function addChatMessage(type, message, timestamp = new Date()) {
+        const timeStr = timestamp.toLocaleTimeString();
+        const messageDiv = document.createElement("div");
+        messageDiv.style.marginBottom = "4px";
+        
+        if (type === "user") {
+          messageDiv.innerHTML = `<span style="color: #18a0fb;">[${timeStr}] You:</span> ${message}`;
+        } else if (type === "agent") {
+          messageDiv.innerHTML = `<span style="color: #4ade80;">[${timeStr}] Agent:</span> ${message}`;
+        } else if (type === "system") {
+          messageDiv.innerHTML = `<span style="color: #999;">[${timeStr}] System:</span> ${message}`;
+        } else {
+          messageDiv.innerHTML = `<span style="color: #ff9999;">[${timeStr}] Error:</span> ${message}`;
+        }
+        
+        chatLog.appendChild(messageDiv);
+        chatLog.scrollTop = chatLog.scrollHeight;
+      }
+      
+      function handleStreamingChunk(data) {
+        const chunk = data.chunk || "";
+        
+        if (!currentStreamingMessageDiv) {
+          // Create a new streaming message div
+          const timeStr = new Date().toLocaleTimeString();
+          currentStreamingMessageDiv = document.createElement("div");
+          currentStreamingMessageDiv.style.marginBottom = "4px";
+          currentStreamingMessageDiv.innerHTML = `<span style="color: #4ade80;">[${timeStr}] Agent:</span> <span class="streaming-content">${chunk}</span><span class="cursor">▋</span>`;
+          
+          chatLog.appendChild(currentStreamingMessageDiv);
+        } else {
+          // Append to existing streaming message
+          const contentSpan = currentStreamingMessageDiv.querySelector(".streaming-content");
+          if (contentSpan) {
+            contentSpan.textContent += chunk;
+          }
+        }
+        
+        chatLog.scrollTop = chatLog.scrollHeight;
+      }
+      
+      function finalizeStreamingMessage(finalContent) {
+        if (currentStreamingMessageDiv) {
+          // Remove the cursor and finalize the message
+          const cursorSpan = currentStreamingMessageDiv.querySelector(".cursor");
+          if (cursorSpan) {
+            cursorSpan.remove();
+          }
+          
+          // Update with final content to ensure completeness
+          const contentSpan = currentStreamingMessageDiv.querySelector(".streaming-content");
+          if (contentSpan) {
+            contentSpan.textContent = finalContent;
+          }
+          
+          currentStreamingMessageDiv = null; // Reset for next message
+        }
+      }
+      
+      function sendUserPrompt() {
+        const prompt = promptInput.value.trim();
+        if (!prompt || !state.connected || !state.socket) {
+          return;
+        }
+        
+        // Add user message to chat
+        addChatMessage("user", prompt);
+        
+        // Send user_prompt message
+        const message = {
+          type: "user_prompt",
+          prompt: prompt
+        };
+        
+        state.socket.send(JSON.stringify(message));
+        promptInput.value = "";
+      }
+      
+      function generateChannelId() {
+        // Use fixed channel name for Phase 1 simplicity
+        return 'figma-copilot-default';
       }
 
       // Connect to WebSocket server
@@ -309,16 +425,17 @@
           state.socket = new WebSocket(`ws://localhost:${port}`);
 
           state.socket.onopen = () => {
-            // Generate random channel name
-            const channelName = generateChannelName();
-            console.log("Joining channel:", channelName);
-            state.channel = channelName;
+            // Generate random channel ID for Phase 1 protocol
+            const channelId = generateChannelId();
+            console.log("Joining channel:", channelId);
+            state.channel = channelId;
 
-            // Join the channel using the same format as App.tsx
+            // Send Phase 1 join message
             state.socket.send(
               JSON.stringify({
                 type: "join",
-                channel: channelName.trim(),
+                role: "plugin",
+                channel: channelId
               })
             );
           };
@@ -332,30 +449,59 @@
                 // Successfully joined channel
                 if (data.message && data.message.result) {
                   state.connected = true;
-                  const channelName = data.channel;
+                  const channelId = data.channel;
                   updateConnectionStatus(
                     true,
-                    `Connected to server on port ${port} in channel: <strong>${channelName}</strong>`
+                    `Connected to bridge on port ${port}`
                   );
+                  
+                  // Show channel info
+                  currentChannelSpan.textContent = channelId;
+                  channelInfo.classList.remove("hidden");
+                  
+                  addChatMessage("system", `Connected to channel: ${channelId}`);
 
                   // Notify the plugin code
                   parent.postMessage(
                     {
                       pluginMessage: {
                         type: "notify",
-                        message: `Connected to Cursor MCP server on port ${port} in channel: ${channelName}`,
+                        message: `Connected to Figma Bridge on port ${port} in channel: ${channelId}`,
                       },
                     },
                     "*"
                   );
+                } else if (typeof data.message === "string") {
+                  // Other system messages (like disconnection notices)
+                  addChatMessage("system", data.message);
+                }
+              } else if (data.type === "agent_response_chunk") {
+                // Handle streaming agent response chunks
+                handleStreamingChunk(data);
+              } else if (data.type === "agent_response") {
+                // Handle final agent response or non-streaming response
+                const prompt = data.prompt || "No response";
+                if (data.is_final) {
+                  // This is the final message, update the streaming message if it exists
+                  finalizeStreamingMessage(prompt);
+                } else {
+                  // This is a complete non-streaming response
+                  addChatMessage("agent", prompt);
                 }
               } else if (data.type === "error") {
-                console.error("Error:", data.message);
-                updateConnectionStatus(false, `Error: ${data.message}`);
-                state.socket.close();
+                console.error("Bridge error:", data.message);
+                addChatMessage("error", data.message);
+                if (!state.connected) {
+                  updateConnectionStatus(false, `Error: ${data.message}`);
+                  state.socket.close();
+                }
               }
 
-              handleSocketMessage(data);
+              // Legacy MCP handling (ignore for Phase 1)
+              if (data.type !== "system" && data.type !== "agent_response" && data.type !== "error") {
+                // handleSocketMessage(data);
+                console.debug("Ignoring legacy message type:", data.type);
+              }
             } catch (error) {
               console.error("Error parsing message:", error);
             }
@@ -554,6 +700,15 @@
         updateConnectionStatus(false, "Disconnecting...");
         connectionStatus.className = "status info";
         disconnectFromServer();
+      });
+      
+      // Chat event listeners
+      sendButton.addEventListener("click", sendUserPrompt);
+      
+      promptInput.addEventListener("keypress", (e) => {
+        if (e.key === "Enter") {
+          sendUserPrompt();
+        }
       });
 
       // Function to update progress UI

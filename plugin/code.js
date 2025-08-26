@@ -83,6 +83,39 @@ figma.ui.onmessage = async (msg) => {
         });
       }
       break;
+      
+    // Phase 1: Handle chat messages  
+    case "user_prompt":
+      // Phase 1: Plugin acknowledges user prompt
+      // The agent will handle the actual LLM response
+      console.log("Phase 1 user prompt received:", msg.prompt);
+      figma.notify(`Processing: "${msg.prompt}"`);
+      break;
+      
+    case "agent_response":
+      // Phase 1: Plugin acknowledges agent response
+      // The UI displays the response
+      console.log("Phase 1 agent response received:", msg.prompt);
+      break;
+      
+    // Phase 2+: Tool execution using existing infrastructure
+    case "tool_call":
+      // Reuse existing execute-command infrastructure for Phase 2+
+      try {
+        const result = await handleCommand(msg.command, msg.params);
+        figma.ui.postMessage({
+          type: "tool_response",
+          id: msg.id,
+          result,
+        });
+      } catch (error) {
+        figma.ui.postMessage({
+          type: "tool_response", 
+          id: msg.id,
+          error: error.message || "Error executing command",
+        });
+      }
+      break;
   }
 };
 

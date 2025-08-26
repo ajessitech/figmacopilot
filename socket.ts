@@ -1,3 +1,11 @@
+/**
+ * @deprecated This file is deprecated and will be removed in a future version.
+ * The WebSocket bridge functionality has been moved to bridge/index.ts.
+ * Please use the new bridge implementation instead.
+ * 
+ * This file is kept for backward compatibility only.
+ */
+
 import { Server, ServerWebSocket } from "bun";
 
 // Store clients by channel

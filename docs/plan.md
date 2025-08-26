@@ -97,40 +97,121 @@ docker run --rm -it -p 3055:3055 --name figma-agent-container figma-agent
 
 ---
 
-### **Phase 1: The "Hello, World" Round-Trip**
+### **Phase 1: Advanced Chat with OpenAI Agents SDK** ✅ **COMPLETED**
 
-**Objective:** Prove end-to-end WebSocket connectivity between the Plugin, Bridge, and Agent with a simple chat/echo functionality. This milestone isolates connection issues from tool logic.
+**Objective:** Implement a sophisticated AI-powered chat system using the OpenAI Agents SDK with real-time streaming responses and persistent conversation history.
 
-**1. Bridge (`bridge/index.ts`):**
-*   Refactor `socket.ts` to be a pure message router.
-*   **Logic:**
-    *   Maintain a `Map<channelId, { plugin: WebSocket, agent: WebSocket }>`.
-    *   On connection, expect a `{"type": "join", "role": "plugin" | "agent", "channel": "channelId"}` message.
-    *   Store the WebSocket connection based on its role and channel.
-    *   When a message is received from one role (e.g., `plugin`), forward it to the other role in the same channel.
-    *   Handle disconnections by cleaning up the channel map and notifying the remaining participant.
+#### **What We Actually Built:**
 
-**2. Agent (`backend/main.py`):**
-*   Implement a basic WebSocket client that connects to the bridge (`ws://localhost:3055`).
-*   On connection, it sends the `join` message with `role: "agent"`.
-*   **Logic:** Listen for incoming messages of `type: "user_prompt"`. When one is received, send back a message of `type: "agent_response"` that echoes the original prompt (e.g., `"You said: '...'"`). No LLM or tools are needed yet.
+**1. Bridge (`bridge/index.ts`):** ✅ **IMPLEMENTED**
+*   Complete WebSocket message router supporting multiple message types
+*   **Channel Management:**
+    *   `Map<channelId, { plugin: WebSocket, agent: WebSocket }>` for connection tracking
+    *   Join protocol: `{"type": "join", "role": "plugin" | "agent", "channel": "channelId"}`
+    *   Message forwarding between roles in the same channel
+    *   Graceful disconnection handling and cleanup
+*   **Message Types Supported:**
+    *   `join` - Connection establishment
+    *   `user_prompt` - User messages to agent
+    *   `agent_response` - Complete agent responses  
+    *   `agent_response_chunk` - **NEW**: Real-time streaming chunks
+    *   `tool_call` / `tool_response` - Ready for Phase 2
+    *   `ping` / `pong` - Connection health monitoring
+    *   `system` / `error` - Status and error handling
 
-**3. Plugin (`plugin/ui.html` & `plugin/code.js`):**
-*   **`ui.html`:** Overhaul the UI. Remove all MCP-specific elements. Create a minimal interface:
-    *   An `<input type="text" id="prompt-input">`
-    *   A `<button id="send-button">Send</button>`
-    *   A `<div id="log"></div>` to display messages.
-*   **UI Logic (`<script>`):**
-    *   On connect, send the `join` message with `role: "plugin"` and a unique channel ID.
-    *   On "Send" button click, construct and send a `{"type": "user_prompt", "prompt": "..."}` message.
-    *   The `socket.onmessage` handler should listen for `agent_response` messages and append their content to the `#log` div.
-    *   The `networkAccess` in `manifest.json` must be updated to `ws://localhost:3055`.
+**2. Agent (`backend/main.py`):** ✅ **IMPLEMENTED WITH MAJOR ENHANCEMENTS**
+*   **OpenAI Agents SDK Integration:**
+    *   Using `gpt-4.1-nano` model for optimal performance
+    *   `Agent` class with comprehensive Figma-specific instructions
+    *   `Runner.run_streamed()` for real-time response streaming
+    *   Proper async event loop management for streaming
+*   **SQLiteSession for Persistent Context:**
+    *   Channel-specific conversation history using `SQLiteSession`
+    *   In-memory database for container environments  
+    *   Conversation continuity across messages
+    *   Context-aware responses that reference previous interactions
+*   **Real-time Streaming Implementation:**
+    *   `stream_events()` iteration for live response generation
+    *   Individual word/phrase streaming via `agent_response_chunk` messages
+    *   Complete response finalization with `agent_response`
+    *   Proper error handling and event loop management
+*   **Synchronous Architecture:**
+    *   Eliminated async/await complexity in main logic
+    *   Event loop only for Agents SDK streaming requirements
+    *   Clean WebSocket client using `websocket-client` library
+    *   Robust reconnection logic with exponential backoff
 
-**✅ Success Criteria for Phase 1:**
-*   The developer runs the Docker container.
-*   The user opens the Figma plugin and it successfully connects to the bridge.
-*   The user types "Hello" into the plugin UI and clicks "Send".
-*   The message "You said: 'Hello'" appears in the plugin's log area.
+**3. Plugin (`plugin/ui.html` & `plugin/code.js`):** ✅ **IMPLEMENTED**
+*   **Modern Chat UI:**
+    *   Clean chat interface with message history
+    *   Real-time streaming with visual typing cursor (`▋`)
+    *   Timestamped messages with role-based styling
+    *   Connection status indicators
+*   **Streaming Support:**
+    *   `handleStreamingChunk()` for real-time text accumulation
+    *   `finalizeStreamingMessage()` for completion handling
+    *   Visual feedback during response generation
+*   **WebSocket Management:**
+    *   Automatic connection to `ws://localhost:3055`
+    *   Proper message protocol implementation
+    *   Error handling and reconnection support
+
+#### **Technical Architecture Achievements:**
+
+**🐳 Containerized Development Environment:**
+*   Python 3.11 slim base image for modern language features
+*   Bun runtime for high-performance bridge
+*   Single-container deployment with proper signal handling
+*   Optimized dependency caching and build process
+
+**🚀 Performance Optimizations:**
+*   Real-time streaming for immediate user feedback
+*   Efficient message forwarding with minimal latency
+*   Persistent conversation context without performance overhead
+*   Optimized Docker layers for fast rebuilds
+
+**🧠 AI Integration:**
+*   OpenAI Agents SDK for enterprise-grade agent management
+*   Environment-driven model configuration (`OPENAI_MODEL=gpt-4.1-nano`)
+*   Comprehensive system prompts for Figma-specific assistance
+*   Context-aware responses using SQLiteSession
+
+**✅ Current Success Criteria (Enhanced):**
+*   ✅ Developer runs `./scripts/dev.sh` - single command setup
+*   ✅ Plugin connects automatically to bridge on startup
+*   ✅ User types messages and sees **real-time streaming responses**
+*   ✅ Agent provides **context-aware follow-up responses**
+*   ✅ Conversation history maintained throughout session
+*   ✅ Agent responds as Figma design expert with helpful guidance
+
+#### **Message Flow Example:**
+```
+User: "How do I create a button in Figma?"
+Agent: [Streams in real-time] "To create a button in Figma, you can..."
+
+User: "What about styling it?"  
+Agent: [Remembers context] "For styling the button we just discussed..."
+```
+
+---
+
+### **Channel Coordination**
+
+For Phase 1, both the plugin and agent use a fixed channel name `figma-copilot-default` to ensure they can communicate:
+
+**Agent Channel Selection:**
+- Default: `figma-copilot-default` (hardcoded in `backend/main.py`)
+- Override: Set `FIGMA_CHANNEL` environment variable or use `--channel=<name>` CLI argument
+- Fallback: Auto-generates `agent-{uuid}` if no channel specified
+
+**Plugin Channel Selection:**
+- Uses the same fixed channel: `figma-copilot-default` (hardcoded in `plugin/ui.html`)
+- This ensures both components join the same channel for communication
+
+**Future Improvements:**
+- Phase 2+ will implement dynamic channel coordination
+- Plugin could discover agent channels or vice versa
+- Support for multiple concurrent agent sessions
 
 ---
 

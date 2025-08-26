@@ -1,0 +1,14 @@
+---
+alwaysApply: true
+---
+# Figma Plugin API Best-Practices
+
+These guidelines apply to all JavaScript files inside `plugin/`.
+
+1. **Asynchronous Calls** – Figma API functions that mutate the document (e.g., `figma.createRectangle()`) are synchronous, but operations that query fonts or apply fills may be async. Always `await figma.loadFontAsync` before creating text nodes.
+2. **UI ↔ Worker Messaging** – Use `figma.ui.postMessage` and `figma.ui.onmessage` for worker↔iframe communication. Wrap payloads in the Message Protocol defined in [figma-message-protocol.mdc](mdc:figma-message-protocol.mdc).
+3. **Selection & Node IDs** – Persist references as `node.id` (a string like `123:456`). Retrieve the node with `figma.getNodeById(id)` on subsequent calls.
+4. **Plugin Closure** – Call `figma.closePlugin()` only after all async work and messaging are complete. Long-running agents should **not** close the plugin automatically.
+5. **Network Access** – The plugin can only connect to hosts declared in `manifest.json → networkAccess`. Update this array when changing bridge URLs.
+
+Adhere to these rules to prevent common runtime errors in the Figma sandbox.

@@ -1,0 +1,27 @@
+---
+alwaysApply: true
+---
+# OpenAI Agents SDK Conventions
+
+All Python files in `backend/` leverage the **OpenAI Agents SDK**. Follow these conventions:
+
+1. **Function Tools** – Decorate callable Figma actions with `@function_tool` (import from `agents`).
+   ```python
+   from agents import function_tool
+
+   @function_tool
+   async def create_frame(width: int, height: int) -> str:
+       ...
+   ```
+2. **STREAM First** – All SDK interactions are streamed.
+3. **Tool Metadata** – Provide clear docstrings; they are surfaced to the LLM as tool descriptions.
+4. **Error Surfacing** – Return errors as strings (never raise) so they propagate back to the agent and plugin UI.
+5. **send_command Helper** – Use `figma_communicator.send_command` to dispatch tool RPC over the bridge and await the `tool_response`.
+6. **Agent Loop** – In `main.py`, maintain a long-running event loop that:
+   • Receives `user_prompt` messages  
+   • Passes them to the LLM with available tools  
+   • Executes tool calls emitted by the LLM  
+   • Streams the result back as `agent_response`
+7. **Environment Variables** – Read secrets like `OPENAI_API_KEY` from env vars, never hard-code.
+
+Use these patterns when editing or adding backend agent functionality.

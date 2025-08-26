@@ -1,0 +1,4 @@
+websocket-client==1.6.4
+openai-agents==0.2.8
+python-dotenv
+watchdog==3.0.0

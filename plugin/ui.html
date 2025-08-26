@@ -488,6 +488,24 @@
                   // This is a complete non-streaming response
                   addChatMessage("agent", prompt);
                 }
+              } else if (data.type === "tool_call") {
+                // Handle tool calls from agent (Phase 2+)
+                const receiveTimestamp = new Date().toISOString();
+                console.log(`[${receiveTimestamp}] Received tool_call:`, data);
+                addChatMessage("system", `Executing: ${data.command} (ID: ${data.id})`);
+                
+                // Forward the tool call to the plugin code
+                parent.postMessage(
+                  {
+                    pluginMessage: {
+                      type: "tool_call",
+                      id: data.id,
+                      command: data.command,
+                      params: data.params
+                    },
+                  },
+                  "*"
+                );
               } else if (data.type === "error") {
                 console.error("Bridge error:", data.message);
                 addChatMessage("error", data.message);
@@ -498,7 +516,7 @@
               }
 
               // Legacy MCP handling (ignore for Phase 1)
-              if (data.type !== "system" && data.type !== "agent_response" && data.type !== "error") {
+              if (data.type !== "system" && data.type !== "agent_response" && data.type !== "agent_response_chunk" && data.type !== "error" && data.type !== "tool_call" && data.type !== "tool_response") {
                 // handleSocketMessage(data);
                 console.debug("Ignoring legacy message type:", data.type);
               }
@@ -802,6 +820,29 @@
           case "command-error":
             // Forward the error from plugin code back to WebSocket
             sendErrorResponse(message.id, message.error);
+            break;
+          case "tool_response":
+            // Handle tool responses from plugin code (Phase 2+)
+            const timestamp = new Date().toISOString();
+            console.log(`[${timestamp}] Forwarding tool_response to bridge:`, message);
+            if (state.connected && state.socket) {
+              // Send the tool_response directly to the bridge
+              const toolResponse = {
+                type: "tool_response",
+                id: message.id,
+                result: message.result,
+                error: message.error
+              };
+              state.socket.send(JSON.stringify(toolResponse));
+              console.log(`[${timestamp}] Tool response sent to bridge for ID: ${message.id}`);
+              
+              // Show completion message in chat
+              if (message.error) {
+                addChatMessage("error", `Tool execution failed: ${message.error}`);
+              } else {
+                addChatMessage("system", `Tool execution completed (ID: ${message.id})`);
+              }
+            }
             break;
           case "command_progress":
             // Update UI with progress information

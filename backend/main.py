@@ -7,7 +7,8 @@ import threading
 import time
 import asyncio
 from typing import Dict, Any, Optional
-import websocket
+import websockets
+import json
 from dotenv import load_dotenv
 
 # Load environment variables from .env file
@@ -18,7 +19,11 @@ load_dotenv()
 from agents import Agent, Runner
 from agents.memory import SQLiteSession
 
-# Configure logging
+# Import Phase 2+ tools and communicator
+from figma_communicator import FigmaCommunicator, set_communicator
+from figma_tools import create_frame, create_text, set_fill_color, set_corner_radius
+
+# Configure logging with INFO level (DEBUG was too verbose)
 logging.basicConfig(
     level=logging.INFO,
     format='[%(asctime)s] [agent] [%(levelname)s] %(message)s',
@@ -28,12 +33,16 @@ logger = logging.getLogger(__name__)
 
 class FigmaAgent:
     def __init__(self, bridge_url: str, channel: str, openai_api_key: str, openai_model: str):
-        self.bridge_url = bridge_url
+        self.bridge_url = bridge_url.replace('ws://', 'ws://').replace('wss://', 'wss://')  # Ensure proper protocol
         self.channel = channel
-        self.websocket: Optional[websocket.WebSocket] = None
+        self.websocket: Optional[websockets.WebSocketClientProtocol] = None
         self.running = True
         self.reconnect_delay = 1  # Start with 1 second
         self.max_reconnect_delay = 30  # Max 30 seconds
+        self._keep_alive_task = None  # Keep-alive task for WebSocket
+        
+        # Initialize communicator for Phase 2+ tool calls
+        self.communicator = None
         
         # Initialize Agent using SDK
 
@@ -279,7 +288,8 @@ class FigmaAgent:
         self.agent = Agent(
             name="FigmaCopilot",
             instructions=instructions,
-            model=openai_model
+            model=openai_model,
+            tools=[create_frame, create_text, set_fill_color, set_corner_radius]
         )
         
         # Initialize SQLite session for persistent conversation history
@@ -291,11 +301,11 @@ class FigmaAgent:
         )
         logger.info(f"Initialized SQLite session (in-memory) for channel: {channel}")
         
-    def connect(self) -> bool:
+    async def connect(self) -> bool:
         """Connect to the bridge and join as agent"""
         try:
             logger.info(f"Connecting to bridge at {self.bridge_url}")
-            self.websocket = websocket.create_connection(self.bridge_url)
+            self.websocket = await websockets.connect(self.bridge_url)
             
             # Send join message
             join_message = {
@@ -303,8 +313,23 @@ class FigmaAgent:
                 "role": "agent", 
                 "channel": self.channel
             }
-            self.websocket.send(json.dumps(join_message))
+            await self.websocket.send(json.dumps(join_message))
             logger.info(f"Sent join message for channel: {self.channel}")
+            
+            # Test WebSocket bidirectional communication with a ping
+            ping_message = {"type": "ping"}
+            await self.websocket.send(json.dumps(ping_message))
+            logger.info("🏓 Sent ping message to test WebSocket bidirectional communication")
+            
+            # Start keep-alive mechanism for WebSocket stability
+            self._keep_alive_task = asyncio.create_task(self._websocket_keep_alive())
+            logger.info("💓 Started WebSocket keep-alive mechanism")
+            
+            # Initialize communicator for Phase 2+ tool calls with configurable timeout
+            tool_timeout = float(os.getenv("FIGMA_TOOL_TIMEOUT", "30.0"))
+            self.communicator = FigmaCommunicator(self.websocket, timeout=tool_timeout)
+            set_communicator(self.communicator)
+            logger.info(f"Initialized FigmaCommunicator for tool calls (timeout: {tool_timeout}s)")
             
             # Reset reconnect delay on successful connection
             self.reconnect_delay = 1
@@ -314,22 +339,35 @@ class FigmaAgent:
             logger.error(f"Failed to connect: {e}")
             return False
     
-    def handle_message(self, message: Dict[str, Any]) -> None:
+    async def handle_message(self, message: Dict[str, Any]) -> None:
         """Handle incoming messages from the bridge"""
         msg_type = message.get("type")
         
+        # Debug: Log ALL incoming messages with their types
+        logger.info(f"🔍 Raw message received - Type: '{msg_type}', Keys: {list(message.keys())}")
+        
         if msg_type == "system":
             # Handle system messages (join acks, disconnections, etc.)
-            logger.info(f"System message: {message.get('message')}")
+            logger.info(f"🔧 System message: {message.get('message')}")
+            
+        elif msg_type == "pong":
+            # Handle pong response to our ping
+            logger.info("🏓 Received pong response - WebSocket bidirectional communication WORKING!")
             
         elif msg_type == "user_prompt":
             # Process user prompt with streaming agent
             prompt = message.get("prompt", "")
-            logger.info(f"Received user prompt: {prompt}")
+            logger.info(f"💬 Received user prompt: {prompt}")
             
             try:
-                # Stream response using Agents SDK
-                self.stream_agent_response(prompt)
+                # Stream response using Agents SDK in background to avoid blocking receive loop
+                logger.info("🚀 Starting agent response streaming in background task")
+                task = asyncio.create_task(self.stream_agent_response(prompt))
+                # Store task reference to prevent it from being garbage collected
+                if not hasattr(self, '_background_tasks'):
+                    self._background_tasks = set()
+                self._background_tasks.add(task)
+                task.add_done_callback(self._background_tasks.discard)
                     
             except Exception as e:
                 logger.error(f"Error processing user prompt: {e}")
@@ -339,7 +377,15 @@ class FigmaAgent:
                     "prompt": f"I'm having trouble processing your request right now. Error: {str(e)}"
                 }
                 if self.websocket:
-                    self.websocket.send(json.dumps(error_response))
+                    await self.websocket.send(json.dumps(error_response))
+                
+        elif msg_type == "tool_response":
+            # Handle tool responses from plugin (Phase 2+)
+            logger.info(f"📨 Received tool_response: {message.get('id', 'no-id')}")
+            if self.communicator:
+                self.communicator.handle_tool_response(message)
+            else:
+                logger.warning("Received tool_response but communicator not initialized")
                 
         elif msg_type == "error":
             # Log errors from the bridge
@@ -350,18 +396,11 @@ class FigmaAgent:
             # Ignore unknown message types gracefully
             logger.debug(f"Ignoring unknown message type: {msg_type}")
     
-    def stream_agent_response(self, user_prompt: str) -> None:
-        """Stream response using OpenAI Agents SDK with proper event loop handling"""
+    async def stream_agent_response(self, user_prompt: str) -> None:
+        """Stream response using OpenAI Agents SDK with proper async handling"""
         try:
-            # Create a new event loop for this thread if none exists
-            try:
-                loop = asyncio.get_event_loop()
-            except RuntimeError:
-                loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(loop)
-            
-            # Run the streaming in the event loop
-            loop.run_until_complete(self._stream_response_async(user_prompt))
+            # Run the streaming directly in the current event loop
+            await self._stream_response_async(user_prompt)
                 
         except Exception as e:
             logger.error(f"Agents SDK streaming error: {e}")
@@ -393,7 +432,7 @@ class FigmaAgent:
                     }
                     
                     if self.websocket:
-                        self.websocket.send(json.dumps(partial_response))
+                        await self.websocket.send(json.dumps(partial_response))
         
         # Send final complete response using accumulated text
         final_response = {
@@ -403,33 +442,119 @@ class FigmaAgent:
         }
         
         if self.websocket:
-            self.websocket.send(json.dumps(final_response))
-            logger.info(f"Sent streamed response: {full_response[:100]}...")
+            # Send response asynchronously
+            await self.websocket.send(json.dumps(final_response))
+            logger.info(f"✨ Sent final response with length: {len(full_response)} chars")
+            logger.info(f"✨ Final response content: {full_response}")
+            logger.info(f"✨ Final response JSON: {json.dumps(final_response)}")
     
-    def listen(self) -> None:
+    async def listen(self) -> None:
         """Listen for messages from the bridge"""
         try:
-            while self.running and self.websocket:
+            logger.info("🎧 Starting to listen for messages from bridge")
+            
+            # Create a shutdown event for graceful termination
+            shutdown_event = asyncio.Event()
+            
+            async def shutdown_monitor():
+                """Monitor for shutdown condition"""
+                while self.running and self.websocket:
+                    await asyncio.sleep(0.1)
+                shutdown_event.set()
+            
+            # Start shutdown monitor task
+            shutdown_task = asyncio.create_task(shutdown_monitor())
+            
+            try:
+                while self.running and self.websocket:
+                    try:
+                        # Use select-style waiting: either receive message OR shutdown
+                        receive_task = asyncio.create_task(self.websocket.recv())
+                        shutdown_task_wait = asyncio.create_task(shutdown_event.wait())
+                        
+                        done, pending = await asyncio.wait(
+                            [receive_task, shutdown_task_wait],
+                            return_when=asyncio.FIRST_COMPLETED
+                        )
+                        
+                        # Cancel pending tasks
+                        for task in pending:
+                            task.cancel()
+                            try:
+                                await task
+                            except asyncio.CancelledError:
+                                pass
+                        
+                        # Check if we should shutdown
+                        if shutdown_event.is_set():
+                            logger.info("🛑 Shutdown event received, stopping listen loop")
+                            break
+                            
+                        # Process received message
+                        if receive_task in done:
+                            raw_message = receive_task.result()
+                            if raw_message:
+                                logger.info(f"📡 Raw WebSocket message received: {raw_message[:200]}...")
+                                try:
+                                    message = json.loads(raw_message)
+                                    
+                                    # CRITICAL DEBUG: Log specifically for tool_response messages
+                                    if message.get("type") == "tool_response":
+                                        logger.info(f"🎯 TOOL_RESPONSE DETECTED: ID={message.get('id')}, Keys={list(message.keys())}")
+                                    
+                                    await self.handle_message(message)
+                                except json.JSONDecodeError as e:
+                                    logger.error(f"❌ Failed to decode message: {e}, Raw: {raw_message}")
+                                except Exception as e:
+                                    logger.error(f"❌ Error handling message: {e}")
+                            else:
+                                logger.warning("📡 Received empty WebSocket message")
+                        
+                    except asyncio.CancelledError:
+                        logger.info("🛑 Listen loop cancelled")
+                        break
+            finally:
+                # Clean up shutdown task
+                shutdown_task.cancel()
                 try:
-                    raw_message = self.websocket.recv()
-                    if raw_message:
-                        message = json.loads(raw_message)
-                        self.handle_message(message)
-                except json.JSONDecodeError as e:
-                    logger.error(f"Failed to decode message: {e}")
-                except Exception as e:
-                    logger.error(f"Error handling message: {e}")
+                    await shutdown_task
+                except asyncio.CancelledError:
+                    pass
                     
         except Exception as e:
-            logger.error(f"Error in listen loop: {e}")
+            logger.error(f"❌ Error in listen loop: {e}")
     
-    def run_with_reconnect(self) -> None:
+    async def _websocket_keep_alive(self, interval: int = 30) -> None:
+        """Keep WebSocket connection alive with periodic pings"""
+        try:
+            while self.running and self.websocket:
+                await asyncio.sleep(interval)
+                if self.websocket and not self.websocket.closed:
+                    try:
+                        # Send ping through the WebSocket library's built-in ping
+                        pong_waiter = await self.websocket.ping()
+                        await asyncio.wait_for(pong_waiter, timeout=10)
+                        logger.debug("💓 WebSocket keep-alive ping successful")
+                    except asyncio.TimeoutError:
+                        logger.warning("💔 WebSocket keep-alive ping timed out")
+                        break
+                    except Exception as e:
+                        logger.error(f"💔 WebSocket keep-alive ping failed: {e}")
+                        break
+                else:
+                    break
+        except asyncio.CancelledError:
+            logger.debug("💓 WebSocket keep-alive task cancelled")
+        except Exception as e:
+            logger.error(f"💔 WebSocket keep-alive error: {e}")
+    
+    async def run_with_reconnect(self) -> None:
         """Main loop with reconnection logic"""
         while self.running:
             try:
-                if self.connect():
-                    logger.info("Connected to bridge successfully")
-                    self.listen()
+                if await self.connect():
+                    logger.info("🌉 Connected to bridge successfully")
+                    await self.listen()
                 else:
                     logger.warning("Failed to connect to bridge")
                     
@@ -441,7 +566,7 @@ class FigmaAgent:
             
             if self.running:
                 logger.info(f"Reconnecting in {self.reconnect_delay} seconds...")
-                time.sleep(self.reconnect_delay)
+                await asyncio.sleep(self.reconnect_delay)
                 
                 # Exponential backoff up to max delay
                 self.reconnect_delay = min(self.reconnect_delay * 2, self.max_reconnect_delay)
@@ -451,9 +576,21 @@ class FigmaAgent:
         logger.info("Shutting down agent")
         self.running = False
         
+        # Cancel keep-alive task
+        if self._keep_alive_task and not self._keep_alive_task.done():
+            self._keep_alive_task.cancel()
+            logger.debug("💓 Cancelled WebSocket keep-alive task")
+        
+        # Clean up communicator
+        if self.communicator:
+            self.communicator.cleanup_pending_requests()
+            logger.info("Cleaned up pending tool calls")
+        
         if self.websocket:
             try:
-                self.websocket.close()
+                # For async websockets, we need to await close()
+                # But since this is sync method, just set websocket to None
+                self.websocket = None
             except Exception as e:
                 logger.error(f"Error closing websocket: {e}")
 
@@ -509,7 +646,7 @@ def main():
     signal.signal(signal.SIGINT, signal_handler)
     
     try:
-        agent.run_with_reconnect()
+        asyncio.run(agent.run_with_reconnect())
     except KeyboardInterrupt:
         logger.info("Agent interrupted")
     finally:

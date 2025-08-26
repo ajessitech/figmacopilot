@@ -204,7 +204,8 @@ function handleMessage(ws: ServerWebSocket<unknown>, message: UserPromptMessage 
       from: senderRole, 
       to: targetRole, 
       channel: senderChannel,
-      type: message.type 
+      type: message.type,
+      id: (message as any).id || "no-id"
     });
   } else {
     log("warn", "No target socket for message", { 

@@ -14,6 +14,39 @@ from typing import Dict, Any, Optional
 
 logger = logging.getLogger(__name__)
 
+class ToolExecutionError(Exception):
+    """
+    Specialized exception for tool execution failures.
+    
+    This exception is raised when the Figma plugin returns an error
+    for a tool execution. It helps distinguish between communication
+    errors and actual business logic failures.
+    """
+    
+    def __init__(self, message: str, command: str = None, params: Dict[str, Any] = None):
+        """
+        Initialize the ToolExecutionError with context.
+        
+        Args:
+            message: The error message from the plugin
+            command: The command that failed (optional)
+            params: The parameters that were sent (optional)
+        """
+        self.command = command
+        self.params = params
+        
+        # Create a user-friendly error message
+        if "Parent node does not support children" in message:
+            friendly_message = "❌ Cannot add elements to this node - it doesn't support child elements. Try selecting a frame or group instead."
+        elif "node not found" in message.lower():
+            friendly_message = "❌ The specified element couldn't be found. It may have been deleted or moved."
+        elif "permission" in message.lower() or "access" in message.lower():
+            friendly_message = "❌ Don't have permission to modify this element. Try selecting an unlocked element."
+        else:
+            friendly_message = f"❌ {message}"
+        
+        super().__init__(friendly_message)
+
 class FigmaCommunicator:
     """
     Handles RPC communication with the Figma plugin.
@@ -141,16 +174,18 @@ class FigmaCommunicator:
         if "error" in message:
             error_msg = message["error"]
             logger.error(f"❌ Tool call {request_id} failed after {elapsed:.3f}s: {error_msg}")
+            # Create a specialized exception for tool failures with context
+            tool_error = ToolExecutionError(error_msg)
             # Schedule the exception setting on the event loop
             logger.info(f"🔥 Attempting to set exception on future for {request_id}")
             try:
                 loop = asyncio.get_event_loop()
                 logger.info(f"🔄 Using event loop call_soon_threadsafe for exception")
-                loop.call_soon_threadsafe(future.set_exception, Exception(f"Plugin error: {error_msg}"))
+                loop.call_soon_threadsafe(future.set_exception, tool_error)
             except RuntimeError as e:
                 logger.warning(f"⚠️ No event loop running, using direct exception set: {e}")
                 # Fallback if no event loop is running
-                future.set_exception(Exception(f"Plugin error: {error_msg}"))
+                future.set_exception(tool_error)
         else:
             # Success - return the result
             result = message.get("result", {})

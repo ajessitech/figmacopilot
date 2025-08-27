@@ -1,49 +1,41 @@
 # Figma Copilot - OpenAI Agents SDK Integration
 
-A sophisticated AI-powered Figma plugin that provides real-time streaming chat with persistent conversation history using the OpenAI Agents SDK.
+A sophisticated AI-powered Figma plugin that provides real-time streaming chat with persistent conversation history and direct Figma API control using the OpenAI Agents SDK.
 
 ## 🚀 Features
 
-- **Real-time Streaming Responses** - See AI responses appear word-by-word
-- **Persistent Conversation History** - Context maintained throughout your session
-- **OpenAI Agents SDK Integration** - Enterprise-grade AI agent management
-- **Modern Architecture** - Single-container deployment with high performance
-- **Figma Design Expertise** - Specialized knowledge for design workflows
-
-## 🎯 Current Status: Phase 1 Complete ✅
-
-**What Works Now:**
-- ✅ Real-time streaming AI chat in Figma plugin
-- ✅ Persistent conversation context using SQLiteSession
-- ✅ OpenAI Agents SDK with `gpt-4.1-nano` model
-- ✅ Professional chat UI with typing indicators
-- ✅ Robust WebSocket bridge with message routing
-- ✅ Single-command development environment
-
-**Coming Next (Phase 2):**
-- 🔄 Direct Figma API control (create frames, buttons, etc.)
-- 🔄 Tool execution with visual feedback
-- 🔄 Composite operations (e.g., "create a login form")
+- **Real-time Streaming Responses** - See AI responses appear word-by-word.
+- **Persistent Conversation History** - Context maintained throughout your session using an in-memory SQLite database.
+- **Direct Figma API Control** - Instruct the agent to perform actions like creating shapes, changing styles, and manipulating layers.
+- **OpenAI Agents SDK Integration** - Enterprise-grade AI agent management with `gpt-4.1-nano` (or a user-defined model).
+- **Modern Architecture** - Single-container deployment with a high-performance Bun-based WebSocket bridge.
+- **Robust Tooling** - An extensive set of tools for interacting with the Figma canvas.
 
 ## 🏗️ Architecture
 
+The system consists of three main components communicating over WebSockets:
+
 ```
-┌─────────────────┐    WebSocket     ┌─────────────────┐    Process Call    ┌─────────────────┐
-│   Figma Plugin  │ ◄────────────► │   Bun Bridge    │ ◄─────────────► │  Python Agent  │
-│   (UI + Code)   │                │  (index.ts)     │                 │   (main.py)     │
-└─────────────────┘                └─────────────────┘                 └─────────────────┘
-        │                                   │                                   │
-        ├─ Real-time UI                     ├─ Message Router                   ├─ OpenAI Agents SDK
-        ├─ Streaming Support               ├─ Channel Management               ├─ SQLiteSession
-        └─ Connection Handling             └─ Protocol Validation              └─ gpt-4.1-nano
+┌─────────────────┐    WebSocket     ┌─────────────────┐    WebSocket     ┌─────────────────┐
+│   Figma Plugin  │ ◄────────────► │   Bun Bridge    │ ◄───────────► │  Python Agent   │
+│   (UI + Code)   │                │  (index.ts)     │               │    (main.py)    │
+└─────────────────┘                └─────────────────┘               └─────────────────┘
+        │                                   │                                 │
+        ├─ Real-time UI & Chat              ├─ Message Router                 ├─ OpenAI Agents SDK
+        ├─ Executes Figma API Tools         ├─ Channel Management             ├─ SQLiteSession (Memory)
+        └─ Connection Handling              └─ Protocol Validation            └─ Tool Definitions
 ```
+
+-   **Figma Plugin (`plugin/`)**: The frontend running in the Figma sandbox. It provides the chat UI and executes tool calls received from the agent.
+-   **Bun Bridge (`bridge/`)**: A high-performance WebSocket server that routes messages between the plugin and the agent based on a channel system.
+-   **Python Agent (`backend/`)**: The "brain" of the operation. It uses the OpenAI Agents SDK to understand user prompts, orchestrate tool calls, and generate responses.
 
 ## 🚀 Quick Start
 
 ### Prerequisites
 - Docker Desktop
 - Figma Desktop App
-- OpenAI API Key
+- An OpenAI API Key
 
 ### 1. Clone and Setup
 ```bash
@@ -52,181 +44,124 @@ cd figmacopilot
 ```
 
 ### 2. Configure Environment
-Create `backend/.env`:
+Create a `.env` file inside the `backend/` directory:
 ```bash
+# backend/.env
 OPENAI_API_KEY=your_openai_api_key_here
-OPENAI_MODEL=gpt-4.1-nano
+OPENAI_MODEL=gpt-4.1-nano # Or any other model like gpt-4o-mini
 ```
 
 ### 3. Start Development Environment
+A single script builds the Docker container and starts all services.
 ```bash
 ./scripts/dev.sh
 ```
-
-This single command:
-- Builds optimized Docker container
-- Starts bridge on `localhost:3055`
-- Launches Python agent with Agents SDK
-- Shows real-time logs from both services
+This command will:
+- Build the `figma-agent` Docker image.
+- Start the container, exposing the bridge on `localhost:3055`.
+- Launch both the Bun bridge and the Python agent, showing logs from both.
 
 ### 4. Install Figma Plugin
-1. Open Figma Desktop
-2. Go to **Plugins** → **Development** → **Import plugin from manifest**
-3. Select `plugin/manifest.json` from this project
-4. Run the "Figma Copilot" plugin
+1.  Open the Figma Desktop App.
+2.  Go to **Plugins** → **Development** → **Import plugin from manifest...**
+3.  Select the `plugin/manifest.json` file from this project.
+4.  Run the "Figma Copilot" plugin. It should automatically connect to the bridge.
 
 ### 5. Start Chatting!
-- Plugin automatically connects to bridge
-- Type messages to get streaming AI responses
-- Ask follow-up questions to test conversation memory
+You can now interact with the agent through the Figma plugin UI. Ask it to perform tasks or ask questions about your design.
 
-## 💬 Example Conversations
+## 🛠️ Available Tools
 
+The agent has access to a wide range of tools to interact with your Figma file. You can ask it to:
+
+-   **Create Objects**: `create_frame`, `create_rectangle`, `create_text`, `create_component_instance`.
+-   **Read Information**: `get_document_info`, `get_selection`, `get_node_info`, `get_local_components`.
+-   **Modify Properties**: `set_fill_color`, `set_stroke_color`, `set_corner_radius`, `set_text_content`.
+-   **Layout**: `set_layout_mode`, `set_padding`, `set_item_spacing`, `set_axis_align`.
+-   **And many more...** A full list of tools can be found in `backend/figma_tools.py` and are handled in `plugin/code.js`.
+
+## WebSocket Message Protocol
+
+Communication between the Plugin, Bridge, and Agent happens via a JSON-based WebSocket protocol.
+
+### Connection
+- A client (plugin or agent) connects to the bridge at `ws://localhost:3055`.
+- It sends a `join` message to enter a specific channel.
+- Each channel can have one `plugin` and one `agent`.
+
+**Join Message:**
+```json
+{
+  "type": "join",
+  "role": "plugin" | "agent",
+  "channel": "figma-copilot-default"
+}
 ```
-You: "How do I create a button in Figma?"
-Agent: [Streams in real-time] "To create a button in Figma, you can use the Rectangle tool and then style it. Here's the process:
 
-1. Select the Rectangle tool (R)
-2. Draw your button shape
-3. Add a fill color in the properties panel
-4. Set corner radius for rounded corners
-5. Add text on top using the Text tool (T)
+### Communication Flow
+- **User Input**: The plugin sends a `user_prompt` message.
+- **Agent Response**: The agent streams back the response using `agent_response_chunk` messages for real-time feedback, followed by a final `agent_response` with `is_final: true`.
+- **Tool Usage**:
+    1. The agent sends a `tool_call` message to the plugin.
+    2. The plugin executes the corresponding Figma API function.
+    3. The plugin sends the result back with a `tool_response` message, including the original `id`.
 
-Would you like me to walk through styling options or explain how to make it interactive?"
-
-You: "What about making it blue?"
-Agent: [Remembers context] "For the button we just discussed, here's how to make it blue:
-
-1. Select your rectangle shape
-2. In the Fill section of the properties panel
-3. Click the color swatch
-4. Choose your blue color or enter a hex code like #007AFF
-5. You can also adjust opacity if needed
-
-The blue will give your button a modern, clickable appearance. Would you like suggestions for complementary colors for the text?"
+**Tool Call Example (Agent → Plugin):**
+```json
+{
+  "type": "tool_call",
+  "id": "uuid-123",
+  "command": "create_rectangle",
+  "params": { "width": 200, "height": 100 }
+}
 ```
 
-## 🛠️ Technology Stack
+**Tool Response Example (Plugin → Agent):**
+```json
+{
+  "type": "tool_response",
+  "id": "uuid-123",
+  "result": { "id": "123:456", "name": "Rectangle", ... }
+}
+```
 
-### Backend Agent
-- **Python 3.11** - Modern language features
-- **OpenAI Agents SDK** - Enterprise AI agent framework
-- **SQLiteSession** - Persistent conversation memory
-- **websocket-client** - Reliable WebSocket connectivity
+##  troubleshooting
 
-### Bridge
-- **Bun** - High-performance JavaScript runtime
-- **TypeScript** - Type-safe message routing
-- **WebSocket Server** - Real-time bidirectional communication
+### Plugin Cannot Connect to Bridge
+- **Symptom**: Plugin UI shows "Not connected to Figma Bridge".
+- **Solution**:
+    1.  Ensure the Docker container is running: `docker ps | grep figma-agent-container`.
+    2.  If not running, start it with `./scripts/dev.sh`.
+    3.  Check that port `3055` is not being used by another application: `lsof -i :3055`.
+    4.  Check the container logs for errors: `docker logs figma-agent-container`.
 
-### Frontend
-- **Figma Plugin API** - Direct integration with Figma
-- **Modern JavaScript** - Streaming UI and real-time updates
-- **CSS3** - Professional chat interface
+### Messages Not Being Delivered
+- **Symptom**: You send a message from the plugin but get no response.
+- **Solution**:
+    1.  Check the bridge logs (`docker logs figma-agent-container`) for "Message forwarded".
+    2.  Ensure both the plugin and agent have successfully joined the same channel. The default is `figma-copilot-default`.
 
-### Infrastructure
-- **Docker** - Single-container deployment
-- **Python 3.11 Slim** - Optimized base image
-- **Multi-stage Build** - Efficient dependency management
+### Docker Build Failures
+- **Symptom**: The `./scripts/dev.sh` command fails during the `docker build` step.
+- **Solution**:
+    1.  Try a clean build: `docker build --no-cache -t figma-agent .`
+    2.  On ARM-based Macs (M1/M2/M3), you might need to specify the platform if you encounter issues: `docker build --platform linux/amd64 -t figma-agent .`. However, the current setup should work on ARM64.
 
 ## 📁 Project Structure
-
 ```
 figmacopilot/
-├── backend/                    # Python Agent (OpenAI Agents SDK)
-│   ├── main.py                # Main agent with streaming & SQLiteSession
-│   └── requirements.txt       # Python dependencies
-├── bridge/                    # Bun WebSocket Bridge
-│   ├── index.ts              # Message router with protocol validation
-│   ├── package.json          # Bun dependencies
-│   └── tsconfig.json         # TypeScript configuration
-├── plugin/                   # Figma Plugin
-│   ├── ui.html              # Modern chat UI with streaming support
-│   ├── code.js              # Plugin runtime code
-│   └── manifest.json        # Plugin configuration
-├── scripts/                 # Development tools
-│   └── dev.sh              # One-command development setup
-├── docs/                   # Documentation
-│   ├── plan.md            # Implementation roadmap
-│   └── phase1-implementation.md  # Technical details
-├── Dockerfile             # Single-container deployment
+├── backend/              # Python Agent (OpenAI Agents SDK)
+│   ├── main.py           # Main agent logic
+│   ├── figma_tools.py    # Tool definitions
+│   └── requirements.txt  # Python dependencies
+├── bridge/               # Bun WebSocket Bridge
+│   └── index.ts          # Message router
+├── plugin/               # Figma Plugin
+│   ├── ui.html           # Plugin UI
+│   ├── code.js           # Plugin logic (executes tools)
+│   └── manifest.json     # Plugin manifest
+├── scripts/
+│   └── dev.sh            # Development startup script
+├── Dockerfile            # Single-container deployment
 └── README.md             # This file
 ```
-
-## 🔧 Development
-
-### Building and Running
-```bash
-# Development mode (with logs)
-./scripts/dev.sh
-
-# Production build
-docker build -t figma-agent .
-docker run -p 3055:3055 figma-agent
-```
-
-### Environment Variables
-```bash
-# Required
-OPENAI_API_KEY=your_key_here
-
-# Optional
-OPENAI_MODEL=gpt-4.1-nano        # AI model (default: gpt-4o-mini)
-BRIDGE_URL=ws://localhost:3055   # Bridge connection
-FIGMA_CHANNEL=your-channel-name  # Channel isolation
-```
-
-### Debugging
-- Bridge logs: Real-time WebSocket message routing
-- Agent logs: OpenAI API calls and streaming events  
-- Plugin logs: Available in browser dev tools
-
-## 📖 Documentation
-
-- **[Implementation Plan](docs/plan.md)** - Phased development roadmap
-- **[Phase 1 Technical Guide](docs/phase1-implementation.md)** - Detailed implementation
-- **[Message Protocol](docs/message-protocol.md)** - WebSocket message specifications
-
-## 🔮 Roadmap
-
-### ✅ Phase 1: Advanced Chat (COMPLETED)
-- Real-time streaming responses
-- Persistent conversation history with SQLiteSession
-- OpenAI Agents SDK integration
-- Professional chat UI
-
-### 🔄 Phase 2: Direct Figma Control (IN PROGRESS)
-- `@function_tool` decorated Figma API functions
-- Tool execution with visual feedback
-- Basic operations: create frames, shapes, text
-- RPC protocol for plugin ↔ agent communication
-
-### 🔄 Phase 3: Composite Operations (PLANNED)
-- High-level tools: "create button", "design login form"
-- Multi-step operations with progress tracking
-- Smart defaults and style consistency
-- Context-aware design suggestions
-
-### 🔄 Future Enhancements
-- Vector search for design patterns
-- Integration with design systems
-- Collaborative features for teams
-- Advanced visual AI capabilities
-
-## 🤝 Contributing
-
-1. Fork the repository
-2. Create a feature branch
-3. Make your changes
-4. Test with `./scripts/dev.sh`
-5. Submit a pull request
-
-## 📄 License
-
-MIT License - see LICENSE file for details
-
----
-
-**Ready to revolutionize your Figma workflow with AI?** 🎨✨
-
-Start with `./scripts/dev.sh` and begin chatting with your AI design assistant!

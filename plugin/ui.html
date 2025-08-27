@@ -1,276 +1,453 @@
 <!DOCTYPE html>
-<html>
+<html lang="en">
   <head>
     <meta charset="utf-8" />
-    <title>Cursor MCP Plugin</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Fray - Figma Copilot</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap" rel="stylesheet" />
     <style>
-      body {
-        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
-          Helvetica, Arial, sans-serif;
+      * {
         margin: 0;
-        padding: 20px;
-        color: #e0e0e0;
-        background-color: #1e1e1e;
+        padding: 0;
+        box-sizing: border-box;
       }
-      .container {
+
+      body {
+        font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+        font-size: 14px;
+        color: #333;
+        background: #f9fafb;
+        height: 100vh;
         display: flex;
         flex-direction: column;
-        height: 100%;
+        overflow: hidden;
       }
-      h1 {
-        font-size: 16px;
-        font-weight: 600;
-        margin-bottom: 10px;
-        color: #ffffff;
+
+      /* Chat Container */
+      .chat-container {
+        flex: 1;
+        overflow-y: auto;
+        overflow-x: hidden;
+        padding: 20px 24px;
+        display: flex;
+        flex-direction: column;
+        background: #f9fafb;
+        min-height: 0;
+        scroll-behavior: smooth;
       }
-      h2 {
-        font-size: 14px;
-        font-weight: 600;
-        margin-top: 20px;
-        margin-bottom: 8px;
-        color: #ffffff;
+
+      .chat-container::-webkit-scrollbar {
+        width: 6px;
       }
-      button {
-        background-color: #18a0fb;
-        border: none;
+
+      .chat-container::-webkit-scrollbar-track {
+        background: transparent;
+      }
+
+      .chat-container::-webkit-scrollbar-thumb {
+        background: #ccc;
+        border-radius: 3px;
+      }
+
+      /* Messages */
+      .message {
+        display: flex;
+        animation: slideIn 0.3s ease-out;
+        margin-bottom: 20px;
+      }
+
+      @keyframes slideIn {
+        from {
+          opacity: 0;
+          transform: translateY(10px);
+        }
+        to {
+          opacity: 1;
+          transform: translateY(0);
+        }
+      }
+
+      .message.user {
+        justify-content: flex-end;
+      }
+
+      .message.assistant {
+        justify-content: flex-start;
+      }
+
+      .message-content {
+        line-height: 1.6;
+        word-wrap: break-word;
+      }
+
+      /* User messages with bubble */
+      .message.user .message-content {
+        max-width: 75%;
+        padding: 10px 14px;
+        background: rgb(255, 120, 71);
         color: white;
-        padding: 8px 12px;
-        border-radius: 6px;
-        margin-top: 8px;
-        margin-bottom: 8px;
-        cursor: pointer;
-        font-size: 14px;
-        transition: background-color 0.2s;
+        border-radius: 18px;
+        border-bottom-right-radius: 4px;
+        box-shadow: 0 1px 2px rgba(0, 0, 0, 0.1);
       }
-      button:hover {
-        background-color: #0d8ee0;
-      }
-      button.secondary {
-        background-color: #3d3d3d;
-        color: #e0e0e0;
-      }
-      button.secondary:hover {
-        background-color: #4d4d4d;
-      }
-      button:disabled {
-        background-color: #333333;
-        color: #666666;
-        cursor: not-allowed;
-      }
-      input {
-        border: 1px solid #444444;
-        border-radius: 4px;
-        padding: 8px;
-        margin-bottom: 12px;
-        font-size: 14px;
+
+      /* Assistant messages without bubble - full width */
+      .message.assistant .message-content {
         width: 100%;
-        box-sizing: border-box;
-        background-color: #2d2d2d;
-        color: #e0e0e0;
+        color: #1f2937;
+        padding: 0;
+        background: transparent;
+        border: none;
+        box-shadow: none;
       }
-      label {
-        display: block;
-        margin-bottom: 4px;
-        font-size: 12px;
-        font-weight: 500;
-        color: #cccccc;
-      }
-      .status {
-        margin-top: 16px;
-        padding: 12px;
-        border-radius: 6px;
-        font-size: 14px;
-      }
-      .status.connected {
-        background-color: #1a472a;
-        color: #4ade80;
-      }
-      .status.disconnected {
-        background-color: #471a1a;
-        color: #ff9999;
-      }
-      .status.info {
-        background-color: #1a3147;
-        color: #66b3ff;
-      }
-      .section {
-        margin-bottom: 24px;
-      }
-      .hidden {
-        display: none;
-      }
-      .logo {
-        width: 50px;
-        height: 50px;
-      }
-      .header {
+
+      /* Status indicator - minimal inline system style */
+      .status-indicator {
         display: flex;
         align-items: center;
-        margin-bottom: 16px;
+        gap: 8px;
+        padding: 6px 0;
+        margin: 8px 0;
+        background: transparent;
+        border-radius: 0;
+        box-shadow: none;
+        animation: slideInFade 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+        transition: opacity 0.2s ease;
       }
-      .header-text {
-        margin-left: 12px;
+
+      .status-indicator .spinner {
+        width: 14px;
+        height: 14px;
+        min-width: 14px;
+        border: 2px solid rgba(255, 120, 71, 0.25);
+        border-top-color: rgb(255, 120, 71);
+        border-radius: 50%;
+        animation: spin 0.9s cubic-bezier(0.4, 0, 0.6, 1) infinite;
       }
-      .header-text h1 {
-        margin: 0;
-        font-size: 16px;
-      }
-      .header-text p {
-        margin: 4px 0 0 0;
-        font-size: 12px;
-        color: #999999;
-      }
-      .tabs {
-        display: flex;
-        border-bottom: 1px solid #444444;
-        margin-bottom: 16px;
-      }
-      .tab {
-        padding: 8px 16px;
-        cursor: pointer;
+
+      .status-indicator .status-text {
+        color: #6b7280;
         font-size: 14px;
         font-weight: 500;
-        color: #999999;
+        letter-spacing: -0.01em;
+        animation: fadeIn 0.3s ease-out;
+        display: flex;
+        align-items: center;
+        gap: 6px;
       }
-      .tab.active {
-        border-bottom: 2px solid #18a0fb;
-        color: #18a0fb;
+
+      .status-indicator .status-icon {
+        font-size: 16px;
+        line-height: 1;
       }
-      .tab-content {
+
+      @keyframes slideInFade {
+        from {
+          opacity: 0;
+          transform: translateY(8px);
+        }
+        to {
+          opacity: 1;
+          transform: translateY(0);
+        }
+      }
+
+      @keyframes fadeIn {
+        from { opacity: 0; }
+        to { opacity: 1; }
+      }
+
+      @keyframes spin {
+        0% { transform: rotate(0deg); }
+        100% { transform: rotate(360deg); }
+      }
+
+      /* Typing indicator */
+      .typing-indicator {
+        display: inline-flex;
+        align-items: center;
+        gap: 4px;
+        padding: 8px 12px;
+      }
+
+      .typing-indicator span {
+        width: 8px;
+        height: 8px;
+        border-radius: 50%;
+        background: rgb(255, 120, 71);
+        animation: typing 1.4s infinite;
+      }
+
+      .typing-indicator span:nth-child(2) {
+        animation-delay: 0.2s;
+      }
+
+      .typing-indicator span:nth-child(3) {
+        animation-delay: 0.4s;
+      }
+
+      @keyframes typing {
+        0%, 60%, 100% {
+          transform: translateY(0);
+          opacity: 0.7;
+        }
+        30% {
+          transform: translateY(-10px);
+          opacity: 1;
+        }
+      }
+
+      /* Welcome Message */
+      .welcome-message {
+        text-align: center;
+        padding: 40px 20px;
+        color: #666;
+      }
+
+      .welcome-message h2 {
+        color: #333;
+        margin-bottom: 12px;
+        font-size: 20px;
+      }
+
+      .welcome-message p {
+        line-height: 1.6;
+        margin-bottom: 16px;
+      }
+
+      .tips {
+        background: white;
+        border: 1px solid #e5e5e5;
+        border-radius: 8px;
+        padding: 12px;
+        text-align: left;
+        font-size: 13px;
+      }
+
+      .tips h3 {
+        color: rgb(255, 120, 71);
+        margin-bottom: 10px;
+        font-size: 15px;
+        font-weight: 600;
+      }
+
+      .tips ul {
+        list-style: none;
+        padding-left: 0;
+      }
+
+      .tips li {
+        padding: 4px 0;
+        padding-left: 20px;
+        position: relative;
+      }
+
+      .tips li::before {
+        content: '✨';
+        position: absolute;
+        left: 0;
+      }
+
+      /* Input Area - Floating Style */
+      .input-area {
+        padding: 16px 24px 20px 24px;
+        background: #f9fafb;
+        flex-shrink: 0;
+      }
+
+      .input-container {
+        max-width: 100%;
+        margin: 0 auto;
+        position: relative;
+      }
+
+      .input-wrapper {
+        position: relative;
+        background: #ffffff;
+        border: 1px solid rgba(0, 0, 0, 0.08);
+        border-radius: 24px;
+        box-shadow: 0 1px 3px rgba(0, 0, 0, 0.06);
+        transition: all 0.2s ease;
+      }
+
+      .input-wrapper:hover {
+        border-color: rgba(0, 0, 0, 0.12);
+        box-shadow: 0 2px 6px rgba(0, 0, 0, 0.08);
+      }
+
+      .input-wrapper:focus-within {
+        border-color: rgba(255, 120, 71, 0.5);
+        box-shadow: 0 2px 8px rgba(255, 120, 71, 0.1);
+      }
+
+      .input-field {
+        width: 100%;
+        min-height: 52px;
+        max-height: 200px;
+        padding: 14px 52px 14px 20px;
+        border: none;
+        background: transparent;
+        resize: none;
+        font-family: inherit;
+        font-size: 15px;
+        line-height: 1.6;
+        color: #1f2937;
+        overflow-y: auto;
+      }
+
+      .input-field:focus {
+        outline: none;
+      }
+
+      .input-field::placeholder {
+        color: #9ca3af;
+        font-weight: 400;
+        font-size: 15px;
+      }
+
+      .input-field:disabled {
+        background: transparent;
+        cursor: not-allowed;
+        color: #9ca3af;
+      }
+
+      .input-field::-webkit-scrollbar {
+        width: 6px;
+      }
+
+      .input-field::-webkit-scrollbar-track {
+        background: transparent;
+      }
+
+      .input-field::-webkit-scrollbar-thumb {
+        background: #d1d5db;
+        border-radius: 3px;
+      }
+
+      .input-field::-webkit-scrollbar-thumb:hover {
+        background: #9ca3af;
+      }
+
+      .send-button {
+        position: absolute;
+        right: 10px;
+        bottom: 50%;
+        transform: translateY(50%) scale(0.9);
+        width: 36px;
+        height: 36px;
+        border: none;
+        background: rgb(255, 120, 71);
+        color: white;
+        border-radius: 50%;
+        cursor: pointer;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        transition: all 0.2s ease;
+        opacity: 0;
+        pointer-events: none;
+      }
+
+      .input-wrapper.has-content .send-button {
+        opacity: 1;
+        transform: translateY(50%) scale(1);
+        pointer-events: auto;
+      }
+
+      .send-button:hover:not(:disabled) {
+        background: rgb(235, 100, 51);
+        transform: translateY(50%) scale(1.1);
+      }
+
+      .send-button:active:not(:disabled) {
+        transform: translateY(50%) scale(0.95);
+      }
+
+      .send-button:disabled {
+        opacity: 0.3;
+        cursor: not-allowed;
+        pointer-events: none;
+      }
+
+      .send-button svg {
+        width: 18px;
+        height: 18px;
+        stroke-width: 2.5;
+      }
+
+      .char-counter {
+        position: absolute;
+        right: 48px;
+        bottom: 14px;
+        font-size: 11px;
+        color: #9ca3af;
         display: none;
       }
-      .tab-content.active {
+
+      .input-wrapper.show-counter .char-counter {
         display: block;
       }
-      .link {
-        color: #18a0fb;
-        text-decoration: none;
-        cursor: pointer;
+
+      .error-banner {
+        background: #ffebee;
+        color: #c62828;
+        padding: 12px;
+        border-radius: 6px;
+        margin: 16px;
+        margin-bottom: 0;
+        display: none;
+        animation: slideIn 0.3s ease-out;
+        flex-shrink: 0;
       }
-      .link:hover {
-        text-decoration: underline;
-      }
-      .header-logo {
-        padding: 16px;
-        border-radius: 16px;
-        background-color: #333;
-      }
-      .header-logo-image {
-        width: 24px;
-        height: 24px;
-        object-fit: contain;
-      }
-      /* Progress styles */
-      .operation-complete {
-        color: #4ade80;
-      }
-      .operation-error {
-        color: #ff9999;
+
+      .error-banner.show {
+        display: block;
       }
     </style>
   </head>
   <body>
-    <div class="container">
-      <div class="header">
-        <div class="header-logo">
-          <img
-            class="header-logo-image"
-            src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAADwAAAA8CAMAAAANIilAAAAABGdBTUEAALGPC/xhBQAAAAFzUkdCAK7OHOkAAAAJcEhZcwAAEJwAABCcASbNOjQAAAB1UExURUdwTP////////////////39/f////////////////////////////7+/v////////////39/f////////////////////////////////////////////////////39/fn5+ejo6P///+rq6uXl5f////Ly8gf4a04AAAAkdFJOUwAOdkZCfz04zIgbT0pkIagnm7C9b6C2LWqSxBMyB11W2Ovsy3D12ZYAAALtSURBVEjHndcJt6ogEADgXNAUcWlxSQVN3/3/P/EBAgJpWdM9p5ue78xANE2n05vIUduffgvn1oA0bX+hvRc1DYjTPHe+tiGIoqhx4zTNq/y72lMURQtmqasuPc4dAmgwfWuZrqquiw8uNnC5BRJT3YXhIZ7Xris0oLjlmOrArz7VHpOb6wpNee0ITVMHvvd25/qgvtFwla8dpxV7xnTi7dbed7iuTY16lZoV7iXQb3cqRgjVgoviKTZSUw2719pbD2OEVu5yjnqeOpZ75lMMobVzfUcwC6lrofGJpdb3jGtj6TkkNKRWtXMsU+ciNdfQUwe+zZ7/vo1CYYgv39G/kShMS6mHL+g8F96K2Uqi52E6j3DFnsc4uR/hMwugYd9bOLoeSTvPE1yx4/sLh9B9fKbziHVM3z/G+dKb5wdKdysxsNCc4+2l/yk7EnrOVhwGBt9auqJ0t9gR13C4cl77bdil88SPuK9jxrXksHjab48Mwo+4ha3aSbZJ52JpC4GFbY7OdsVst4Lls/mKZe1y6fXTonS3RFsIN7C5dAJsO+WiI21jbd8xesFEtoUdLLjH+qGNJ9WRuj3MOOQNycaV6khvsLc0MxsD2Uq7bhcHuBZh4rFdujjT1c6GkaXtszCx3sW3MRRfNjwiI7EjGjGfFjZwUgM9CuNggqRVXz+vOGDTBOCP5UnHE73ghjK1jYNlEIma9UnHBb/qdkvq1MSQjk4yCvGk4UneQylLbWAIio3I1t26q4sNTuM01tqQe9+My5pYv9wk8Ypv92w7JpXYulGoD8aJ3C/bUUp8tW5EuTa2oXI7ZGLzahZYE0l03QqZWI8Lfh1lw+zxEoNIrF8Dm/NQT8rzgz+WP/oQmL6Ud4pud/4DZzMWPKjXZfJufOyiVzzKV4/609yelDaWiZsDc6+DSwOLxNqxeD/6Ah3zf674+Kyf3xUeDi3WDFIKzCpOv/5phB4MD+cs/OWXVdych/GBf/xJd4pL9+1i/wOElMO5v/co4wAAAABJRU5ErkJggg=="
-          />
-        </div>
-        <div class="header-text">
-          <h1>Cursor Talk To Figma Plugin</h1>
-          <p>Connect Figma to Cursor AI using MCP</p>
-        </div>
-      </div>
+    <div class="error-banner" id="errorBanner"></div>
 
-      <div class="tabs">
-        <div id="tab-connection" class="tab active">Connection</div>
-        <div id="tab-about" class="tab">About</div>
-      </div>
-
-      <div id="content-connection" class="tab-content active">
-        <div class="section">
-          <label for="port">WebSocket Server Port</label>
-          <div style="display: flex; gap: 8px">
-            <input
-              type="number"
-              id="port"
-              placeholder="3055"
-              value="3055"
-              min="1024"
-              max="65535"
-            />
-            <button id="btn-connect" class="primary">Connect</button>
+    <div class="chat-container" id="chatContainer">
+      <div class="welcome-message" id="welcomeMessage">
+        <h2>Welcome to Fray! 👋</h2>
+        <p>I'm your AI-powered design assistant. Select elements in your Figma design and ask me questions about them.</p>
+        <div class="tips">
+          <h3>Try asking:</h3>
+          <ul>
+            <li>What are the dimensions of this frame?</li>
+            <li>What colors are used in this selection?</li>
+            <li>Describe the visual hierarchy</li>
+            <li>What font is being used here?</li>
+          </ul>
           </div>
         </div>
+      </div>
 
-        <div id="connection-status" class="status disconnected">
-          Not connected to Figma Bridge
-        </div>
-        
-        <div id="channel-info" class="status info hidden">
-          Channel: <span id="current-channel">None</span>
-        </div>
-
-        <div class="section">
-          <button id="btn-disconnect" class="secondary" disabled>
-            Disconnect
+    <div class="input-area">
+      <div class="input-container">
+        <div class="input-wrapper" id="inputWrapper">
+          <textarea 
+            class="input-field" 
+            id="inputField" 
+            placeholder="Message Fray..."
+            rows="1"
+            disabled
+          ></textarea>
+          <button class="send-button" id="sendButton" disabled>
+            <svg fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" d="M4.5 12h15m0 0l-6.75-6.75M19.5 12l-6.75 6.75"></path>
+            </svg>
           </button>
-        </div>
-        
-        <!-- Phase 1 Chat UI -->
-        <div id="chat-container" class="section hidden">
-          <h2>Chat with Agent</h2>
-          <div id="chat-log" style="height: 200px; overflow-y: auto; background: #2d2d2d; border: 1px solid #444; border-radius: 4px; padding: 8px; margin-bottom: 8px; font-family: monospace; font-size: 12px; line-height: 1.4;">
-            <div style="color: #999;">Chat ready. Type a message below...</div>
-          </div>
-          <div style="display: flex; gap: 8px;">
-            <input type="text" id="prompt-input" placeholder="Type your message..." style="flex: 1;">
-            <button id="send-button">Send</button>
-          </div>
-        </div>
-        
-        <!-- Add Progress Bar Section -->
-        <div id="progress-container" class="section hidden">
-          <h2>Operation Progress</h2>
-          <div id="progress-message">No operation in progress</div>
-          <div style="width: 100%; background-color: #444; border-radius: 4px; margin-top: 8px;">
-            <div id="progress-bar" style="width: 0%; height: 8px; background-color: #18a0fb; border-radius: 4px; transition: width 0.3s;"></div>
-          </div>
-          <div style="display: flex; justify-content: space-between; margin-top: 4px; font-size: 12px;">
-            <div id="progress-status">Not started</div>
-            <div id="progress-percentage">0%</div>
-          </div>
-        </div>
-      </div>
-
-      <div id="content-about" class="tab-content">
-        <div class="section">
-          <h2>About Cursor Talk To Figma Plugin</h2>
-          <p>
-            This plugin allows Cursor AI to communicate with Figma, enabling
-            AI-assisted design operations.
-            <a
-              class="link"
-              onclick="window.open(`https://github.com/grab/cursor-talk-to-figma-mcp`, '_blank')"
-              >Github</a
-            >
-          </p>
-          <p>Version: 1.0.0</p>
-
-          <h2>How to Use</h2>
-          <ol>
-            <li>Make sure the MCP server is running in Cursor</li>
-            <li>Connect to the server using the port number (default: 3055)</li>
-            <li>Once connected, you can interact with Figma through Cursor</li>
-          </ol>
+          <span class="char-counter" id="charCounter"></span>
         </div>
       </div>
     </div>
 
     <script>
-      // WebSocket connection state
+      // Connection state
       const state = {
         connected: false,
         socket: null,
@@ -279,577 +456,454 @@
         channel: null,
       };
 
-      // UI Elements
-      const portInput = document.getElementById("port");
-      const connectButton = document.getElementById("btn-connect");
-      const disconnectButton = document.getElementById("btn-disconnect");
-      const connectionStatus = document.getElementById("connection-status");
-      const channelInfo = document.getElementById("channel-info");
-      const currentChannelSpan = document.getElementById("current-channel");
-      const chatContainer = document.getElementById("chat-container");
-      const chatLog = document.getElementById("chat-log");
-      const promptInput = document.getElementById("prompt-input");
-      const sendButton = document.getElementById("send-button");
+      // Reconnect/heartbeat config
+      const HEARTBEAT_INTERVAL = 30000; // 30s
+      const BASE_RECONNECT_DELAY = 3000; // 3s
+      const MAX_RECONNECT_DELAY = 60000; // 60s
+      const MAX_RECONNECT_ATTEMPTS = 7;
+      let heartbeatTimer = null;
+      let reconnectAttempts = 0;
+      let reconnectTimer = null;
+      let intentionalClose = false;
+      let isConnecting = false;
 
-      // Tabs
-      const tabs = document.querySelectorAll(".tab");
-      const tabContents = document.querySelectorAll(".tab-content");
+      // DOM Elements
+      let chatContainer, inputField, sendButton, errorBanner, welcomeMessage, inputWrapper, charCounter;
 
-      // Add UI elements for progress tracking
-      const progressContainer = document.getElementById("progress-container");
-      const progressBar = document.getElementById("progress-bar");
-      const progressMessage = document.getElementById("progress-message");
-      const progressStatus = document.getElementById("progress-status");
-      const progressPercentage = document.getElementById("progress-percentage");
+      // Streaming state
+      let currentStreamingContentEl = null;
+      let acceptingStream = false;
 
-      // Initialize UI
-      function updateConnectionStatus(isConnected, message) {
-        state.connected = isConnected;
-        connectionStatus.innerHTML =
-          message ||
-          (isConnected
-            ? "Connected to Figma Bridge"
-            : "Not connected to Figma Bridge");
-        connectionStatus.className = `status ${
-          isConnected ? "connected" : "disconnected"
-        }`;
+      // Status messages
+      const statusMessages = {
+        thinking: ['Thinking...', 'Working on it...', 'Considering your request...', 'Processing your idea...'],
+        generating: ['Writing response...', 'Crafting your answer...', 'Putting it together...', 'Almost there...']
+      };
 
-        connectButton.disabled = isConnected;
-        disconnectButton.disabled = !isConnected;
-        portInput.disabled = isConnected;
-        
-        // Show/hide chat UI based on connection status
-        if (isConnected) {
-          chatContainer.classList.remove("hidden");
-        } else {
-          chatContainer.classList.add("hidden");
-          channelInfo.classList.add("hidden");
-        }
+      function getStatusMessage(category) {
+        const messages = statusMessages[category];
+        if (!messages) return 'Processing...';
+        return messages[Math.floor(Math.random() * messages.length)];
       }
-      
-      // Chat functionality
-      let currentStreamingMessageDiv = null; // Track the current streaming message
-      
-      function addChatMessage(type, message, timestamp = new Date()) {
-        const timeStr = timestamp.toLocaleTimeString();
-        const messageDiv = document.createElement("div");
-        messageDiv.style.marginBottom = "4px";
-        
-        if (type === "user") {
-          messageDiv.innerHTML = `<span style="color: #18a0fb;">[${timeStr}] You:</span> ${message}`;
-        } else if (type === "agent") {
-          messageDiv.innerHTML = `<span style="color: #4ade80;">[${timeStr}] Agent:</span> ${message}`;
-        } else if (type === "system") {
-          messageDiv.innerHTML = `<span style="color: #999;">[${timeStr}] System:</span> ${message}`;
-        } else {
-          messageDiv.innerHTML = `<span style="color: #ff9999;">[${timeStr}] Error:</span> ${message}`;
-        }
-        
-        chatLog.appendChild(messageDiv);
-        chatLog.scrollTop = chatLog.scrollHeight;
+
+      document.addEventListener('DOMContentLoaded', () => {
+        chatContainer = document.getElementById('chatContainer');
+        inputField = document.getElementById('inputField');
+        sendButton = document.getElementById('sendButton');
+        errorBanner = document.getElementById('errorBanner');
+        welcomeMessage = document.getElementById('welcomeMessage');
+        inputWrapper = document.getElementById('inputWrapper');
+        charCounter = document.getElementById('charCounter');
+
+        // Events
+        sendButton.addEventListener('click', handleSend);
+        inputField.addEventListener('keydown', handleKeyDown);
+        inputField.addEventListener('input', handleInputChange);
+
+        // Auto-connect on load
+        updateConnectingUI('Connecting to bridge...');
+        connectToServer(state.serverPort);
+        // Close socket on UI unload to avoid stale sessions
+        window.addEventListener('beforeunload', () => cleanupConnection('unload'));
+      });
+
+      // UI helpers
+      function addMessage(type, content) {
+        const messageDiv = document.createElement('div');
+        messageDiv.className = 'message ' + (type === 'user' ? 'user' : 'assistant');
+
+        const contentDiv = document.createElement('div');
+        contentDiv.className = 'message-content';
+        contentDiv.textContent = content || '';
+
+        messageDiv.appendChild(contentDiv);
+        chatContainer.appendChild(messageDiv);
+        chatContainer.scrollTop = chatContainer.scrollHeight;
+        return contentDiv;
       }
-      
-      function handleStreamingChunk(data) {
-        const chunk = data.chunk || "";
-        
-        if (!currentStreamingMessageDiv) {
-          // Create a new streaming message div
-          const timeStr = new Date().toLocaleTimeString();
-          currentStreamingMessageDiv = document.createElement("div");
-          currentStreamingMessageDiv.style.marginBottom = "4px";
-          currentStreamingMessageDiv.innerHTML = `<span style="color: #4ade80;">[${timeStr}] Agent:</span> <span class="streaming-content">${chunk}</span><span class="cursor">▋</span>`;
-          
-          chatLog.appendChild(currentStreamingMessageDiv);
-        } else {
-          // Append to existing streaming message
-          const contentSpan = currentStreamingMessageDiv.querySelector(".streaming-content");
-          if (contentSpan) {
-            contentSpan.textContent += chunk;
-          }
-        }
-        
-        chatLog.scrollTop = chatLog.scrollHeight;
+
+      function showStatusIndicator(text = 'Processing...') {
+        removeStatusIndicator(true);
+        const statusDiv = document.createElement('div');
+        statusDiv.className = 'status-indicator';
+        statusDiv.id = 'statusIndicator';
+
+        const spinner = document.createElement('div');
+        spinner.className = 'spinner';
+        const statusText = document.createElement('div');
+        statusText.className = 'status-text';
+        statusText.textContent = text;
+
+        statusDiv.appendChild(spinner);
+        statusDiv.appendChild(statusText);
+        chatContainer.appendChild(statusDiv);
+        chatContainer.scrollTop = chatContainer.scrollHeight;
       }
-      
-      function finalizeStreamingMessage(finalContent) {
-        if (currentStreamingMessageDiv) {
-          // Remove the cursor and finalize the message
-          const cursorSpan = currentStreamingMessageDiv.querySelector(".cursor");
-          if (cursorSpan) {
-            cursorSpan.remove();
-          }
-          
-          // Update with final content to ensure completeness
-          const contentSpan = currentStreamingMessageDiv.querySelector(".streaming-content");
-          if (contentSpan) {
-            contentSpan.textContent = finalContent;
-          }
-          
-          currentStreamingMessageDiv = null; // Reset for next message
-        }
+
+      function updateStatusText(text) {
+        const statusIndicator = document.getElementById('statusIndicator');
+        if (!statusIndicator) return;
+        const statusText = statusIndicator.querySelector('.status-text');
+        if (!statusText) return;
+        statusText.style.opacity = '0';
+        statusText.style.transition = 'opacity 0.15s ease-out';
+        setTimeout(() => {
+          statusText.textContent = text;
+          statusText.style.opacity = '1';
+          statusText.style.transition = 'opacity 0.2s ease-in';
+        }, 150);
       }
-      
-      function sendUserPrompt() {
-        const prompt = promptInput.value.trim();
-        if (!prompt || !state.connected || !state.socket) {
+
+      function removeStatusIndicator(immediate = false) {
+        const el = document.getElementById('statusIndicator');
+        if (!el) return;
+        if (immediate) {
+          el.remove();
           return;
         }
-        
-        // Add user message to chat
-        addChatMessage("user", prompt);
-        
-        // Send user_prompt message
-        const message = {
-          type: "user_prompt",
-          prompt: prompt
-        };
-        
-        state.socket.send(JSON.stringify(message));
-        promptInput.value = "";
+        el.style.opacity = '0';
+        el.style.transition = 'opacity 0.2s ease-out';
+        setTimeout(() => el.remove(), 200);
       }
-      
+
+      function showError(message) {
+        errorBanner.textContent = message;
+        errorBanner.classList.add('show');
+      }
+
+      function hideError() {
+        errorBanner.classList.remove('show');
+      }
+
+      function enableInput() {
+        inputField.disabled = false;
+        sendButton.disabled = false;
+        inputField.placeholder = 'Message Fray...';
+        inputField.focus();
+      }
+
+      function disableInput(placeholder = 'Connecting to server...') {
+        inputField.disabled = true;
+        sendButton.disabled = true;
+        inputField.placeholder = placeholder;
+        inputWrapper.classList.remove('has-content');
+      }
+
+      function updateConnectingUI(text = 'Connecting to bridge...') {
+        disableInput(text);
+        // Do not render a separate status line to avoid duplication with input placeholder
+        removeStatusIndicator(true);
+      }
+
+      // Input behaviors
+      function handleInputChange() {
+        const text = inputField.value.trim();
+        autoResizeTextarea();
+        if (text.length > 0) {
+          inputWrapper.classList.add('has-content');
+        } else {
+          inputWrapper.classList.remove('has-content');
+        }
+        if (text.length > 500) {
+          inputWrapper.classList.add('show-counter');
+          charCounter.textContent = `${text.length}/2000`;
+        } else {
+          inputWrapper.classList.remove('show-counter');
+        }
+      }
+
+      function handleKeyDown(event) {
+        if (event.key === 'Enter' && !event.shiftKey) {
+          event.preventDefault();
+          handleSend();
+        }
+      }
+
+      function autoResizeTextarea() {
+        inputField.style.height = '52px';
+        const newHeight = Math.min(inputField.scrollHeight, 200);
+        inputField.style.height = newHeight + 'px';
+      }
+
+      function handleSend() {
+        const text = inputField.value.trim();
+        if (!text || !state.connected || !state.socket) return;
+
+        addMessage('user', text);
+        inputField.value = '';
+        autoResizeTextarea();
+        inputWrapper.classList.remove('has-content');
+        inputWrapper.classList.remove('show-counter');
+
+        if (welcomeMessage) welcomeMessage.style.display = 'none';
+
+        // Begin accepting a new stream for this prompt
+        acceptingStream = true;
+        currentStreamingContentEl = null;
+
+        // Send to bridge
+        state.socket.send(JSON.stringify({ type: 'user_prompt', prompt: text }));
+
+        // Show thinking status until streaming begins
+        showStatusIndicator(getStatusMessage('thinking'));
+      }
+
+      // Bridge/WebSocket
       function generateChannelId() {
-        // Use fixed channel name for Phase 1 simplicity
         return 'figma-copilot-default';
       }
 
-      // Connect to WebSocket server
-      async function connectToServer(port) {
+      function connectToServer(port) {
         try {
-          if (state.connected && state.socket) {
-            updateConnectionStatus(true, "Already connected to server");
+          // Prevent duplicate connections or overlapping attempts
+          if (isConnecting) return;
+          if (state.socket && (state.socket.readyState === WebSocket.OPEN || state.socket.readyState === WebSocket.CONNECTING)) {
             return;
           }
-
+          isConnecting = true;
+          intentionalClose = false;
           state.serverPort = port;
-          state.socket = new WebSocket(`ws://localhost:${port}`);
+          const ws = new WebSocket(`ws://localhost:${port}`);
+          state.socket = ws;
 
-          state.socket.onopen = () => {
-            // Generate random channel ID for Phase 1 protocol
+          ws.onopen = () => {
+            if (state.socket !== ws) return; // stale socket
             const channelId = generateChannelId();
-            console.log("Joining channel:", channelId);
             state.channel = channelId;
-
-            // Send Phase 1 join message
-            state.socket.send(
-              JSON.stringify({
-                type: "join",
-                role: "plugin",
-                channel: channelId
-              })
-            );
+            ws.send(JSON.stringify({ type: 'join', role: 'plugin', channel: channelId }));
           };
 
-          state.socket.onmessage = (event) => {
+          ws.onmessage = (event) => {
+            if (state.socket !== ws) return; // stale socket
             try {
               const data = JSON.parse(event.data);
-              console.log("Received message:", data);
-
-              if (data.type === "system") {
-                // Successfully joined channel
+              if (data.type === 'system') {
                 if (data.message && data.message.result) {
                   state.connected = true;
-                  const channelId = data.channel;
-                  updateConnectionStatus(
-                    true,
-                    `Connected to bridge on port ${port}`
-                  );
-                  
-                  // Show channel info
-                  currentChannelSpan.textContent = channelId;
-                  channelInfo.classList.remove("hidden");
-                  
-                  addChatMessage("system", `Connected to channel: ${channelId}`);
-
-                  // Notify the plugin code
-                  parent.postMessage(
-                    {
-                      pluginMessage: {
-                        type: "notify",
-                        message: `Connected to Figma Bridge on port ${port} in channel: ${channelId}`,
-                      },
-                    },
-                    "*"
-                  );
-                } else if (typeof data.message === "string") {
-                  // Other system messages (like disconnection notices)
-                  addChatMessage("system", data.message);
+                  reconnectAttempts = 0;
+                  if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
+                  startHeartbeat();
+                  hideError();
+                  removeStatusIndicator();
+                  enableInput();
+                  isConnecting = false;
+                  // Reset any orphaned stream state on fresh handshake
+                  acceptingStream = false;
+                  currentStreamingContentEl = null;
+                } else if (typeof data.message === 'string') {
+                  addMessage('assistant', data.message);
                 }
-              } else if (data.type === "agent_response_chunk") {
-                // Handle streaming agent response chunks
-                handleStreamingChunk(data);
-              } else if (data.type === "agent_response") {
-                // Handle final agent response or non-streaming response
-                const prompt = data.prompt || "No response";
+              } else if (data.type === 'agent_response_chunk') {
+                if (!acceptingStream) {
+                  // Ignore stale chunks from a previous session/request
+                  return;
+                }
+                removeStatusIndicator(true);
+                if (!currentStreamingContentEl) {
+                  currentStreamingContentEl = addMessage('assistant', '');
+                }
+                currentStreamingContentEl.textContent += data.chunk || '';
+                chatContainer.scrollTop = chatContainer.scrollHeight;
+              } else if (data.type === 'agent_response') {
+                if (!acceptingStream) {
+                  // Ignore stray responses not tied to the current prompt
+                  return;
+                }
+                const text = data.prompt || '';
                 if (data.is_final) {
-                  // This is the final message, update the streaming message if it exists
-                  finalizeStreamingMessage(prompt);
+                  if (currentStreamingContentEl) {
+                    currentStreamingContentEl.textContent = text;
+                    currentStreamingContentEl = null;
+                  }
+                  acceptingStream = false;
+                  removeStatusIndicator(true);
                 } else {
-                  // This is a complete non-streaming response
-                  addChatMessage("agent", prompt);
+                  addMessage('assistant', text);
                 }
-              } else if (data.type === "tool_call") {
-                // Handle tool calls from agent (Phase 2+)
-                const receiveTimestamp = new Date().toISOString();
-                console.log(`[${receiveTimestamp}] Received tool_call:`, data);
-                addChatMessage("system", `Executing: ${data.command} (ID: ${data.id})`);
-                
-                // Forward the tool call to the plugin code
-                parent.postMessage(
-                  {
-                    pluginMessage: {
-                      type: "tool_call",
-                      id: data.id,
-                      command: data.command,
-                      params: data.params
-                    },
-                  },
-                  "*"
-                );
-              } else if (data.type === "error") {
-                console.error("Bridge error:", data.message);
-                addChatMessage("error", data.message);
+              } else if (data.type === 'tool_call') {
+                if (!acceptingStream) {
+                  // Ignore tool calls initiated by a previous session/request
+                  return;
+                }
+                const ts = new Date().toISOString();
+                console.log(`[${ts}] tool_call`, data);
+                addMessage('assistant', `Executing: ${data.command} (ID: ${data.id})`);
+                parent.postMessage({ pluginMessage: { type: 'tool_call', id: data.id, command: data.command, params: data.params } }, '*');
+              } else if (data.type === 'error') {
+                showError(data.message || 'Bridge error');
                 if (!state.connected) {
-                  updateConnectionStatus(false, `Error: ${data.message}`);
-                  state.socket.close();
+                  scheduleReconnect();
                 }
               }
-
-              // Legacy MCP handling (ignore for Phase 1)
-              if (data.type !== "system" && data.type !== "agent_response" && data.type !== "agent_response_chunk" && data.type !== "error" && data.type !== "tool_call" && data.type !== "tool_response") {
-                // handleSocketMessage(data);
-                console.debug("Ignoring legacy message type:", data.type);
-              }
-            } catch (error) {
-              console.error("Error parsing message:", error);
+            } catch (err) {
+              console.error('Message parse error', err);
             }
           };
 
-          state.socket.onclose = () => {
+          ws.onclose = () => {
+            if (state.socket !== ws) return; // stale socket
             state.connected = false;
             state.socket = null;
-            updateConnectionStatus(false, "Disconnected from server");
+            isConnecting = false;
+            stopHeartbeat();
+            acceptingStream = false;
+            currentStreamingContentEl = null;
+            removeStatusIndicator(true);
+            if (!intentionalClose) {
+              scheduleReconnect();
+            }
           };
 
-          state.socket.onerror = (error) => {
-            console.error("WebSocket error:", error);
-            updateConnectionStatus(false, "Connection error");
+          ws.onerror = (error) => {
+            if (state.socket !== ws) return; // stale socket
+            console.error('WebSocket error:', error);
             state.connected = false;
             state.socket = null;
+            isConnecting = false;
+            stopHeartbeat();
+            scheduleReconnect();
           };
         } catch (error) {
-          console.error("Connection error:", error);
-          updateConnectionStatus(
-            false,
-            `Connection error: ${error.message || "Unknown error"}`
-          );
+          console.error('Connection error:', error);
+          scheduleReconnect(error.message);
         }
       }
 
-      // Disconnect from websocket server
-      function disconnectFromServer() {
-        if (state.socket) {
-          state.socket.close();
-          state.socket = null;
-          state.connected = false;
-          updateConnectionStatus(false, "Disconnected from server");
-        }
+      function getReconnectDelay(attempt) {
+        return Math.min(BASE_RECONNECT_DELAY * Math.pow(2, Math.max(0, attempt - 1)), MAX_RECONNECT_DELAY);
       }
 
-      // Handle messages from the WebSocket
-      async function handleSocketMessage(payload) {
-        const data = payload.message;
-        console.log("handleSocketMessage", data);
-
-        // If it's a response to a previous request
-        if (data.id && state.pendingRequests.has(data.id)) {
-          const { resolve, reject } = state.pendingRequests.get(data.id);
-          state.pendingRequests.delete(data.id);
-
-          if (data.error) {
-            reject(new Error(data.error));
-          } else {
-            resolve(data.result);
-          }
+      function scheduleReconnect(errMessage) {
+        if (state.connected) return;
+        if (reconnectAttempts >= MAX_RECONNECT_ATTEMPTS) {
+          showError(`Unable to connect to server after ${MAX_RECONNECT_ATTEMPTS} attempts`);
+          updateConnectingUI('Unable to connect. Please try again later.');
           return;
         }
+        reconnectAttempts += 1;
+        const delay = getReconnectDelay(reconnectAttempts);
+        const seconds = Math.round(delay / 1000);
+        if (errMessage) {
+          showError(`Connection error: ${errMessage}`);
+        }
+        updateConnectingUI(`Reconnecting… (${seconds}s)`);
+        isConnecting = true;
+        if (reconnectTimer) clearTimeout(reconnectTimer);
+        reconnectTimer = setTimeout(() => {
+          connectToServer(state.serverPort);
+        }, delay);
+      }
 
-        // If it's a new command
-        if (data.command) {
+      function startHeartbeat() {
+        stopHeartbeat();
+        heartbeatTimer = setInterval(() => {
           try {
-            // Send the command to the plugin code
-            parent.postMessage(
-              {
-                pluginMessage: {
-                  type: "execute-command",
-                  id: data.id,
-                  command: data.command,
-                  params: data.params,
-                },
-              },
-              "*"
-            );
-          } catch (error) {
-            // Send error back to WebSocket
-            sendErrorResponse(
-              data.id,
-              error.message || "Error executing command"
-            );
+            if (state.connected && state.socket && state.socket.readyState === WebSocket.OPEN) {
+              // Send a lightweight no-op message to keep the connection active in some environments
+              state.socket.send(JSON.stringify({ type: 'ping', t: Date.now() }));
+            }
+          } catch (e) {
+            // If sending fails, trigger a reconnect path
+            console.warn('Heartbeat send failed', e);
+            try { state.socket && state.socket.close(); } catch (_) {}
           }
+        }, HEARTBEAT_INTERVAL);
+      }
+
+      function stopHeartbeat() {
+        if (heartbeatTimer) {
+          clearInterval(heartbeatTimer);
+          heartbeatTimer = null;
         }
       }
-
-      // Send a command to the WebSocket server
-      async function sendCommand(command, params) {
-        return new Promise((resolve, reject) => {
-          if (!state.connected || !state.socket) {
-            reject(new Error("Not connected to server"));
-            return;
-          }
-
-          const id = generateId();
-          state.pendingRequests.set(id, { resolve, reject });
-
-          state.socket.send(
-            JSON.stringify({
-              id,
-              type: "message",
-              channel: state.channel,
-              message: {
-                id,
-                command,
-                params,
-              },
-            })
-          );
-
-          // Set timeout to reject the promise after 30 seconds
-          setTimeout(() => {
-            if (state.pendingRequests.has(id)) {
-              state.pendingRequests.delete(id);
-              reject(new Error("Request timed out"));
-            }
-          }, 30000);
-        });
+      function cleanupConnection(reason = 'cleanup') {
+        intentionalClose = true;
+        if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
+        stopHeartbeat();
+        try { state.socket && state.socket.close(); } catch (_) {}
+        state.socket = null;
+        state.connected = false;
+        acceptingStream = false;
+        currentStreamingContentEl = null;
       }
 
-      // Send success response back to WebSocket
+      // Command/Tool plumbing retained
       function sendSuccessResponse(id, result) {
-        if (!state.connected || !state.socket) {
-          console.error("Cannot send response: socket not connected");
-          return;
-        }
-
-        state.socket.send(
-          JSON.stringify({
-            id,
-            type: "message",
-            channel: state.channel,
-            message: {
-              id,
-              result,
-            },
-          })
-        );
+        if (!state.connected || !state.socket) return;
+        state.socket.send(JSON.stringify({ id, type: 'message', channel: state.channel, message: { id, result } }));
       }
 
-      // Send error response back to WebSocket
       function sendErrorResponse(id, errorMessage) {
-        if (!state.connected || !state.socket) {
-          console.error("Cannot send error response: socket not connected");
-          return;
-        }
-
-        state.socket.send(
-          JSON.stringify({
-            id,
-            type: "message",
-            channel: state.channel,
-            message: {
-              id,
-              error: errorMessage,
-              result: {}
-            },
-          })
-        );
+        if (!state.connected || !state.socket) return;
+        state.socket.send(JSON.stringify({ id, type: 'message', channel: state.channel, message: { id, error: errorMessage, result: {} } }));
       }
 
-      // Helper to generate unique IDs
-      function generateId() {
-        return (
-          Date.now().toString(36) + Math.random().toString(36).substr(2, 5)
-        );
-      }
-
-      // Add this function after the generateId() function
-      function generateChannelName() {
-        const characters = "abcdefghijklmnopqrstuvwxyz0123456789";
-        let result = "";
-        for (let i = 0; i < 8; i++) {
-          result += characters.charAt(
-            Math.floor(Math.random() * characters.length)
-          );
-        }
-        return result;
-      }
-
-      // Tab switching
-      tabs.forEach((tab) => {
-        tab.addEventListener("click", () => {
-          tabs.forEach((t) => t.classList.remove("active"));
-          tabContents.forEach((c) => c.classList.remove("active"));
-
-          tab.classList.add("active");
-          const contentId = "content-" + tab.id.split("-")[1];
-          document.getElementById(contentId).classList.add("active");
-        });
-      });
-
-      // Connect to server
-      connectButton.addEventListener("click", () => {
-        const port = parseInt(portInput.value, 10) || 3055;
-        updateConnectionStatus(false, "Connecting...");
-        connectionStatus.className = "status info";
-        connectToServer(port);
-      });
-
-      // Disconnect from server
-      disconnectButton.addEventListener("click", () => {
-        updateConnectionStatus(false, "Disconnecting...");
-        connectionStatus.className = "status info";
-        disconnectFromServer();
-      });
-      
-      // Chat event listeners
-      sendButton.addEventListener("click", sendUserPrompt);
-      
-      promptInput.addEventListener("keypress", (e) => {
-        if (e.key === "Enter") {
-          sendUserPrompt();
-        }
-      });
-
-      // Function to update progress UI
-      function updateProgressUI(progressData) {
-        // Show progress container if hidden
-        progressContainer.classList.remove("hidden");
-        
-        // Update progress bar
-        const progress = progressData.progress || 0;
-        progressBar.style.width = `${progress}%`;
-        progressPercentage.textContent = `${progress}%`;
-        
-        // Update message
-        progressMessage.textContent = progressData.message || "Operation in progress";
-        
-        // Update status text based on operation state
-        if (progressData.status === 'started') {
-          progressStatus.textContent = "Started";
-          progressStatus.className = "";
-        } else if (progressData.status === 'in_progress') {
-          progressStatus.textContent = "In Progress";
-          progressStatus.className = "";
-        } else if (progressData.status === 'completed') {
-          progressStatus.textContent = "Completed";
-          progressStatus.className = "operation-complete";
-          
-          // Hide progress container after 5 seconds
-          setTimeout(() => {
-            progressContainer.classList.add("hidden");
-          }, 5000);
-        } else if (progressData.status === 'error') {
-          progressStatus.textContent = "Error";
-          progressStatus.className = "operation-error";
-        }
-      }
-
-      // Send operation progress update to server
       function sendProgressUpdateToServer(progressData) {
-        if (!state.connected || !state.socket) {
-          console.error("Cannot send progress update: socket not connected");
-          return;
-        }
-        
-        console.log("Sending progress update to server:", progressData);
-        
-        state.socket.send(
-          JSON.stringify({
-            id: progressData.commandId,
-            type: "progress_update",
-            channel: state.channel,
-            message: {
-              id: progressData.commandId,
-              type: "progress_update",
-              data: progressData
-            }
-          })
-        );
-      }
-      
-      // Reset progress UI
-      function resetProgressUI() {
-        progressContainer.classList.add("hidden");
-        progressBar.style.width = "0%";
-        progressMessage.textContent = "No operation in progress";
-        progressStatus.textContent = "Not started";
-        progressStatus.className = "";
-        progressPercentage.textContent = "0%";
+        if (!state.connected || !state.socket) return;
+        state.socket.send(JSON.stringify({ id: progressData.commandId, type: 'progress_update', channel: state.channel, message: { id: progressData.commandId, type: 'progress_update', data: progressData } }));
       }
 
-      // Listen for messages from the plugin code
+      // Receive messages from plugin code
       window.onmessage = (event) => {
         const message = event.data.pluginMessage;
         if (!message) return;
-
-        console.log("Received message from plugin:", message);
-
         switch (message.type) {
-          case "connection-status":
-            updateConnectionStatus(message.connected, message.message);
+          case 'connection-status': {
+            if (message.connected) {
+              hideError();
+              removeStatusIndicator();
+              enableInput();
+            } else {
+              updateConnectingUI();
+            }
             break;
-          case "auto-connect":
-            connectButton.click();
+          }
+          case 'auto-connect': {
+            // Guard to avoid duplicate connections if already open/connecting
+            if (state.socket && (state.socket.readyState === WebSocket.OPEN || state.socket.readyState === WebSocket.CONNECTING)) {
             break;
-          case "auto-disconnect":
-            disconnectButton.click();
+            }
+            if (isConnecting) break;
+            updateConnectingUI();
+            connectToServer(state.serverPort);
             break;
-          case "command-result":
-            // Forward the result from plugin code back to WebSocket
+          }
+          case 'auto-disconnect': {
+            cleanupConnection('manual');
+            break;
+          }
+          case 'command-result': {
             sendSuccessResponse(message.id, message.result);
             break;
-          case "command-error":
-            // Forward the error from plugin code back to WebSocket
+          }
+          case 'command-error': {
             sendErrorResponse(message.id, message.error);
             break;
-          case "tool_response":
-            // Handle tool responses from plugin code (Phase 2+)
-            const timestamp = new Date().toISOString();
-            console.log(`[${timestamp}] Forwarding tool_response to bridge:`, message);
+          }
+          case 'tool_response': {
+            const ts = new Date().toISOString();
+            console.log(`[${ts}] tool_response`, message);
             if (state.connected && state.socket) {
-              // Send the tool_response directly to the bridge
-              const toolResponse = {
-                type: "tool_response",
-                id: message.id,
-                result: message.result,
-                error: message.error
-              };
+              const toolResponse = { type: 'tool_response', id: message.id, result: message.result, error: message.error };
               state.socket.send(JSON.stringify(toolResponse));
-              console.log(`[${timestamp}] Tool response sent to bridge for ID: ${message.id}`);
-              
-              // Show completion message in chat
               if (message.error) {
-                addChatMessage("error", `Tool execution failed: ${message.error}`);
+                showError(`Tool failed: ${message.error}`);
               } else {
-                addChatMessage("system", `Tool execution completed (ID: ${message.id})`);
+                addMessage('assistant', `Tool completed (ID: ${message.id})`);
               }
             }
             break;
-          case "command_progress":
-            // Update UI with progress information
-            updateProgressUI(message);
-            // Forward progress update to server
+          }
+          case 'command_progress': {
+            // Map progress to status indicator
+            const text = message.message || 'Operation in progress';
+            showStatusIndicator(text);
             sendProgressUpdateToServer(message);
+            if (message.status === 'completed') {
+              setTimeout(() => removeStatusIndicator(), 600);
+            }
             break;
+          }
         }
       };
     </script>

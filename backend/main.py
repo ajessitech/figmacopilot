@@ -21,7 +21,32 @@ from agents.memory import SQLiteSession
 
 # Import Phase 2+ tools and communicator
 from figma_communicator import FigmaCommunicator, set_communicator
-from figma_tools import create_frame, create_text, set_fill_color, set_corner_radius
+from figma_tools import (
+    # Core node operations
+    get_document_info, get_selection, get_node_info, get_nodes_info,
+    # Creation tools
+    create_frame, create_rectangle, create_text,
+    # Styling tools
+    set_fill_color, set_stroke_color, set_corner_radius,
+    # Layout tools
+    set_layout_mode, set_padding, set_axis_align, set_layout_sizing, set_item_spacing,
+    # Node manipulation
+    move_node, resize_node, delete_node, clone_node, delete_multiple_nodes,
+    # Text tools
+    set_text_content, scan_text_nodes, set_multiple_text_contents,
+    # Component tools
+    get_local_components, create_component_instance,
+    # Instance tools
+    get_instance_overrides, set_instance_overrides,
+    # Annotation tools
+    get_annotations, set_annotation, set_multiple_annotations,
+    # Analysis tools
+    read_my_design, scan_nodes_by_types, get_reactions,
+    # Connection tools
+    set_default_connector, create_connections,
+    # Utility tools
+    export_node_as_image, get_styles
+)
 
 # Configure logging with INFO level (DEBUG was too verbose)
 logging.basicConfig(
@@ -40,6 +65,8 @@ class FigmaAgent:
         self.reconnect_delay = 1  # Start with 1 second
         self.max_reconnect_delay = 30  # Max 30 seconds
         self._keep_alive_task = None  # Keep-alive task for WebSocket
+        self._background_tasks: set[asyncio.Task] = set()  # Track streaming tasks for cancellation
+        self._cancel_lock = asyncio.Lock()
         
         # Initialize communicator for Phase 2+ tool calls
         self.communicator = None
@@ -243,6 +270,14 @@ class FigmaAgent:
             3. Briefly note alternative interpretation
             4. Ask for clarification if critical
 
+            ### D. Tool Execution Failures
+            When a tool call fails, DO NOT try the same command again with the exact same parameters. Instead:
+            1.  **Analyze the error message**: The error will tell you why it failed (e.g., "Cannot add elements to this node").
+            2.  **Change your plan**: Use a different tool or a different sequence of tools to achieve the goal.
+                - If you tried to add text to a shape that doesn't support children, first create a `frame` to act as a container, and then create the text inside that new frame. The composite `create_button` tool is excellent for this.
+                - If a node ID is not found, use `get_selection` or `get_document_info` to get updated node information. The node may have been deleted.
+            3.  **Inform the user**: If you cannot find an alternative solution, clearly state the error you encountered and ask the user for guidance on how to proceed.
+
             ## 6. EXAMPLES OF EXCELLENCE
 
             ### Example 1: Analyzing a Button Component
@@ -285,11 +320,39 @@ class FigmaAgent:
             Remember: Write naturally and conversationally. Focus on what matters most for the specific request.
             """
         
+        # Complete tool list from figma_tools.py - ALL tools from code.js
+        figma_tools = [
+            # Core node operations
+            get_document_info, get_selection, get_node_info, get_nodes_info,
+            # Creation tools
+            create_frame, create_rectangle, create_text,
+            # Styling tools
+            set_fill_color, set_stroke_color, set_corner_radius,
+            # Layout tools
+            set_layout_mode, set_padding, set_axis_align, set_layout_sizing, set_item_spacing,
+            # Node manipulation
+            move_node, resize_node, delete_node, clone_node, delete_multiple_nodes,
+            # Text tools
+            set_text_content, scan_text_nodes, set_multiple_text_contents,
+            # Component tools
+            get_local_components, create_component_instance,
+            # Instance tools
+            get_instance_overrides, set_instance_overrides,
+            # Annotation tools
+            get_annotations, set_annotation, set_multiple_annotations,
+            # Analysis tools
+            read_my_design, scan_nodes_by_types, get_reactions,
+            # Connection tools
+            set_default_connector, create_connections,
+            # Utility tools
+            export_node_as_image, get_styles
+        ]
+        
         self.agent = Agent(
             name="FigmaCopilot",
             instructions=instructions,
             model=openai_model,
-            tools=[create_frame, create_text, set_fill_color, set_corner_radius]
+            tools=figma_tools
         )
         
         # Initialize SQLite session for persistent conversation history
@@ -348,7 +411,14 @@ class FigmaAgent:
         
         if msg_type == "system":
             # Handle system messages (join acks, disconnections, etc.)
-            logger.info(f"🔧 System message: {message.get('message')}")
+            sys_msg = message.get('message')
+            logger.info(f"🔧 System message: {sys_msg}")
+            # If plugin disconnected, cancel any in-flight work to avoid ghost streaming
+            try:
+                if isinstance(sys_msg, str) and 'disconnected' in sys_msg.lower() and 'plugin' in sys_msg.lower():
+                    await self.cancel_active_operations(reason="plugin_disconnected")
+            except Exception as e:
+                logger.error(f"Cancel on disconnect failed: {e}")
             
         elif msg_type == "pong":
             # Handle pong response to our ping
@@ -363,9 +433,7 @@ class FigmaAgent:
                 # Stream response using Agents SDK in background to avoid blocking receive loop
                 logger.info("🚀 Starting agent response streaming in background task")
                 task = asyncio.create_task(self.stream_agent_response(prompt))
-                # Store task reference to prevent it from being garbage collected
-                if not hasattr(self, '_background_tasks'):
-                    self._background_tasks = set()
+                # Store task reference to enable cancellation on plugin disconnect
                 self._background_tasks.add(task)
                 task.add_done_callback(self._background_tasks.discard)
                     
@@ -402,6 +470,9 @@ class FigmaAgent:
             # Run the streaming directly in the current event loop
             await self._stream_response_async(user_prompt)
                 
+        except asyncio.CancelledError:
+            logger.info("🛑 Streaming task cancelled")
+            raise
         except Exception as e:
             logger.error(f"Agents SDK streaming error: {e}")
             raise e
@@ -447,6 +518,24 @@ class FigmaAgent:
             logger.info(f"✨ Sent final response with length: {len(full_response)} chars")
             logger.info(f"✨ Final response content: {full_response}")
             logger.info(f"✨ Final response JSON: {json.dumps(final_response)}")
+
+    async def cancel_active_operations(self, reason: str = "") -> None:
+        """Cancel all in-flight streaming tasks and pending tool calls."""
+        async with self._cancel_lock:
+            # Cancel streaming tasks
+            if self._background_tasks:
+                logger.info(f"🧹 Cancelling {len(self._background_tasks)} active streaming task(s) ({reason})")
+                for task in list(self._background_tasks):
+                    if not task.done():
+                        task.cancel()
+                # Allow cancelled tasks to process cancellation
+                await asyncio.sleep(0)
+            # Cancel pending tool calls, if any
+            if self.communicator:
+                try:
+                    self.communicator.cleanup_pending_requests()
+                except Exception as e:
+                    logger.warning(f"Failed to cleanup pending tool requests: {e}")
     
     async def listen(self) -> None:
         """Listen for messages from the bridge"""

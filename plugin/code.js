@@ -51,7 +51,7 @@ function sendProgressUpdate(
 }
 
 // Show UI
-figma.showUI(__html__, { width: 350, height: 450 });
+figma.showUI(__html__, { width: 420, height: 640 });
 
 // Plugin commands from UI
 figma.ui.onmessage = async (msg) => {
@@ -116,6 +116,86 @@ figma.ui.onmessage = async (msg) => {
         });
       }
       break;
+    case "create_connections":
+      return await createConnections(params);
+    case "zoom":
+      return await zoom(params);
+    case "center":
+      return await center(params);
+    case "scroll_and_zoom_into_view":
+      return await scrollAndZoomIntoView(params);
+    case "group":
+        return await group(params);
+    case "ungroup":
+        return await ungroup(params);
+    case "create_slice":
+        return await createSlice(params);
+    case "create_polygon":
+        return await createPolygon(params);
+    case "create_star":
+        return await createStar(params);
+    case "create_line":
+        return await createLine(params);
+    case "create_ellipse":
+        return await createEllipse(params);
+    case "create_boolean_operation":
+        return await createBooleanOperation(params);
+    case "flatten":
+        return await flatten(params);
+    case "mask":
+        return await mask(params);
+    case "reparent":
+        return await reparent(params);
+    case "insert_child":
+        return await insertChild(params);
+    case "create_paint_style":
+        return await createPaintStyle(params);
+    case "create_text_style":
+        return await createTextStyle(params);
+    case "create_effect_style":
+        return await createEffectStyle(params);
+    case "create_grid_style":
+        return await createGridStyle(params);
+    case "create_component":
+        return await createComponent(params);
+    case "publish_components":
+        return await publishComponents(params);
+    case "vector_paths":
+        return await vectorPaths(params);
+    case "vector_network":
+        return await vectorNetwork(params);
+    case "outline_stroke":
+        return await outlineStroke(params);
+    case "create_image":
+        return await createImage(params);
+    case "get_image_by_hash":
+        return await getImageByHash(params);
+    case "set_gradient_fill":
+        return await setGradientFill(params);
+    case "set_range_text_style":
+        return await setRangeTextStyle(params);
+    case "list_available_fonts":
+        return await listAvailableFonts(params);
+    case "get_flow_starting_points":
+        return await getFlowStartingPoints(params);
+    case "find_related_nodes":
+        return await findRelatedNodes(params);
+    case "create_comment":
+        return await createComment(params);
+    case "get_comments":
+        return await getComments(params);
+    case "delete_comment":
+        return await deleteComment(params);
+    case "get_current_user":
+        return await getCurrentUser(params);
+    case "get_active_users":
+        return await getActiveUsers(params);
+    case "codegen":
+        return await codegen(params);
+    case "notify_vscode":
+        return await notifyVSCode(params);
+    default:
+      throw new Error(`Unknown command: ${command}`);
   }
 };
 
@@ -262,6 +342,82 @@ async function handleCommand(command, params) {
       return await setDefaultConnector(params);
     case "create_connections":
       return await createConnections(params);
+    case "zoom":
+      return await zoom(params);
+    case "center":
+      return await center(params);
+    case "scroll_and_zoom_into_view":
+      return await scrollAndZoomIntoView(params);
+    case "group":
+        return await group(params);
+    case "ungroup":
+        return await ungroup(params);
+    case "create_slice":
+        return await createSlice(params);
+    case "create_polygon":
+        return await createPolygon(params);
+    case "create_star":
+        return await createStar(params);
+    case "create_line":
+        return await createLine(params);
+    case "create_ellipse":
+        return await createEllipse(params);
+    case "create_boolean_operation":
+        return await createBooleanOperation(params);
+    case "flatten":
+        return await flatten(params);
+    case "mask":
+        return await mask(params);
+    case "reparent":
+        return await reparent(params);
+    case "insert_child":
+        return await insertChild(params);
+    case "create_paint_style":
+        return await createPaintStyle(params);
+    case "create_text_style":
+        return await createTextStyle(params);
+    case "create_effect_style":
+        return await createEffectStyle(params);
+    case "create_grid_style":
+        return await createGridStyle(params);
+    case "create_component":
+        return await createComponent(params);
+    case "publish_components":
+        return await publishComponents(params);
+    case "vector_paths":
+        return await vectorPaths(params);
+    case "vector_network":
+        return await vectorNetwork(params);
+    case "outline_stroke":
+        return await outlineStroke(params);
+    case "create_image":
+        return await createImage(params);
+    case "get_image_by_hash":
+        return await getImageByHash(params);
+    case "set_gradient_fill":
+        return await setGradientFill(params);
+    case "set_range_text_style":
+        return await setRangeTextStyle(params);
+    case "list_available_fonts":
+        return await listAvailableFonts(params);
+    case "get_flow_starting_points":
+        return await getFlowStartingPoints(params);
+    case "find_related_nodes":
+        return await findRelatedNodes(params);
+    case "create_comment":
+        return await createComment(params);
+    case "get_comments":
+        return await getComments(params);
+    case "delete_comment":
+        return await deleteComment(params);
+    case "get_current_user":
+        return await getCurrentUser(params);
+    case "get_active_users":
+        return await getActiveUsers(params);
+    case "codegen":
+        return await codegen(params);
+    case "notify_vscode":
+        return await notifyVSCode(params);
     default:
       throw new Error(`Unknown command: ${command}`);
   }
@@ -1200,6 +1356,7 @@ async function createComponentInstance(params) {
   }
 
   try {
+    console.log("🧩 Creating component instance", { componentKey, x, y });
     const component = await figma.importComponentByKeyAsync(componentKey);
     const instance = component.createInstance();
 
@@ -1218,7 +1375,22 @@ async function createComponentInstance(params) {
       componentId: instance.componentId,
     };
   } catch (error) {
-    throw new Error(`Error creating component instance: ${error.message}`);
+    // Ensure we surface a helpful error string (Figma may throw strings)
+    let reason = "Unknown error";
+    if (error) {
+      if (typeof error === "string") {
+        reason = error;
+      } else if (typeof error.message === "string" && error.message.length > 0) {
+        reason = error.message;
+      } else if (typeof error.toString === "function") {
+        const asString = error.toString();
+        if (asString && asString !== "[object Object]") {
+          reason = asString;
+        }
+      }
+    }
+    console.error("❌ Error creating component instance:", error);
+    throw new Error(`Error creating component instance: ${reason}`);
   }
 }
 
@@ -3982,4 +4154,968 @@ async function createConnections(params) {
     count: results.length,
     connections: results
   };
+}
+
+async function zoom(params) {
+  const { zoomLevel, center } = params || {};
+
+  if (zoomLevel === undefined) {
+    throw new Error("Missing zoomLevel parameter");
+  }
+
+  if (center) {
+    figma.viewport.center = center;
+  }
+  
+  figma.viewport.zoom = zoomLevel;
+
+  return {
+    success: true,
+    zoom: figma.viewport.zoom,
+    center: figma.viewport.center,
+  };
+}
+
+async function center(params) {
+    const { x, y } = params || {};
+
+    if (x === undefined || y === undefined) {
+        throw new Error("Missing x or y parameters");
+    }
+
+    figma.viewport.center = { x, y };
+
+    return {
+        success: true,
+        center: figma.viewport.center,
+    };
+}
+
+async function scrollAndZoomIntoView(params) {
+    const { nodeIds } = params || {};
+
+    if (!nodeIds || !Array.isArray(nodeIds) || nodeIds.length === 0) {
+        throw new Error("Missing or invalid nodeIds parameter");
+    }
+
+    const nodes = [];
+    for (const nodeId of nodeIds) {
+        const node = await figma.getNodeByIdAsync(nodeId);
+        if (node) {
+            nodes.push(node);
+        }
+    }
+
+    if (nodes.length > 0) {
+        figma.viewport.scrollAndZoomIntoView(nodes);
+        return {
+            success: true,
+            message: `Scrolled and zoomed into ${nodes.length} nodes.`,
+        };
+    } else {
+        throw new Error("No valid nodes found to scroll and zoom into.");
+    }
+}
+
+async function group(params) {
+    const { nodeIds, parentId, name } = params || {};
+
+    if (!nodeIds || !Array.isArray(nodeIds) || nodeIds.length === 0) {
+        throw new Error("Missing or invalid nodeIds parameter. Please provide an array of node IDs.");
+    }
+
+    const nodes = [];
+    for (const nodeId of nodeIds) {
+        const node = await figma.getNodeByIdAsync(nodeId);
+        if (node) {
+            nodes.push(node);
+        }
+    }
+
+    if (nodes.length > 0) {
+        let parent = figma.currentPage;
+        if (parentId) {
+            const parentNode = await figma.getNodeByIdAsync(parentId);
+            if (parentNode && 'appendChild' in parentNode) {
+                parent = parentNode;
+            } else {
+                throw new Error(`Invalid parentId: ${parentId}`);
+            }
+        }
+        
+        const groupNode = figma.group(nodes, parent);
+        if (name) {
+            groupNode.name = name;
+        }
+
+        return {
+            success: true,
+            groupId: groupNode.id,
+            name: groupNode.name,
+            children: groupNode.children.map(child => child.id),
+        };
+    } else {
+        throw new Error("No valid nodes found to group. Please check the provided node IDs.");
+    }
+}
+
+async function ungroup(params) {
+    const { nodeId } = params || {};
+
+    if (!nodeId) {
+        throw new Error("Missing nodeId parameter");
+    }
+
+    const node = await figma.getNodeByIdAsync(nodeId);
+
+    if (node && node.type === 'GROUP') {
+        const parent = node.parent;
+        const children = [...node.children];
+        if (parent && 'insertChild' in parent) {
+            const index = parent.children.indexOf(node);
+            children.forEach(child => parent.insertChild(index, child));
+            node.remove(); // a group with no children is automatically removed
+        }
+        
+        return {
+            success: true,
+            message: `Ungrouped node ${nodeId}.`,
+            childrenIds: children.map(child => child.id),
+        };
+    } else if (!node) {
+        throw new Error(`Node not found with ID: ${nodeId}`);
+    } else {
+        throw new Error(`Node with ID ${nodeId} is not a group.`);
+    }
+}
+
+async function createSlice(params) {
+    const { x = 0, y = 0, radius = 50, startAngle = 0, sweepAngle = Math.PI, name = "Slice", parentId } = params || {};
+    if (typeof radius !== 'number' || radius <= 0) {
+        throw new Error("Radius must be a positive number.");
+    }
+    const slice = figma.createSlice();
+    slice.x = x;
+    slice.y = y;
+    slice.resize(radius * 2, radius * 2);
+    slice.startAngle = startAngle;
+    slice.sweepAngle = sweepAngle;
+    slice.name = name;
+
+    if (parentId) {
+        const parentNode = await figma.getNodeByIdAsync(parentId);
+        if (parentNode && 'appendChild' in parentNode) {
+            parentNode.appendChild(slice);
+        }
+    } else {
+        figma.currentPage.appendChild(slice);
+    }
+
+    return { id: slice.id, name: slice.name };
+}
+
+async function createPolygon(params) {
+    const { x = 0, y = 0, radius = 50, count = 3, name = "Polygon", parentId } = params || {};
+    if (typeof radius !== 'number' || radius <= 0) {
+        throw new Error("Radius must be a positive number.");
+    }
+    if (typeof count !== 'number' || count < 3) {
+        throw new Error("Count must be a number greater than or equal to 3.");
+    }
+    const polygon = figma.createPolygon();
+    polygon.x = x;
+    polygon.y = y;
+    polygon.resize(radius * 2, radius * 2);
+    polygon.pointCount = count;
+    polygon.name = name;
+
+    if (parentId) {
+        const parentNode = await figma.getNodeByIdAsync(parentId);
+        if (parentNode && 'appendChild' in parentNode) {
+            parentNode.appendChild(polygon);
+        }
+    } else {
+        figma.currentPage.appendChild(polygon);
+    }
+
+    return { id: polygon.id, name: polygon.name, pointCount: polygon.pointCount };
+}
+
+async function createStar(params) {
+    const { x = 0, y = 0, outerRadius = 50, innerRadius = 25, count = 5, name = "Star", parentId } = params || {};
+    if (typeof outerRadius !== 'number' || outerRadius <= 0) {
+        throw new Error("Outer radius must be a positive number.");
+    }
+    if (typeof innerRadius !== 'number' || innerRadius <= 0) {
+        throw new Error("Inner radius must be a positive number.");
+    }
+    if (innerRadius >= outerRadius) {
+        throw new Error("Inner radius must be less than outer radius.");
+    }
+    if (typeof count !== 'number' || count < 2) {
+        throw new Error("Count must be a number greater than or equal to 2.");
+    }
+    const star = figma.createStar();
+    star.x = x;
+    star.y = y;
+    star.resize(outerRadius * 2, outerRadius * 2);
+    star.pointCount = count;
+    star.innerRadius = innerRadius / outerRadius;
+    star.name = name;
+
+    if (parentId) {
+        const parentNode = await figma.getNodeByIdAsync(parentId);
+        if (parentNode && 'appendChild' in parentNode) {
+            parentNode.appendChild(star);
+        }
+    } else {
+        figma.currentPage.appendChild(star);
+    }
+
+    return { id: star.id, name: star.name, pointCount: star.pointCount };
+}
+
+async function createLine(params) {
+    const { x1 = 0, y1 = 0, x2 = 100, y2 = 0, name = "Line", parentId } = params || {};
+    const line = figma.createLine();
+    line.x = x1;
+    line.y = y1;
+    line.resize(Math.sqrt(Math.pow(x2 - x1, 2) + Math.pow(y2 - y1, 2)), 0);
+    line.rotation = Math.atan2(y2 - y1, x2 - x1) * 180 / Math.PI;
+    line.name = name;
+    
+    if (parentId) {
+        const parentNode = await figma.getNodeByIdAsync(parentId);
+        if (parentNode && 'appendChild' in parentNode) {
+            parentNode.appendChild(line);
+        }
+    } else {
+        figma.currentPage.appendChild(line);
+    }
+
+    return { id: line.id, name: line.name };
+}
+
+async function createEllipse(params) {
+    const { x = 0, y = 0, width = 100, height = 100, name = "Ellipse", parentId } = params || {};
+    const ellipse = figma.createEllipse();
+    ellipse.x = x;
+    ellipse.y = y;
+    ellipse.resize(width, height);
+    ellipse.name = name;
+
+    if (parentId) {
+        const parentNode = await figma.getNodeByIdAsync(parentId);
+        if (parentNode && 'appendChild' in parentNode) {
+            parentNode.appendChild(ellipse);
+        }
+    } else {
+        figma.currentPage.appendChild(ellipse);
+    }
+
+    return { id: ellipse.id, name: ellipse.name, width: ellipse.width, height: ellipse.height };
+}
+
+async function createBooleanOperation(params) {
+    const { operation, nodeIds, parentId, name } = params || {};
+
+    if (!operation || !['UNION', 'SUBTRACT', 'INTERSECT', 'EXCLUDE'].includes(operation)) {
+        throw new Error("Invalid or missing operation parameter. Must be one of: UNION, SUBTRACT, INTERSECT, EXCLUDE");
+    }
+
+    if (!nodeIds || !Array.isArray(nodeIds) || nodeIds.length < 2) {
+        throw new Error("Missing or invalid nodeIds parameter. At least two nodes are required.");
+    }
+
+    const nodes = [];
+    for (const nodeId of nodeIds) {
+        const node = await figma.getNodeByIdAsync(nodeId);
+        if (node && ('fills' in node)) { // boolean operations can only be applied to vector-like nodes
+            nodes.push(node);
+        }
+    }
+
+    if (nodes.length < 2) {
+        throw new Error("At least two valid vector-like nodes are required for a boolean operation.");
+    }
+    
+    let parent = figma.currentPage;
+    if (parentId) {
+        const parentNode = await figma.getNodeByIdAsync(parentId);
+        if (parentNode && 'appendChild' in parentNode) {
+            parent = parentNode;
+        }
+    }
+
+    let booleanNode;
+    switch (operation) {
+        case 'UNION':
+            booleanNode = figma.union(nodes, parent);
+            break;
+        case 'SUBTRACT':
+            booleanNode = figma.subtract(nodes, parent);
+            break;
+        case 'INTERSECT':
+            booleanNode = figma.intersect(nodes, parent);
+            break;
+        case 'EXCLUDE':
+            booleanNode = figma.exclude(nodes, parent);
+            break;
+    }
+
+    if (name) {
+        booleanNode.name = name;
+    } else {
+        booleanNode.name = `${operation} Group`;
+    }
+
+    return {
+        success: true,
+        nodeId: booleanNode.id,
+        name: booleanNode.name,
+        operation: operation,
+    };
+}
+
+async function flatten(params) {
+    const { nodeId } = params || {};
+    if (!nodeId) {
+        throw new Error("Missing nodeId parameter");
+    }
+
+    const node = await figma.getNodeByIdAsync(nodeId);
+    if (!node || !('children' in node)) {
+        throw new Error(`Node not found or cannot contain children: ${nodeId}`);
+    }
+    if (node.children.length === 0) {
+        throw new Error("Cannot flatten a node with no children.");
+    }
+
+    const flattenedNode = figma.flatten(node.children);
+    
+    return {
+        success: true,
+        nodeId: flattenedNode.id,
+        name: flattenedNode.name
+    };
+}
+
+async function mask(params) {
+    const { maskNodeId, objectNodeIds, parentId, name } = params || {};
+
+    if (!maskNodeId || !objectNodeIds || !Array.isArray(objectNodeIds) || objectNodeIds.length === 0) {
+        throw new Error("Missing or invalid parameters. 'maskNodeId' and 'objectNodeIds' are required.");
+    }
+
+    if (objectNodeIds.includes(maskNodeId)) {
+        throw new Error("The mask node cannot also be one of the object nodes.");
+    }
+
+    const maskNode = await figma.getNodeByIdAsync(maskNodeId);
+    if (!maskNode) {
+        throw new Error(`Mask node not found: ${maskNodeId}`);
+    }
+
+    const objectNodes = [];
+    for (const nodeId of objectNodeIds) {
+        const node = await figma.getNodeByIdAsync(nodeId);
+        if (node) {
+            objectNodes.push(node);
+        }
+    }
+
+    if (objectNodes.length === 0) {
+        throw new Error("No valid object nodes found to mask.");
+    }
+    
+    // The mask node should be the last in the list
+    const nodesToGroup = [...objectNodes, maskNode];
+    
+    let parent = figma.currentPage;
+    if (parentId) {
+        const parentNode = await figma.getNodeByIdAsync(parentId);
+        if (parentNode && 'appendChild' in parentNode) {
+            parent = parentNode;
+        }
+    }
+
+    const group = figma.group(nodesToGroup, parent);
+    group.isMask = true;
+    maskNode.isMask = true;
+
+    if (name) {
+        group.name = name;
+    } else {
+        group.name = "Mask Group";
+    }
+
+    return {
+        success: true,
+        groupId: group.id,
+        name: group.name,
+    };
+}
+
+async function reparent(params) {
+    const { nodeIds, newParentId } = params || {};
+
+    if (!nodeIds || !Array.isArray(nodeIds) || nodeIds.length === 0 || !newParentId) {
+        throw new Error("Missing or invalid parameters. 'nodeIds' and 'newParentId' are required.");
+    }
+    if (nodeIds.includes(newParentId)) {
+        throw new Error("A node cannot be reparented to itself.");
+    }
+
+    const newParent = await figma.getNodeByIdAsync(newParentId);
+    if (!newParent || !('appendChild' in newParent)) {
+        throw new Error(`Invalid new parent: ${newParentId}`);
+    }
+
+    for (const nodeId of nodeIds) {
+        const node = await figma.getNodeByIdAsync(nodeId);
+        if (node) {
+            newParent.appendChild(node);
+        }
+    }
+
+    return {
+        success: true,
+        message: `Reparented ${nodeIds.length} nodes to ${newParentId}.`,
+    };
+}
+
+async function insertChild(params) {
+    const { parentId, childId, index } = params || {};
+
+    if (!parentId || !childId || index === undefined) {
+        throw new Error("Missing or invalid parameters. 'parentId', 'childId', and 'index' are required.");
+    }
+    if (parentId === childId) {
+        throw new Error("A node cannot be inserted into itself.");
+    }
+
+    const parent = await figma.getNodeByIdAsync(parentId);
+    if (!parent || !('insertChild' in parent)) {
+        throw new Error(`Invalid parent: ${parentId}`);
+    }
+
+    const child = await figma.getNodeByIdAsync(childId);
+    if (!child) {
+        throw new Error(`Child node not found: ${childId}`);
+    }
+
+    parent.insertChild(index, child);
+
+    return {
+        success: true,
+        message: `Inserted child ${childId} into parent ${parentId} at index ${index}.`,
+    };
+}
+
+async function createPaintStyle(params) {
+    const { name, paints } = params || {};
+    if (!name || !paints) {
+        throw new Error("Missing 'name' or 'paints' parameter. Please provide a name and a list of paint objects.");
+    }
+
+    const style = figma.createPaintStyle();
+    style.name = name;
+    style.paints = paints;
+
+    return {
+        success: true,
+        styleId: style.id,
+        name: style.name,
+    };
+}
+
+async function createTextStyle(params) {
+    const { name, style } = params || {};
+    if (!name || !style) {
+        throw new Error("Missing 'name' or 'style' parameter. Please provide a name and a text style object.");
+    }
+    
+    const textStyle = figma.createTextStyle();
+    textStyle.name = name;
+    Object.assign(textStyle, style);
+    
+    return {
+        success: true,
+        styleId: textStyle.id,
+        name: textStyle.name,
+    };
+}
+
+async function createEffectStyle(params) {
+    const { name, effects } = params || {};
+    if (!name || !effects) {
+        throw new Error("Missing 'name' or 'effects' parameter. Please provide a name and a list of effect objects.");
+    }
+
+    const effectStyle = figma.createEffectStyle();
+    effectStyle.name = name;
+    effectStyle.effects = effects;
+
+    return {
+        success: true,
+        styleId: effectStyle.id,
+        name: effectStyle.name,
+    };
+}
+
+async function createGridStyle(params) {
+    const { name, layoutGrids } = params || {};
+    if (!name || !layoutGrids) {
+        throw new Error("Missing 'name' or 'layoutGrids' parameter. Please provide a name and a list of layout grid objects.");
+    }
+
+    const gridStyle = figma.createGridStyle();
+    gridStyle.name = name;
+    gridStyle.layoutGrids = layoutGrids;
+
+    return {
+        success: true,
+        styleId: gridStyle.id,
+        name: gridStyle.name,
+    };
+}
+
+async function createComponent(params) {
+    const { nodeId } = params || {};
+    if (!nodeId) {
+        throw new Error("Missing 'nodeId' parameter.");
+    }
+    
+    const node = await figma.getNodeByIdAsync(nodeId);
+    if (!node) {
+        throw new Error(`Node not found: ${nodeId}`);
+    }
+    
+    const component = figma.createComponent();
+    component.name = node.name;
+    component.resize(node.width, node.height);
+    component.x = node.x;
+    component.y = node.y;
+
+    if ('children' in node) {
+        for (const child of node.children) {
+            component.appendChild(child.clone());
+        }
+    }
+    
+    // Create an instance of the new component
+    const instance = component.createInstance();
+    instance.x = node.x;
+    instance.y = node.y;
+    
+    // Add the instance to the same parent as the original node
+    if (node.parent && 'appendChild' in node.parent) {
+        node.parent.appendChild(instance);
+    } else {
+        figma.currentPage.appendChild(instance);
+    }
+
+    // Optionally, you can remove the original node if it's no longer needed
+    // node.remove();
+
+    return {
+        success: true,
+        componentId: component.id,
+        instanceId: instance.id,
+        name: component.name,
+    };
+}
+
+async function publishComponents(params) {
+    try {
+        const result = await figma.publishAsync('Publishing components');
+        if (result.ok) {
+            return {
+                success: true,
+                message: 'Components published successfully.'
+            };
+        } else {
+            return {
+                success: false,
+                message: 'Component publishing was canceled by the user.'
+            };
+        }
+    } catch (error) {
+        throw new Error(`Failed to publish components: ${error.message}`);
+    }
+}
+
+async function vectorPaths(params) {
+    const { paths, name = "Vector", parentId } = params || {};
+    if (!paths) {
+        throw new Error("Missing 'paths' parameter.");
+    }
+    const vectorNode = figma.createVector();
+    vectorNode.vectorPaths = paths;
+    vectorNode.name = name;
+    
+    if (parentId) {
+        const parentNode = await figma.getNodeByIdAsync(parentId);
+        if (parentNode && 'appendChild' in parentNode) {
+            parentNode.appendChild(vectorNode);
+        }
+    } else {
+        figma.currentPage.appendChild(vectorNode);
+    }
+
+    return {
+        success: true,
+        nodeId: vectorNode.id,
+        name: vectorNode.name,
+    };
+}
+
+async function vectorNetwork(params) {
+    const { nodeId } = params || {};
+    if (!nodeId) {
+        throw new Error("Missing 'nodeId' parameter.");
+    }
+
+    const node = await figma.getNodeByIdAsync(nodeId);
+    if (!node || node.type !== 'VECTOR') {
+        throw new Error("Node is not a vector.");
+    }
+
+    return {
+        success: true,
+        vectorNetwork: node.vectorNetwork,
+    };
+}
+
+async function outlineStroke(params) {
+    const { nodeId } = params || {};
+    if (!nodeId) {
+        throw new Error("Missing 'nodeId' parameter.");
+    }
+
+    const node = await figma.getNodeByIdAsync(nodeId);
+    if (!node || !('outlineStroke' in node)) {
+        throw new Error("Node does not support outlineStroke.");
+    }
+    
+    const outline = node.outlineStroke();
+
+    if (outline) {
+        return {
+            success: true,
+            nodeId: outline.id,
+            name: outline.name,
+        };
+    } else {
+        return {
+            success: false,
+            message: "Stroke outlining did not produce a result. This can happen if the node has no stroke or a complex stroke type."
+        }
+    }
+}
+
+async function createImage(params) {
+    const { base64, name = "Image", parentId } = params || {};
+    if (!base64) {
+        throw new Error("Missing 'base64' parameter.");
+    }
+    
+    // a mini polyfill for base64 decoding
+    const binary_string = atob(base64);
+    const len = binary_string.length;
+    const bytes = new Uint8Array(len);
+    for (let i = 0; i < len; i++) {
+        bytes[i] = binary_string.charCodeAt(i);
+    }
+
+    const image = await figma.createImageAsync(bytes);
+    const rect = figma.createRectangle();
+    rect.name = name;
+    rect.resize(image.getSize().width, image.getSize().height);
+    rect.fills = [{ type: 'IMAGE', scaleMode: 'FILL', imageHash: image.hash }];
+
+    if (parentId) {
+        const parentNode = await figma.getNodeByIdAsync(parentId);
+        if (parentNode && 'appendChild' in parentNode) {
+            parentNode.appendChild(rect);
+        }
+    } else {
+        figma.currentPage.appendChild(rect);
+    }
+    
+    return {
+        success: true,
+        nodeId: rect.id,
+        name: rect.name,
+        imageHash: image.hash,
+    };
+}
+
+async function getImageByHash(params) {
+    const { hash } = params || {};
+    if (!hash) {
+        throw new Error("Missing 'hash' parameter.");
+    }
+
+    const image = figma.getImageByHash(hash);
+    
+    if (image) {
+        const bytes = await image.getBytesAsync();
+        // a mini polyfill for base64 encoding
+        let binary = '';
+        const len = bytes.byteLength;
+        for (let i = 0; i < len; i++) {
+            binary += String.fromCharCode(bytes[i]);
+        }
+        const base64 = btoa(binary);
+
+        return {
+            success: true,
+            base64: base64,
+            size: image.getSize(),
+        };
+    } else {
+        return {
+            success: false,
+            message: `Image with hash "${hash}" not found.`
+        };
+    }
+}
+
+async function setGradientFill(params) {
+    const { nodeId, gradient } = params || {};
+
+    if (!nodeId || !gradient) {
+        throw new Error("Missing 'nodeId' or 'gradient' parameter.");
+    }
+
+    const node = await figma.getNodeByIdAsync(nodeId);
+    if (!node || !('fills' in node)) {
+        throw new Error("Node not found or does not support fills.");
+    }
+
+    node.fills = [gradient];
+
+    return {
+        success: true,
+        nodeId: node.id,
+        fills: node.fills,
+    };
+}
+
+async function setRangeTextStyle(params) {
+    const { nodeId, start, end, textStyleId } = params || {};
+    if (!nodeId || start === undefined || end === undefined || !textStyleId) {
+        throw new Error("Missing required parameters: 'nodeId', 'start', 'end', 'textStyleId'.");
+    }
+
+    const node = await figma.getNodeByIdAsync(nodeId);
+    if (!node || node.type !== 'TEXT') {
+        throw new Error("Node is not a text node.");
+    }
+    
+    await figma.loadFontAsync(node.fontName);
+    node.setRangeTextStyleId(start, end, textStyleId);
+    
+    return {
+        success: true,
+        message: `Applied text style ${textStyleId} to range [${start}, ${end}] of node ${nodeId}.`
+    };
+}
+
+async function listAvailableFonts(params) {
+    const fonts = await figma.listAvailableFontsAsync();
+    return {
+        success: true,
+        fonts: fonts.map(font => ({
+            family: font.fontName.family,
+            style: font.fontName.style,
+        })),
+    };
+}
+
+async function getFlowStartingPoints(params) {
+    const startingPoints = figma.currentPage.flowStartingPoints;
+    return {
+        success: true,
+        startingPoints: startingPoints.map(point => ({
+            nodeId: point.nodeId,
+            name: point.name,
+        })),
+    };
+}
+
+async function findRelatedNodes(params) {
+    const { nodeId } = params || {};
+    if (!nodeId) {
+        throw new Error("Missing 'nodeId' parameter.");
+    }
+
+    const node = await figma.getNodeByIdAsync(nodeId);
+    if (!node) {
+        throw new Error(`Node not found: ${nodeId}`);
+    }
+
+    const relatedNodes = {
+        parents: [],
+        children: [],
+        component: null,
+        instances: [],
+    };
+
+    // Find parents
+    let parent = node.parent;
+    while (parent) {
+        relatedNodes.parents.push({ id: parent.id, name: parent.name, type: parent.type });
+        parent = parent.parent;
+    }
+    
+    // Find children
+    if ('children' in node) {
+        for (const child of node.children) {
+            relatedNodes.children.push({ id: child.id, name: child.name, type: child.type });
+        }
+    }
+
+    // Find main component
+    if (node.type === 'INSTANCE') {
+        const mainComponent = await node.getMainComponentAsync();
+        if (mainComponent) {
+            relatedNodes.component = { id: mainComponent.id, name: mainComponent.name, type: mainComponent.type };
+        }
+    }
+    
+    // Find instances
+    if (node.type === 'COMPONENT') {
+        const instances = await node.getInstancesAsync();
+        for (const instance of instances) {
+            relatedNodes.instances.push({ id: instance.id, name: instance.name, type: instance.type });
+        }
+    }
+    
+    return {
+        success: true,
+        parents: relatedNodes.parents,
+        children: relatedNodes.children,
+        component: relatedNodes.component,
+        instances: relatedNodes.instances,
+    };
+}
+
+
+async function createComment(params) {
+    const { nodeId, comment } = params || {};
+    if (!nodeId || !comment) {
+        throw new Error("Missing 'nodeId' or 'comment' parameter.");
+    }
+    const node = await figma.getNodeByIdAsync(nodeId);
+    if (!node) {
+        throw new Error(`Node not found: ${nodeId}`);
+    }
+
+    const newComment = figma.createComment();
+    newComment.comment = comment;
+    newComment.x = node.x;
+    newComment.y = node.y + node.height + 20;
+    
+    return {
+        success: true,
+        commentId: newComment.id,
+    };
+}
+
+async function getComments(params) {
+    const comments = await figma.root.getCommentsAsync();
+    return {
+        success: true,
+        comments: comments.map(c => ({
+            id: c.id,
+            message: c.message,
+            clientMeta: c.clientMeta,
+            createdAt: c.createdAt,
+            resolvedAt: c.resolvedAt,
+            user: c.user,
+        })),
+    };
+}
+
+async function deleteComment(params) {
+    const { commentId } = params || {};
+    if (!commentId) {
+        throw new Error("Missing 'commentId' parameter.");
+    }
+    
+    try {
+        await figma.root.deleteCommentAsync(commentId);
+        return {
+            success: true,
+            message: `Comment ${commentId} deleted.`,
+        };
+    } catch (e) {
+        throw new Error(`Could not delete comment. This requires special permissions. Details: ${e.message}`);
+    }
+}
+
+async function getCurrentUser(params) {
+    const user = figma.currentUser;
+    if (user) {
+        return {
+            success: true,
+            user: {
+                id: user.id,
+                name: user.name,
+                color: user.color,
+                sessionId: user.sessionId,
+            },
+        };
+    } else {
+        return {
+            success: false,
+            message: "Could not retrieve current user information. This may require special permissions."
+        }
+    }
+}
+
+async function getActiveUsers(params) {
+    const activeUsers = await figma.activeUsers;
+    return {
+        success: true,
+        users: activeUsers.map(user => ({
+            id: user.id,
+            name: user.name,
+            color: user.color,
+            sessionId: user.sessionId,
+        })),
+    };
+}
+
+async function codegen(params) {
+    if (!figma.codegen) {
+        throw new Error("Codegen API is not available. Ensure the 'codegen' capability is enabled in the manifest.");
+    }
+
+    const results = await figma.codegen.json(figma.currentPage.selection);
+    
+    return {
+        success: true,
+        json: results,
+    };
+}
+
+async function notifyVSCode(params) {
+    const { message } = params || {};
+    if (!message) {
+        throw new Error("Missing 'message' parameter.");
+    }
+    
+    if (!figma.vscode) {
+        throw new Error("VS Code API is not available. Ensure the 'vscode' capability is enabled in the manifest and the Figma for VS Code extension is installed.");
+    }
+    
+    figma.vscode.notify(message);
+    
+    return {
+        success: true,
+        message: "Notification sent to VS Code."
+    };
 }

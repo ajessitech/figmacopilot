@@ -53,6 +53,378 @@ function sendProgressUpdate(
 // Show UI
 figma.showUI(__html__, { width: 420, height: 640 });
 
+// ================================
+// Phase-1: Selection Snapshot (Tier A)
+// ================================
+const phase1State = {
+  lastSelectionSignature: "",
+  lastDocumentInfo: null,
+};
+
+// Cache for gather_full_context results (heavy traversal)
+const FULL_CONTEXT_TTL_MS = 45000; // 45s
+const fullContextCache = {
+  lastSignature: null,
+  includeComments: true,
+  data: null,
+  ts: 0,
+};
+
+function phase1Debounce(fn, wait) {
+  let t = null;
+  return (...args) => {
+    if (t) clearTimeout(t);
+    t = setTimeout(() => fn.apply(null, args), wait);
+  };
+}
+
+function phase1ColorToHex(paint) {
+  try {
+    if (!paint || paint.type !== "SOLID" || !paint.color) return null;
+    const r = Math.round((paint.color.r || 0) * 255);
+    const g = Math.round((paint.color.g || 0) * 255);
+    const b = Math.round((paint.color.b || 0) * 255);
+    const toHex = (v) => v.toString(16).padStart(2, "0");
+    return `#${toHex(r)}${toHex(g)}${toHex(b)}`.toUpperCase();
+  } catch (_) {
+    return null;
+  }
+}
+
+function phase1PrimaryFillHex(node) {
+  try {
+    const fills = (node.fills && Array.isArray(node.fills)) ? node.fills : [];
+    for (const paint of fills) {
+      if (paint.type === "SOLID") {
+        const hex = phase1ColorToHex(paint);
+        if (hex) return hex;
+      }
+    }
+  } catch (_) { /* noop */ }
+  return null;
+}
+
+function phase1StrokeInfo(node) {
+  try {
+    const strokes = (node.strokes && Array.isArray(node.strokes)) ? node.strokes : [];
+    let hex = null;
+    for (const paint of strokes) {
+      if (paint.type === "SOLID") {
+        hex = phase1ColorToHex(paint);
+        if (hex) break;
+      }
+    }
+    const weight = ("strokeWeight" in node) ? node.strokeWeight : undefined;
+    return hex ? { hex, weight } : null;
+  } catch (_) {
+    return null;
+  }
+}
+
+function phase1EffectsInfo(node) {
+  try {
+    const effects = (node.effects && Array.isArray(node.effects)) ? node.effects : [];
+    const shadows = effects.filter(e => e && (e.type === "DROP_SHADOW" || e.type === "INNER_SHADOW"));
+    return { hasShadows: shadows.length > 0, shadowCount: shadows.length };
+  } catch (_) {
+    return { hasShadows: false, shadowCount: 0 };
+  }
+}
+
+function phase1LayoutGridInfo(node) {
+  try {
+    const grids = (node.layoutGrids && Array.isArray(node.layoutGrids)) ? node.layoutGrids : [];
+    const types = Array.from(new Set(grids.map(g => g.type))).filter(Boolean);
+    return { count: grids.length, types };
+  } catch (_) {
+    return { count: 0, types: [] };
+  }
+}
+
+function phase1IsInstance(node) {
+  return node.type === "INSTANCE";
+}
+
+function phase1HasVariants(node) {
+  try {
+    if (node.type === "COMPONENT_SET") return true;
+    if (node.type === "COMPONENT" && node.parent && node.parent.type === "COMPONENT_SET") return true;
+    if (node.type === "INSTANCE" && node.mainComponent) {
+      const mc = node.mainComponent;
+      if (mc && mc.parent && mc.parent.type === "COMPONENT_SET") return true;
+      if ("variantProperties" in mc && mc.variantProperties && Object.keys(mc.variantProperties).length > 0) return true;
+    }
+    return false;
+  } catch (_) { return false; }
+}
+
+function phase1GetTextMeta(node) {
+  if (node.type !== "TEXT") return null;
+  try {
+    const text = node.characters || "";
+    const textLength = text.length;
+    let typography = undefined;
+    try {
+      if (node.fontName && typeof node.fontName === "object" && node.fontName.family) {
+        const fontSize = ("fontSize" in node) ? node.fontSize : undefined;
+        const fontWeight = (typeof node.fontName.style === "string") ? node.fontName.style : undefined;
+        const lineHeightPx = (node.lineHeight && node.lineHeight.unit === "PIXELS") ? node.lineHeight.value : undefined;
+        const letterSpacing = (node.letterSpacing && node.letterSpacing.unit === "PIXELS") ? node.letterSpacing.value : undefined;
+        typography = {
+          fontFamily: node.fontName.family,
+          fontSize,
+          fontWeight,
+          lineHeightPx,
+          letterSpacing,
+        };
+      }
+    } catch (_) { /* ignore mixed or inaccessible font props */ }
+    return { textLength, text, typography };
+  } catch (_) {
+    return { textLength: 0 };
+  }
+}
+
+function phase1ComponentInfo(node) {
+  try {
+    const isInstance = phase1IsInstance(node);
+    const info = { role: node.type, isInstance };
+    if (isInstance && node.mainComponent) {
+      info.mainComponent = { id: node.mainComponent.id, name: node.mainComponent.name };
+    }
+    return info;
+  } catch (_) {
+    return { role: node.type, isInstance: phase1IsInstance(node) };
+  }
+}
+
+function phase1AutoLayoutInfo(node) {
+  try {
+    if (!(node.type === "FRAME" || node.type === "COMPONENT" || node.type === "COMPONENT_SET")) return undefined;
+    const layoutMode = ("layoutMode" in node) ? node.layoutMode : "NONE";
+    const autoLayout = {
+      layoutMode,
+      layoutWrap: ("layoutWrap" in node) ? node.layoutWrap : undefined,
+      primaryAxisAlignItems: ("primaryAxisAlignItems" in node) ? node.primaryAxisAlignItems : undefined,
+      counterAxisAlignItems: ("counterAxisAlignItems" in node) ? node.counterAxisAlignItems : undefined,
+      primaryAxisSizingMode: ("primaryAxisSizingMode" in node) ? node.primaryAxisSizingMode : undefined,
+      counterAxisSizingMode: ("counterAxisSizingMode" in node) ? node.counterAxisSizingMode : undefined,
+      paddingTop: ("paddingTop" in node) ? node.paddingTop : undefined,
+      paddingRight: ("paddingRight" in node) ? node.paddingRight : undefined,
+      paddingBottom: ("paddingBottom" in node) ? node.paddingBottom : undefined,
+      paddingLeft: ("paddingLeft" in node) ? node.paddingLeft : undefined,
+      itemSpacing: ("itemSpacing" in node) ? node.itemSpacing : undefined,
+    };
+    return autoLayout;
+  } catch (_) {
+    return undefined;
+  }
+}
+
+function phase1StyleRefs(node) {
+  const refs = {};
+  if ("fillStyleId" in node) refs.fillStyleId = node.fillStyleId;
+  if ("strokeStyleId" in node) refs.strokeStyleId = node.strokeStyleId;
+  if ("effectStyleId" in node) refs.effectStyleId = node.effectStyleId;
+  if (node.type === "TEXT" && "textStyleId" in node) refs.textStyleId = node.textStyleId;
+  return refs;
+}
+
+function phase1TokensPresence(node) {
+  try {
+    const bound = node.boundVariables || {};
+    const hasFillVariables = !!bound.fills;
+    const hasTextVariables = node.type === "TEXT" && (
+      !!bound.characters || !!bound.fills || !!bound.fontSize || !!bound.lineHeight || !!bound.letterSpacing
+    );
+    return { hasFillVariables: !!hasFillVariables, hasTextVariables: !!hasTextVariables };
+  } catch (_) { return { hasFillVariables: false, hasTextVariables: false }; }
+}
+
+function phase1HierarchyInfo(node) {
+  try {
+    const parent = node.parent;
+    const index = parent && parent.children ? parent.children.indexOf(node) : -1;
+    const childCount = ("children" in node && Array.isArray(node.children)) ? node.children.length : 0;
+    const parentType = parent ? parent.type : "PAGE";
+    const parentName = parent ? parent.name : figma.currentPage.name;
+    const parentId = parent ? parent.id : figma.currentPage.id;
+    return { parentId, parentType, parentName, index, childCount };
+  } catch (_) {
+    return { parentId: figma.currentPage.id, parentType: "PAGE", parentName: figma.currentPage.name, index: -1, childCount: 0 };
+  }
+}
+
+function phase1GeometryInfo(node) {
+  try {
+    const rotation = ("rotation" in node) ? node.rotation : 0;
+    return { x: node.x, y: node.y, width: node.width, height: node.height, rotation };
+  } catch (_) {
+    return { x: 0, y: 0, width: 0, height: 0, rotation: 0 };
+  }
+}
+
+function phase1ConstraintsInfo(node) {
+  try {
+    const c = ("constraints" in node) ? node.constraints : undefined;
+    if (!c) return undefined;
+    return { horizontal: c.horizontal, vertical: c.vertical };
+  } catch (_) { return undefined; }
+}
+
+function phase1SampleChildren(node) {
+  try {
+    if (!("children" in node) || !Array.isArray(node.children)) return [];
+    const samples = [];
+    for (let i = 0; i < Math.min(12, node.children.length); i++) {
+      const child = node.children[i];
+      const entry = { id: child.id, type: child.type, width: child.width, height: child.height };
+      if (child.type === "TEXT") entry.hasText = !!child.characters && child.characters.length > 0;
+      samples.push(entry);
+    }
+    return samples;
+  } catch (_) { return []; }
+}
+
+function phase1CollectNodeSummary(node) {
+  const identity = { id: node.id, name: node.name, type: node.type, visible: node.visible !== false, locked: !!node.locked };
+  const geometry = phase1GeometryInfo(node);
+  const hierarchy = phase1HierarchyInfo(node);
+  const constraints = phase1ConstraintsInfo(node);
+  const autoLayout = phase1AutoLayoutInfo(node);
+  const component = phase1ComponentInfo(node);
+  const fills = phase1PrimaryFillHex(node) ? [{ hex: phase1PrimaryFillHex(node) }] : [];
+  const stroke = phase1StrokeInfo(node);
+  const effects = phase1EffectsInfo(node);
+  const styleRefs = phase1StyleRefs(node);
+  const tokensPresence = phase1TokensPresence(node);
+  const layoutGrids = phase1LayoutGridInfo(node);
+  const sampleChildren = phase1SampleChildren(node);
+
+  let out = {
+    id: identity.id,
+    name: identity.name,
+    type: identity.type,
+    visible: identity.visible,
+    locked: identity.locked,
+    geometry: geometry,
+    hierarchy: hierarchy,
+    constraints: constraints,
+    autoLayout: autoLayout,
+    component: component,
+    fills: fills,
+    stroke: stroke,
+    effects: effects,
+    styleRefs: styleRefs,
+    tokensPresence: tokensPresence,
+    layoutGrids: layoutGrids,
+    sampleChildren: sampleChildren,
+  };
+
+  if (node.type === "TEXT") {
+    const textMeta = phase1GetTextMeta(node);
+    out.textMeta = { textLength: (textMeta && textMeta.textLength) || 0 };
+    if (textMeta && typeof textMeta.text === "string") {
+      const totalLength = textMeta.text.length;
+      const cap = 1200;
+      if (totalLength <= cap) {
+        out.text = textMeta.text;
+      } else {
+        const headLen = Math.floor(cap * 0.8);
+        const tailLen = cap - headLen;
+        out.text = textMeta.text.slice(0, headLen) + "…" + textMeta.text.slice(-tailLen);
+        out.textTruncation = { truncated: true, totalLength };
+      }
+      if (textMeta.typography) out.typography = textMeta.typography;
+    }
+  }
+
+  return out;
+}
+
+function phase1ComputeSelectionSignature(nodes) {
+  try {
+    const tuples = nodes.map((n) => {
+      const isInstance = n.type === "INSTANCE";
+      const isText = n.type === "TEXT";
+      const textLen = isText ? (n.characters ? n.characters.length : 0) : 0;
+      const rot = ("rotation" in n) ? n.rotation : 0;
+      return `${n.id}:${n.type}:${Math.round(n.x)}:${Math.round(n.y)}:${Math.round(n.width)}:${Math.round(n.height)}:${Math.round(rot)}:${textLen}:${isInstance ? 1 : 0}`;
+    }).sort();
+    const input = `${figma.currentPage.id}|${tuples.join("|")}`;
+    // DJB2 hash
+    let hash = 5381;
+    for (let i = 0; i < input.length; i++) {
+      hash = ((hash << 5) + hash) + input.charCodeAt(i);
+      hash |= 0; // force 32-bit
+    }
+    return `sig_${Math.abs(hash)}`;
+  } catch (e) {
+    return `sig_error_${Date.now()}`;
+  }
+}
+
+function phase1BuildSelectionSummary(selectedNodes) {
+  const nodes = selectedNodes.map(phase1CollectNodeSummary);
+  const typesCount = {};
+  let hasInstances = false;
+  let hasVariants = false;
+  let hasAutoLayout = false;
+  let stickyNoteCount = 0;
+  let totalTextChars = 0;
+  for (const n of selectedNodes) {
+    typesCount[n.type] = (typesCount[n.type] || 0) + 1;
+    if (n.type === "INSTANCE") hasInstances = true;
+    if (phase1HasVariants(n)) hasVariants = true;
+    if (("layoutMode" in n) && n.layoutMode && n.layoutMode !== "NONE") hasAutoLayout = true;
+    if (n.type === "STICKY") stickyNoteCount += 1;
+    if (n.type === "TEXT") totalTextChars += (n.characters ? n.characters.length : 0);
+  }
+  return {
+    selectionCount: selectedNodes.length,
+    typesCount,
+    hints: { hasInstances, hasVariants, hasAutoLayout, stickyNoteCount, totalTextChars },
+    nodes,
+  };
+}
+
+function phase1PostDocumentInfo() {
+  const pageId = figma.currentPage.id;
+  const pageName = figma.currentPage.name;
+  phase1State.lastDocumentInfo = { pageId, pageName };
+  figma.ui.postMessage({ type: "document_info", pageId, pageName });
+}
+
+const phase1HandleSelectionChange = phase1Debounce(() => {
+  try {
+    const sel = figma.currentPage.selection || [];
+    const selectionSignature = phase1ComputeSelectionSignature(sel);
+    const selectionSummary = phase1BuildSelectionSummary(sel);
+    const document = phase1State.lastDocumentInfo || { pageId: figma.currentPage.id, pageName: figma.currentPage.name };
+    phase1State.lastSelectionSignature = selectionSignature;
+    figma.ui.postMessage({
+      type: "selection_summary",
+      document,
+      selectionSignature,
+      selectionSummary,
+    });
+    // Emoji log per user preference
+    console.log(`🧩 Selection summary sent (${selectionSummary.selectionCount} nodes)`);
+  } catch (e) {
+    console.warn("Failed to build selection summary", e);
+  }
+}, 200);
+
+figma.on("run", () => {
+  phase1PostDocumentInfo();
+  // Emit initial selection summary on run as a convenience
+  phase1HandleSelectionChange();
+});
+
+figma.on("selectionchange", () => {
+  phase1HandleSelectionChange();
+});
+
 // Plugin commands from UI
 figma.ui.onmessage = async (msg) => {
   switch (msg.type) {
@@ -83,6 +455,67 @@ figma.ui.onmessage = async (msg) => {
         });
       }
       break;
+    
+    case "ui_ready":
+      // UI loaded and ready to receive snapshot → resend immediately
+      try {
+        phase1PostDocumentInfo();
+        phase1HandleSelectionChange();
+      } catch (e) {
+        console.warn("Failed to send initial snapshot on ui_ready", e);
+      }
+      break;
+
+    case "request_selection_summary":
+      // UI explicitly asks for the latest selection summary
+      try {
+        phase1PostDocumentInfo();
+        phase1HandleSelectionChange();
+      } catch (e) {
+        console.warn("Failed to send selection summary on request", e);
+      }
+      break;
+
+    case "build_phase1_snapshot": {
+      // Build a Phase‑1 snapshot (Tier‑A) on demand and return it to UI
+      try {
+        const pageId = figma.currentPage.id;
+        const pageName = figma.currentPage.name;
+        const selection = figma.currentPage.selection || [];
+        const selectionSignature = phase1ComputeSelectionSignature(selection);
+        const selectionSummary = phase1BuildSelectionSummary(selection);
+        // Capture sticky guidance separately (safe, truncated)
+        const stickyGuidance = [];
+        try {
+          for (const n of selection) {
+            if (n && n.type === "STICKY") {
+              let content = "";
+              try {
+                // FigJam STICKY may expose text via .text; fallback to .characters if available
+                if (typeof n.text === 'string') content = n.text;
+                else if (typeof n.characters === 'string') content = n.characters;
+              } catch (_) { /* noop */ }
+              const cap = 500;
+              if (typeof content === 'string' && content.length > cap) {
+                content = content.slice(0, cap - 1) + "…";
+              }
+              stickyGuidance.push({ id: n.id, name: n.name, content: content || "" });
+            }
+          }
+        } catch (_) { /* noop */ }
+        const snapshot = {
+          version: 'phase1-snapshot@1',
+          document: { pageId, pageName },
+          selectionSignature,
+          selectionSummary,
+          stickyGuidance,
+        };
+        figma.ui.postMessage({ type: 'phase1_snapshot', snapshot });
+      } catch (e) {
+        figma.ui.postMessage({ type: 'phase1_snapshot_error', error: (e && e.message) || String(e) });
+      }
+      break;
+    }
       
     // Phase 1: Handle chat messages  
     case "user_prompt":
@@ -337,7 +770,7 @@ async function handleCommand(command, params) {
       if (!params || !params.nodeIds || !Array.isArray(params.nodeIds)) {
         throw new Error("Missing or invalid nodeIds parameter");
       }
-      return await getReactions(params.nodeIds);  
+      return await getReactions(params.nodeIds, params.silent === true);  
     case "set_default_connector":
       return await setDefaultConnector(params);
     case "create_connections":
@@ -418,6 +851,8 @@ async function handleCommand(command, params) {
         return await codegen(params);
     case "notify_vscode":
         return await notifyVSCode(params);
+    case "gather_full_context":
+      return await gatherFullContext(params);
     default:
       throw new Error(`Unknown command: ${command}`);
   }
@@ -620,7 +1055,7 @@ async function getNodesInfo(nodeIds) {
   }
 }
 
-async function getReactions(nodeIds) {
+async function getReactions(nodeIds, silent = false) {
   try {
     const commandId = generateCommandId();
     sendProgressUpdate(
@@ -669,8 +1104,10 @@ async function getReactions(nodeIds) {
           reactions: filteredReactions,
           path: getNodePath(node)
         });
-        // Apply highlight effect (orange border)
-        await highlightNodeWithAnimation(node);
+        // Apply highlight effect (orange border) unless running in silent mode
+        if (!silent) {
+          await highlightNodeWithAnimation(node);
+        }
       }
       
       // If node has children, recursively search them
@@ -1557,7 +1994,7 @@ async function setCornerRadius(params) {
 }
 
 async function setTextContent(params) {
-  const { nodeId, text } = params || {};
+  const { nodeId, text, smartStrategy } = params || {};
 
   if (!nodeId) {
     throw new Error("Missing nodeId parameter");
@@ -1577,15 +2014,26 @@ async function setTextContent(params) {
   }
 
   try {
-    await figma.loadFontAsync(node.fontName);
+    // Only load a concrete font; figma.mixed cannot be loaded
+    try {
+      if (node.fontName !== figma.mixed) {
+        await figma.loadFontAsync(node.fontName);
+      }
+    } catch (_) {}
 
-    await setCharacters(node, text);
+    const options = smartStrategy ? { smartStrategy } : undefined;
+    await setCharacters(node, text, options);
+
+    let fontNameResult = null;
+    try {
+      fontNameResult = (node.fontName === figma.mixed) ? "MIXED" : node.fontName;
+    } catch (_) { fontNameResult = null; }
 
     return {
       id: node.id,
       name: node.name,
       characters: node.characters,
-      fontName: node.fontName,
+      fontName: fontNameResult,
     };
   } catch (error) {
     throw new Error(`Error setting text content: ${error.message}`);
@@ -5118,4 +5566,234 @@ async function notifyVSCode(params) {
         success: true,
         message: "Notification sent to VS Code."
     };
+}
+
+// === Full-context gatherer (max depth, no truncation) ===
+async function gatherFullContext(params) {
+  const includeComments = params && params.includeComments !== false;
+
+  const page = figma.currentPage;
+  const selection = page.selection || [];
+
+  const selectionSignature = phase1ComputeSelectionSignature(selection);
+  const force = !!(params && params.force === true);
+
+  if (!force && fullContextCache.data && fullContextCache.lastSignature === selectionSignature && fullContextCache.includeComments === includeComments && (Date.now() - fullContextCache.ts) <= FULL_CONTEXT_TTL_MS) {
+    const cached = Object.assign({}, fullContextCache.data, { cache: { hit: true, ageMs: Date.now() - fullContextCache.ts, ttlMs: FULL_CONTEXT_TTL_MS } });
+    return sanitize(cached);
+  }
+
+  function safeAssign(target, node, key) {
+    try {
+      if (key in node) target[key] = node[key];
+    } catch (_) {}
+  }
+
+  function collectAutoLayout(node, out) {
+    if (!('layoutMode' in node)) return;
+    out.autoLayout = {
+      layoutMode: node.layoutMode,
+      layoutWrap: ('layoutWrap' in node) ? node.layoutWrap : undefined,
+      primaryAxisAlignItems: ('primaryAxisAlignItems' in node) ? node.primaryAxisAlignItems : undefined,
+      counterAxisAlignItems: ('counterAxisAlignItems' in node) ? node.counterAxisAlignItems : undefined,
+      primaryAxisSizingMode: ('primaryAxisSizingMode' in node) ? node.primaryAxisSizingMode : undefined,
+      counterAxisSizingMode: ('counterAxisSizingMode' in node) ? node.counterAxisSizingMode : undefined,
+      itemSpacing: ('itemSpacing' in node) ? node.itemSpacing : undefined,
+      counterAxisSpacing: ('counterAxisSpacing' in node) ? node.counterAxisSpacing : undefined,
+      paddingTop: ('paddingTop' in node) ? node.paddingTop : undefined,
+      paddingRight: ('paddingRight' in node) ? node.paddingRight : undefined,
+      paddingBottom: ('paddingBottom' in node) ? node.paddingBottom : undefined,
+      paddingLeft: ('paddingLeft' in node) ? node.paddingLeft : undefined,
+    };
+    safeAssign(out, node, 'strokesIncludedInLayout');
+    safeAssign(out, node, 'layoutAlign');
+    safeAssign(out, node, 'layoutGrow');
+    safeAssign(out, node, 'layoutSizingHorizontal');
+    safeAssign(out, node, 'layoutSizingVertical');
+  }
+
+  function collectStyles(node, out) {
+    // Paints / Strokes / Effects / Grids
+    if ('fills' in node) out.fills = node.fills;
+    if ('strokes' in node) out.strokes = node.strokes;
+    safeAssign(out, node, 'strokeWeight');
+    safeAssign(out, node, 'strokeAlign');
+    safeAssign(out, node, 'strokeCap');
+    safeAssign(out, node, 'strokeJoin');
+    safeAssign(out, node, 'dashPattern');
+    safeAssign(out, node, 'miterLimit');
+    if ('effects' in node) out.effects = node.effects;
+    if ('layoutGrids' in node) out.layoutGrids = node.layoutGrids;
+    // Style refs
+    safeAssign(out, node, 'fillStyleId');
+    safeAssign(out, node, 'strokeStyleId');
+    safeAssign(out, node, 'effectStyleId');
+    safeAssign(out, node, 'gridStyleId');
+    if (node.type === 'TEXT') safeAssign(out, node, 'textStyleId');
+    // Backgrounds on Frames/Components
+    safeAssign(out, node, 'backgrounds');
+    safeAssign(out, node, 'backgroundStyleId');
+  }
+
+  function collectGeometry(node, out) {
+    out.visible = node.visible !== false;
+    safeAssign(out, node, 'locked');
+    safeAssign(out, node, 'opacity');
+    safeAssign(out, node, 'blendMode');
+    safeAssign(out, node, 'isMask');
+    // Size only (omit x,y/transforms/constraints)
+    out.width = node.width; out.height = node.height;
+    safeAssign(out, node, 'rotation');
+    // Corners
+    safeAssign(out, node, 'cornerRadius');
+    safeAssign(out, node, 'rectangleCornerRadii');
+    safeAssign(out, node, 'cornerSmoothing');
+    // Clipping only (omit export settings)
+    safeAssign(out, node, 'clipsContent');
+  }
+
+  function collectVariables(node, out) {
+    safeAssign(out, node, 'boundVariables');
+  }
+
+  async function collectComponentInfo(node, out) {
+    if (node.type === 'INSTANCE') {
+      try {
+        const mc = await node.getMainComponentAsync();
+        out.instanceOf = mc ? { id: mc.id, name: mc.name, key: ('key' in mc) ? mc.key : undefined } : null;
+      } catch (_) {
+        out.instanceOf = node.mainComponent ? { id: node.mainComponent.id, name: node.mainComponent.name } : null;
+      }
+      safeAssign(out, node, 'componentProperties');
+      safeAssign(out, node, 'componentPropertyReferences');
+      safeAssign(out, node, 'variantProperties');
+      safeAssign(out, node, 'scaleFactor');
+    } else if (node.type === 'COMPONENT') {
+      safeAssign(out, node, 'key');
+      // omit description/documentationLinks and global instances
+      safeAssign(out, node, 'variantProperties');
+    } else if (node.type === 'COMPONENT_SET') {
+      safeAssign(out, node, 'key');
+      // omit description
+      safeAssign(out, node, 'componentPropertyDefinitions');
+    }
+  }
+
+  function collectConnectorsAndVectors(node, out) {
+    // Intentionally omitted per design workflow scope
+  }
+
+  function collectText(node, out) {
+    if (node.type !== 'TEXT') return;
+    out.characters = node.characters || '';
+    out.typography = {
+      fontName: node.fontName,
+      fontSize: node.fontSize,
+      textAlignHorizontal: node.textAlignHorizontal,
+      textAlignVertical: node.textAlignVertical,
+      letterSpacing: node.letterSpacing,
+      lineHeight: node.lineHeight,
+      paragraphSpacing: ('paragraphSpacing' in node) ? node.paragraphSpacing : undefined,
+      paragraphIndent: ('paragraphIndent' in node) ? node.paragraphIndent : undefined,
+      textCase: ('textCase' in node) ? node.textCase : undefined,
+      textDecoration: ('textDecoration' in node) ? node.textDecoration : undefined,
+      textAutoResize: ('textAutoResize' in node) ? node.textAutoResize : undefined,
+    };
+    // Styled text segments if supported
+    try {
+      if ('getStyledTextSegments' in node) {
+        out.styledTextSegments = node.getStyledTextSegments([
+          'fontName','fontSize','fill','fills','textCase','textDecoration','letterSpacing','lineHeight','textStyleId','hyperlink'
+        ]);
+      }
+    } catch (_) {}
+  }
+
+  function collectPluginData(node, out) { /* omitted */ }
+
+  async function collectNodeDeep(node) {
+    const info = {
+      id: node.id,
+      name: node.name,
+      type: node.type,
+      parentId: node.parent ? node.parent.id : null,
+      index: (node.parent && node.parent.children) ? node.parent.children.indexOf(node) : -1,
+    };
+
+    collectGeometry(node, info);
+    collectAutoLayout(node, info);
+    collectStyles(node, info);
+    collectVariables(node, info);
+    collectText(node, info);
+    collectConnectorsAndVectors(node, info);
+    await collectComponentInfo(node, info);
+    safeAssign(info, node, 'reactions');
+
+    collectPluginData(node, info);
+
+    if ('children' in node && Array.isArray(node.children)) {
+      info.children = [];
+      for (const child of node.children) {
+        info.children.push(await collectNodeDeep(child));
+      }
+    }
+
+    return info;
+  }
+
+  const nodesData = [];
+  for (const n of selection) {
+    nodesData.push(await collectNodeDeep(n));
+  }
+
+  // Optional enrichments
+  let comments = undefined;
+  if (includeComments) {
+    try {
+      const all = await figma.root.getCommentsAsync();
+      const selectedIds = new Set(selection.map(n => n.id));
+      comments = all.filter(c => {
+        try {
+          const meta = c.clientMeta || {};
+          const nodeId = meta && (meta.nodeId || meta.node_id || (meta.node && meta.node.id));
+          return nodeId ? selectedIds.has(nodeId) : false;
+        } catch (_) { return false; }
+      }).map(c => ({ id: c.id, message: c.message, clientMeta: c.clientMeta, createdAt: c.createdAt, resolvedAt: c.resolvedAt, user: c.user }));
+    } catch (_) {}
+  }
+
+  function sanitize(value) {
+    if (value === figma.mixed) return "MIXED";
+    if (typeof value === 'symbol') return null;
+    if (!value) return value;
+    if (Array.isArray(value)) return value.map(sanitize);
+    if (typeof value === 'object') {
+      const out = {};
+      for (const k of Object.keys(value)) {
+        const v = value[k];
+        const sv = sanitize(v);
+        if (sv !== undefined) out[k] = sv;
+      }
+      return out;
+    }
+    return value;
+  }
+
+  const result = {
+    success: true,
+    document: { pageId: page.id, pageName: page.name },
+    selectionCount: selection.length,
+    selectedNodeIds: selection.map(n => n.id),
+    gatheredAt: Date.now(),
+    selectionSignature: selectionSignature,
+    nodes: nodesData,
+    comments
+  };
+  // update cache
+  fullContextCache.lastSignature = selectionSignature;
+  fullContextCache.includeComments = includeComments;
+  fullContextCache.data = result;
+  fullContextCache.ts = Date.now();
+
+  return sanitize(result);
 }

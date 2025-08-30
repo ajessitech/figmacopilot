@@ -72,8 +72,15 @@ interface ToolResponseMessage {
   result?: any;
   error?: string;
 }
+// Progress updates from plugin UI to be forwarded to agent
+interface ProgressUpdateMessage {
+  type: "progress_update";
+  id?: string;
+  channel?: string;
+  message?: any;
+}
 
-type Message = JoinMessage | UserPromptMessage | AgentResponseMessage | AgentResponseChunkMessage | SystemMessage | ErrorMessage | PingMessage | PongMessage | ToolCallMessage | ToolResponseMessage;
+type Message = JoinMessage | UserPromptMessage | AgentResponseMessage | AgentResponseChunkMessage | SystemMessage | ErrorMessage | PingMessage | PongMessage | ToolCallMessage | ToolResponseMessage | ProgressUpdateMessage;
 
 function log(level: string, message: string, data?: any) {
   const timestamp = new Date().toISOString();
@@ -108,6 +115,9 @@ function validateMessage(data: any): data is Message {
     case "tool_response":
       return typeof data.id === "string" &&
              (data.result !== undefined || data.error !== undefined);
+    case "progress_update":
+      // Allow pass-through progress updates without strict validation
+      return true;
     case "ping":
     case "pong":
       return true;
@@ -160,7 +170,7 @@ function handleJoin(ws: ServerWebSocket<unknown>, message: JoinMessage) {
   });
 }
 
-function handleMessage(ws: ServerWebSocket<unknown>, message: UserPromptMessage | AgentResponseMessage | AgentResponseChunkMessage | ToolCallMessage | ToolResponseMessage) {
+function handleMessage(ws: ServerWebSocket<unknown>, message: UserPromptMessage | AgentResponseMessage | AgentResponseChunkMessage | ToolCallMessage | ToolResponseMessage | ProgressUpdateMessage) {
   // Find which channel this socket belongs to
   let senderRole: "plugin" | "agent" | null = null;
   let senderChannel: string | null = null;
@@ -296,7 +306,7 @@ serve({
         
         if (data.type === "join") {
           handleJoin(ws, data);
-        } else if (data.type === "user_prompt" || data.type === "agent_response" || data.type === "agent_response_chunk" || data.type === "tool_call" || data.type === "tool_response") {
+        } else if (data.type === "user_prompt" || data.type === "agent_response" || data.type === "agent_response_chunk" || data.type === "tool_call" || data.type === "tool_response" || data.type === "progress_update") {
           handleMessage(ws, data);
         } else if (data.type === "ping") {
           // Respond to ping with pong

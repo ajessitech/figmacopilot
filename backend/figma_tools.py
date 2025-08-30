@@ -612,7 +612,7 @@ async def clone_node(node_id: str, x: Optional[int] = None, y: Optional[int] = N
 # === TEXT TOOLS ===
 
 @function_tool
-async def set_text_content(node_id: str, text: str) -> str:
+async def set_text_content(node_id: str, text: str, smart_strategy: Optional[str] = None) -> str:
     """
     Sets the text content of a text node.
     
@@ -630,6 +630,8 @@ async def set_text_content(node_id: str, text: str) -> str:
             "nodeId": node_id,
             "text": text
         }
+        if smart_strategy:
+            params["smartStrategy"] = smart_strategy
         
         result = await send_command("set_text_content", params)
         return f"Successfully set text content of node {node_id} to '{text}'"
@@ -766,6 +768,30 @@ async def get_styles() -> str:
         
     except Exception as e:
         error_msg = f"Failed to get styles: {str(e)}"
+        logger.error(error_msg)
+        return error_msg
+
+# === CONTEXT GATHERERS ===
+
+@function_tool
+async def gather_full_context(include_comments: bool = True, force: bool = False) -> str:
+    """
+    Gathers exhaustive, untruncated context for the current selection.
+
+    Args:
+        include_comments: Also include comments attached to nodes in the selection
+        force: Bypass plugin-side cache and recompute
+
+    Returns:
+        A JSON string containing document info and a fully expanded tree for each selected node
+    """
+    try:
+        logger.info("🧾 Gathering FULL selection context (max depth, no truncation)")
+        params = { "includeComments": bool(include_comments), "force": bool(force) }
+        result = await send_command("gather_full_context", params)
+        return f"Full context: {result}"
+    except Exception as e:
+        error_msg = f"Failed to gather full context: {str(e)}"
         logger.error(error_msg)
         return error_msg
 

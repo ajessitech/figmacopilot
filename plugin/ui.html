@@ -456,6 +456,15 @@
         channel: null,
       };
 
+      // Phase-1 snapshot cache
+      const snapshotCache = {
+        document: null, // { pageId, pageName }
+        last: null,      // { selectionSignature, selectionSummary, document, ts }
+        latestSig: null,
+        lastSnapshot: null // { snapshot, ts }
+      };
+      const SNAPSHOT_TTL_MS = 30000;
+
       // Reconnect/heartbeat config
       const HEARTBEAT_INTERVAL = 30000; // 30s
       const BASE_RECONNECT_DELAY = 3000; // 3s
@@ -473,6 +482,7 @@
       // Streaming state
       let currentStreamingContentEl = null;
       let acceptingStream = false;
+      let uiStartTs = Date.now();
 
       // Status messages
       const statusMessages = {
@@ -505,6 +515,13 @@
         connectToServer(state.serverPort);
         // Close socket on UI unload to avoid stale sessions
         window.addEventListener('beforeunload', () => cleanupConnection('unload'));
+
+        // Notify plugin that UI is ready to receive initial snapshot
+        try {
+          parent.postMessage({ pluginMessage: { type: 'ui_ready' } }, '*');
+        } catch (e) {
+          console.warn('Failed to send ui_ready to plugin', e);
+        }
       });
 
       // UI helpers
@@ -625,7 +642,7 @@
         inputField.style.height = newHeight + 'px';
       }
 
-      function handleSend() {
+      async function handleSend() {
         const text = inputField.value.trim();
         if (!text || !state.connected || !state.socket) return;
 
@@ -641,8 +658,88 @@
         acceptingStream = true;
         currentStreamingContentEl = null;
 
+        // Attempt a very short warmup if no snapshot yet (first-run race)
+        const now = Date.now();
+        if ((!snapshotCache.last || (now - snapshotCache.last.ts) > SNAPSHOT_TTL_MS) && (now - uiStartTs) < 2000) {
+          try {
+            let resolved = false;
+            const waitForSummary = new Promise((resolve) => {
+              const listener = (event) => {
+                const msg = event.data && event.data.pluginMessage;
+                if (msg && (msg.type === 'selection_summary' || msg.type === 'document_info')) {
+                  resolved = true;
+                  window.removeEventListener('message', listener);
+                  resolve(true);
+                }
+              };
+              window.addEventListener('message', listener);
+            });
+            parent.postMessage({ pluginMessage: { type: 'request_selection_summary' } }, '*');
+            await Promise.race([
+              waitForSummary,
+              new Promise((r) => setTimeout(r, 200))
+            ]);
+          } catch (e) {
+            // ignore warmup errors
+          }
+        }
+
+        // Build or reuse snapshot (30s TTL) keyed by selectionSignature
+        async function requestSnapshotFromPlugin() {
+          return new Promise((resolve, reject) => {
+            const timeout = setTimeout(() => {
+              window.removeEventListener('message', listener);
+              reject(new Error('snapshot_timeout'));
+            }, 1500);
+            const listener = (event) => {
+              const msg = event.data && event.data.pluginMessage;
+              if (!msg) return;
+              if (msg.type === 'phase1_snapshot') {
+                clearTimeout(timeout);
+                window.removeEventListener('message', listener);
+                // Cache snapshot and indexes
+                snapshotCache.lastSnapshot = { snapshot: msg.snapshot, ts: Date.now() };
+                snapshotCache.latestSig = (msg.snapshot && msg.snapshot.selectionSignature) || snapshotCache.latestSig;
+                snapshotCache.document = (msg.snapshot && msg.snapshot.document) || snapshotCache.document;
+                snapshotCache.last = {
+                  selectionSignature: msg.snapshot.selectionSignature,
+                  selectionSummary: msg.snapshot.selectionSummary,
+                  document: msg.snapshot.document || snapshotCache.document || null,
+                  ts: Date.now()
+                };
+                removeStatusIndicator(true);
+                resolve(msg.snapshot);
+              } else if (msg.type === 'phase1_snapshot_error') {
+                clearTimeout(timeout);
+                window.removeEventListener('message', listener);
+                removeStatusIndicator(true);
+                reject(new Error(msg.error || 'snapshot_error'));
+              }
+            };
+            window.addEventListener('message', listener);
+            parent.postMessage({ pluginMessage: { type: 'build_phase1_snapshot' } }, '*');
+          });
+        }
+
+        let snapshot = undefined;
+        const latestSig = snapshotCache.latestSig || (snapshotCache.last && snapshotCache.last.selectionSignature) || null;
+        const haveExact = snapshotCache.lastSnapshot && snapshotCache.lastSnapshot.snapshot && (snapshotCache.lastSnapshot.snapshot.selectionSignature === latestSig) && ((Date.now() - snapshotCache.lastSnapshot.ts) <= SNAPSHOT_TTL_MS);
+        if (haveExact) {
+          snapshot = snapshotCache.lastSnapshot.snapshot;
+        } else {
+          showStatusIndicator('Gathering context…');
+          try {
+            snapshot = await requestSnapshotFromPlugin();
+          } catch (e) {
+            // Proceed without snapshot on failure
+          } finally {
+            removeStatusIndicator(true);
+          }
+        }
+
         // Send to bridge
-        state.socket.send(JSON.stringify({ type: 'user_prompt', prompt: text }));
+        const payload = snapshot ? { type: 'user_prompt', prompt: text, snapshot } : { type: 'user_prompt', prompt: text };
+        state.socket.send(JSON.stringify(payload));
 
         // Show thinking status until streaming begins
         showStatusIndicator(getStatusMessage('thinking'));
@@ -848,6 +945,21 @@
         const message = event.data.pluginMessage;
         if (!message) return;
         switch (message.type) {
+          case 'document_info': {
+            snapshotCache.document = { pageId: message.pageId, pageName: message.pageName };
+            break;
+          }
+          case 'selection_summary': {
+            const doc = message.document || snapshotCache.document || null;
+            snapshotCache.last = {
+              selectionSignature: message.selectionSignature,
+              selectionSummary: message.selectionSummary,
+              document: doc,
+              ts: Date.now()
+            };
+            snapshotCache.latestSig = message.selectionSignature;
+            break;
+          }
           case 'connection-status': {
             if (message.connected) {
               hideError();

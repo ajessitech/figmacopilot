@@ -48,7 +48,7 @@ Create a `.env` file inside the `backend/` directory:
 ```bash
 # backend/.env
 OPENAI_API_KEY=your_openai_api_key_here
-OPENAI_MODEL=gpt-4.1-nano # Or any other model like gpt-4o-mini
+OPENAI_MODEL=gpt-4.1-nano 
 ```
 
 ### 3. Start Development Environment

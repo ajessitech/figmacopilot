@@ -6,6 +6,7 @@ and the Figma plugin via WebSocket tool calls and responses.
 """
 
 import asyncio
+import os
 import json
 import uuid
 import logging
@@ -92,6 +93,28 @@ class FigmaCommunicator:
         """
         if not self.websocket:
             raise RuntimeError("WebSocket connection not available")
+        
+        # Phase-1 guardrails: restrict tool usage to minimal context-only tools
+        try:
+            phase1_guard = os.getenv("PHASE1_TOOL_GUARD", "true").lower() in ("1", "true", "yes")
+            phase1_mode = os.getenv("PHASE1_MODE", "true").lower() in ("1", "true", "yes")
+            allow_images = os.getenv("ALLOW_IMAGES", "false").lower() in ("1", "true", "yes")
+            if (not allow_images) and command == "export_node_as_image":
+                raise RuntimeError("Phase-1 guard: image export is disabled in this phase.")
+            if phase1_guard and phase1_mode:
+                allowed_tools = {"get_document_info", "get_selection"}
+                # Full-context gather is optionally allowed when enabled by system
+                if os.getenv("PHASE1_USE_FULL_CONTEXT", "false").lower() in ("1", "true", "yes"):
+                    allowed_tools.add("gather_full_context")
+                if command not in allowed_tools:
+                    allowed_list = ", ".join(sorted(allowed_tools))
+                    raise RuntimeError(
+                        f"Phase-1 guard: tool '{command}' is disabled. Provide analysis only. Allowed tools: {allowed_list}"
+                    )
+        except Exception as guard_err:
+            # Surface guard errors as friendly messages
+            logger.error(str(guard_err))
+            raise
         
         # Generate unique ID for this request
         request_id = self.generate_id()

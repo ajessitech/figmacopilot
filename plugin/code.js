@@ -564,40 +564,71 @@ function registerDefaultCommands() {
   commandRegistry.set("create_component", createComponent);
   commandRegistry.set("publish_components", publishComponents);
   commandRegistry.set("get_instance_overrides", async (p) => {
-    if (p && p.instanceNodeId) {
-      const instanceNode = await figma.getNodeByIdAsync(p.instanceNodeId);
-      if (!instanceNode) {
-        throw new Error(`Instance node not found with ID: ${p.instanceNodeId}`);
+    try {
+      if (p && p.instanceNodeId) {
+        const instanceNode = await figma.getNodeByIdAsync(p.instanceNodeId);
+        if (!instanceNode) {
+          const payload = { code: "node_not_found", message: "Instance node not found", details: { nodeId: p.instanceNodeId } };
+          logger.error("❌ get_instance_overrides failed", { code: payload.code, originalError: payload.message, details: payload.details });
+          throw new Error(JSON.stringify(payload));
+        }
+        return await getInstanceOverrides(instanceNode);
       }
-      return await getInstanceOverrides(instanceNode);
+      return await getInstanceOverrides();
+    } catch (error) {
+      try {
+        const maybe = JSON.parse(error && error.message ? error.message : String(error));
+        if (maybe && maybe.code) throw error;
+      } catch (_) {}
+      const payload = { code: "unknown_plugin_error", message: (error && error.message) || String(error), details: {} };
+      logger.error("❌ get_instance_overrides failed", { code: payload.code, originalError: payload.message, details: payload.details });
+      throw new Error(JSON.stringify(payload));
     }
-    return await getInstanceOverrides();
   });
   commandRegistry.set("set_instance_overrides", async (p) => {
-    if (p && p.targetNodeIds) {
+    try {
+      if (!(p && p.targetNodeIds)) {
+        const payload = { code: "missing_parameter", message: "Missing targetNodeIds parameter", details: {} };
+        logger.error("❌ set_instance_overrides failed", { code: payload.code, originalError: payload.message, details: payload.details });
+        throw new Error(JSON.stringify(payload));
+      }
       if (!Array.isArray(p.targetNodeIds)) {
-        throw new Error("targetNodeIds must be an array");
+        const payload = { code: "invalid_parameter", message: "targetNodeIds must be an array", details: { receivedType: typeof p.targetNodeIds } };
+        logger.error("❌ set_instance_overrides failed", { code: payload.code, originalError: payload.message, details: payload.details });
+        throw new Error(JSON.stringify(payload));
       }
       const targetNodes = await getValidTargetInstances(p.targetNodeIds);
       if (!targetNodes.success) {
-        figma.notify(targetNodes.message);
-        return { success: false, message: targetNodes.message };
+        const payload = { code: "no_valid_instances", message: targetNodes.message || "No valid instances provided", details: { targetNodeIds: p.targetNodeIds } };
+        logger.error("❌ set_instance_overrides failed", { code: payload.code, originalError: payload.message, details: payload.details });
+        throw new Error(JSON.stringify(payload));
       }
-      if (p.sourceInstanceId) {
-        let sourceInstanceData = await getSourceInstanceData(p.sourceInstanceId);
-        if (!sourceInstanceData.success) {
-          figma.notify(sourceInstanceData.message);
-          return { success: false, message: sourceInstanceData.message };
-        }
-        return await setInstanceOverrides(targetNodes.targetInstances, sourceInstanceData);
-      } else {
-        throw new Error("Missing sourceInstanceId parameter");
+      if (!p.sourceInstanceId) {
+        const payload = { code: "missing_parameter", message: "Missing sourceInstanceId parameter", details: {} };
+        logger.error("❌ set_instance_overrides failed", { code: payload.code, originalError: payload.message, details: payload.details });
+        throw new Error(JSON.stringify(payload));
       }
+      const sourceInstanceData = await getSourceInstanceData(p.sourceInstanceId);
+      if (!sourceInstanceData.success) {
+        const payload = { code: "source_instance_invalid", message: sourceInstanceData.message || "Invalid source instance", details: { sourceInstanceId: p.sourceInstanceId } };
+        logger.error("❌ set_instance_overrides failed", { code: payload.code, originalError: payload.message, details: payload.details });
+        throw new Error(JSON.stringify(payload));
+      }
+      return await setInstanceOverrides(targetNodes.targetInstances, sourceInstanceData, p || {});
+    } catch (error) {
+      try {
+        const maybe = JSON.parse(error && error.message ? error.message : String(error));
+        if (maybe && maybe.code) throw error;
+      } catch (_) {}
+      const payload = { code: "unknown_plugin_error", message: (error && error.message) || String(error), details: {} };
+      logger.error("❌ set_instance_overrides failed", { code: payload.code, originalError: payload.message, details: payload.details });
+      throw new Error(JSON.stringify(payload));
     }
-    throw new Error("Missing targetNodeIds parameter");
   });
   // Text batch ops
   commandRegistry.set("scan_text_nodes", scanTextNodes);
+  // Analysis / inspection
+  commandRegistry.set("scan_nodes_by_types", scanNodesByTypes);
   commandRegistry.set("set_multiple_text_contents", setMultipleTextContents);
   // Grouping / parentage
   commandRegistry.set("group", group);
@@ -617,6 +648,11 @@ function registerDefaultCommands() {
   commandRegistry.set("set_gradient_fill", setGradientFill);
   commandRegistry.set("set_range_text_style", setRangeTextStyle);
   commandRegistry.set("list_available_fonts", listAvailableFonts);
+  // Style creation
+  commandRegistry.set("create_paint_style", createPaintStyle);
+  commandRegistry.set("create_text_style", createTextStyle);
+  commandRegistry.set("create_effect_style", createEffectStyle);
+  commandRegistry.set("create_grid_style", createGridStyle);
   // Comments (read-only)
   commandRegistry.set("get_comments", getComments);
   // Prototyping & analysis
@@ -638,8 +674,6 @@ async function handleCommand(command, params) {
       return await createRectangle(params);
     case "delete_node":
       return await deleteNode(params);
-    case "delete_multiple_nodes":
-      return await deleteMultipleNodes(params);
     case "get_styles":
       return await getStyles(params);
     // case "get_team_components":
@@ -649,55 +683,6 @@ async function handleCommand(command, params) {
       return await setTextContent(params);
     case "clone_node":
       return await cloneNode(params);
-    case "scan_text_nodes":
-      return await scanTextNodes(params);
-    case "set_multiple_text_contents":
-      return await setMultipleTextContents(params);
-    case "scan_nodes_by_types":
-      return await scanNodesByTypes(params);
-    case "get_instance_overrides":
-      // Check if instanceNode parameter is provided
-      if (params && params.instanceNodeId) {
-        // Get the instance node by ID
-        const instanceNode = await figma.getNodeByIdAsync(params.instanceNodeId);
-        if (!instanceNode) {
-          throw new Error(`Instance node not found with ID: ${params.instanceNodeId}`);
-        }
-        return await getInstanceOverrides(instanceNode);
-      }
-      // Call without instance node if not provided
-      return await getInstanceOverrides();
-
-    case "set_instance_overrides":
-      // Check if instanceNodeIds parameter is provided
-      if (params && params.targetNodeIds) {
-        // Validate that targetNodeIds is an array
-        if (!Array.isArray(params.targetNodeIds)) {
-          throw new Error("targetNodeIds must be an array");
-        }
-
-        // Get the instance nodes by IDs
-        const targetNodes = await getValidTargetInstances(params.targetNodeIds);
-        if (!targetNodes.success) {
-          figma.notify(targetNodes.message);
-          return { success: false, message: targetNodes.message };
-        }
-
-        if (params.sourceInstanceId) {
-
-          // get source instance data
-          let sourceInstanceData = null;
-          sourceInstanceData = await getSourceInstanceData(params.sourceInstanceId);
-
-          if (!sourceInstanceData.success) {
-            figma.notify(sourceInstanceData.message);
-            return { success: false, message: sourceInstanceData.message };
-          }
-          return await setInstanceOverrides(targetNodes.targetInstances, sourceInstanceData);
-        } else {
-          throw new Error("Missing sourceInstanceId parameter");
-        }
-      }
     case "set_layout_mode":
       return await setLayoutMode(params);
     case "set_padding":
@@ -709,30 +694,11 @@ async function handleCommand(command, params) {
     case "set_item_spacing":
       return await setItemSpacing(params);
     
-    case "zoom":
-      return await zoom(params);
-    case "center":
-      return await center(params);
-    case "scroll_and_zoom_into_view":
-      return await scrollAndZoomIntoView(params);
-    case "group":
-        return await group(params);
-    case "ungroup":
-        return await ungroup(params);
-    
-    case "reparent":
-        return await reparent(params);
-    case "insert_child":
-        return await insertChild(params);
-    
     
     case "create_image":
         return await createImage(params);
     case "get_image_by_hash":
         return await getImageByHash(params);
-    
-    case "get_comments":
-        return await getComments(params);
     
     case "selections_context":
       return await selectionsContext(params);
@@ -3817,23 +3783,50 @@ async function setCornerRadius(params) {
 
 // -------- TOOL : set_text_content --------
 async function setTextContent(params) {
-  const { nodeId, text, smartStrategy } = params || {};
+  const { nodeId, text, smartStrategy, fallbackFont, select } = params || {};
 
-  if (!nodeId) {
-    throw new Error("Missing nodeId parameter");
+  if (!nodeId || typeof nodeId !== "string") {
+    logger.error("❌ set_text_content failed", { code: "missing_parameter", originalError: "nodeId is required", details: { nodeId } });
+    throw new Error(JSON.stringify({ code: "missing_parameter", message: "Missing required parameter 'nodeId'", details: { nodeId } }));
   }
 
-  if (text === undefined) {
-    throw new Error("Missing text parameter");
+  if (text === undefined || text === null) {
+    logger.error("❌ set_text_content failed", { code: "missing_parameter", originalError: "text is required", details: { text } });
+    throw new Error(JSON.stringify({ code: "missing_parameter", message: "Missing required parameter 'text'", details: {} }));
+  }
+
+  // Validate smartStrategy when provided
+  const allowedStrategies = ["prevail", "strict", "experimental"];
+  if (smartStrategy !== undefined && smartStrategy !== null && !allowedStrategies.includes(smartStrategy)) {
+    logger.error("❌ set_text_content failed", { code: "invalid_parameter", originalError: "Invalid smartStrategy", details: { smartStrategy, allowed: allowedStrategies } });
+    throw new Error(JSON.stringify({ code: "invalid_parameter", message: "Invalid 'smartStrategy' value", details: { smartStrategy, allowed: allowedStrategies } }));
+  }
+
+  // Validate fallbackFont when provided
+  let validatedFallbackFont = undefined;
+  if (fallbackFont !== undefined) {
+    if (fallbackFont && typeof fallbackFont === "object" && typeof fallbackFont.family === "string" && typeof fallbackFont.style === "string") {
+      validatedFallbackFont = { family: fallbackFont.family, style: fallbackFont.style };
+    } else {
+      logger.error("❌ set_text_content failed", { code: "invalid_parameter", originalError: "fallbackFont must be { family, style }", details: { fallbackFont } });
+      throw new Error(JSON.stringify({ code: "invalid_parameter", message: "'fallbackFont' must be an object with string family and style", details: {} }));
+    }
   }
 
   const node = await figma.getNodeByIdAsync(nodeId);
   if (!node) {
-    throw new Error(`Node not found with ID: ${nodeId}`);
+    logger.error("❌ set_text_content failed", { code: "node_not_found", originalError: `Node not found`, details: { nodeId } });
+    throw new Error(JSON.stringify({ code: "node_not_found", message: `Node not found`, details: { nodeId } }));
   }
 
   if (node.type !== "TEXT") {
-    throw new Error(`Node is not a text node: ${nodeId}`);
+    logger.error("❌ set_text_content failed", { code: "invalid_node_type", originalError: `Node is not a TEXT node`, details: { nodeId, nodeType: node.type } });
+    throw new Error(JSON.stringify({ code: "invalid_node_type", message: `Node is not a TEXT node`, details: { nodeId, nodeType: node.type } }));
+  }
+
+  if (node.locked === true) {
+    logger.error("❌ set_text_content failed", { code: "node_locked", originalError: `Node is locked`, details: { nodeId } });
+    throw new Error(JSON.stringify({ code: "node_locked", message: `Node is locked`, details: { nodeId } }));
   }
 
   try {
@@ -3844,22 +3837,47 @@ async function setTextContent(params) {
       }
     } catch (_) {}
 
-    const options = smartStrategy ? { smartStrategy } : undefined;
-    await setCharacters(node, text, options);
+    const textValue = typeof text === "string" ? text : String(text);
+    const options = (smartStrategy || validatedFallbackFont) ? { smartStrategy, fallbackFont: validatedFallbackFont } : undefined;
+    const ok = await setCharacters(node, textValue, options);
+    if (!ok) {
+      logger.error("❌ set_text_content failed", { code: "set_characters_failed", originalError: "Failed to set characters", details: { nodeId } });
+      throw new Error(JSON.stringify({ code: "set_characters_failed", message: "Failed to set characters on text node", details: { nodeId } }));
+    }
+
+    if (select === true) {
+      try { figma.currentPage.selection = [node]; } catch (_) {}
+    }
 
     let fontNameResult = null;
     try {
       fontNameResult = (node.fontName === figma.mixed) ? "MIXED" : node.fontName;
     } catch (_) { fontNameResult = null; }
 
-    return {
-      id: node.id,
+    const payload = {
+      success: true,
+      summary: `Updated text content on '${node.name}'`,
+      modifiedNodeIds: [node.id],
+      nodeId: node.id,
       name: node.name,
       characters: node.characters,
       fontName: fontNameResult,
+      smartStrategy: smartStrategy || null,
     };
+    logger.info("✅ set_text_content succeeded", { nodeId: node.id, name: node.name, textLength: textValue.length });
+    return payload;
   } catch (error) {
-    throw new Error(`Error setting text content: ${error.message}`);
+    try {
+      const parsed = JSON.parse(error && error.message ? error.message : String(error));
+      if (parsed && parsed.code) {
+        logger.error("❌ set_text_content failed", { code: parsed.code, originalError: (error && error.message) || String(error), details: parsed.details || {} });
+        throw new Error(JSON.stringify(parsed));
+      }
+    } catch (_) {
+      // Not JSON, normalize
+    }
+    logger.error("❌ set_text_content failed", { code: "set_text_content_failed", originalError: (error && error.message) || String(error), details: { nodeId } });
+    throw new Error(JSON.stringify({ code: "set_text_content_failed", message: `Error setting text content: ${(error && error.message) || String(error)}`, details: { nodeId } }));
   }
 }
 
@@ -3900,7 +3918,7 @@ function uniqBy(arr, predicate) {
   );
 }
 // ======================================================
-// Section: Text Helpers (Font loading and character utilities)
+// Section: Text Helpers (Font loading and character utilities) INCOMPLETE
 // ======================================================
 const setCharacters = async (node, characters, options) => {
   const fallbackFont = (options && options.fallbackFont) || {
@@ -4109,238 +4127,206 @@ const setCharactersWithSmartMatchFont = async (
 // ======================================================
 // -------- TOOL : scan_text_nodes --------
 async function scanTextNodes(params) {
-  console.log(`Starting to scan text nodes from node ID: ${params.nodeId}`);
-  const {
-    nodeId,
-    useChunking = true,
-    chunkSize = 10,
-    commandId = generateCommandId(),
-  } = params || {};
+  try {
+    const {
+      nodeId,
+      useChunking = true,
+      chunkSize = 10,
+      includeInvisible = false,
+      highlight = true,
+      maxDepth,
+      textFilter,
+      caseSensitive = false,
+      includeCharacters = true,
+      commandId = generateCommandId(),
+    } = params || {};
 
-  const node = await figma.getNodeByIdAsync(nodeId);
+    if (!nodeId || typeof nodeId !== "string") {
+      logger.error("scan_text_nodes failed", { code: "missing_parameter", originalError: "'nodeId' is required", details: { nodeId } });
+      throw new Error(JSON.stringify({ code: "missing_parameter", message: "'nodeId' is required", details: { nodeId } }));
+    }
+    if (typeof useChunking !== "boolean") {
+      logger.error("scan_text_nodes failed", { code: "invalid_parameter", originalError: "'useChunking' must be boolean", details: { useChunking } });
+      throw new Error(JSON.stringify({ code: "invalid_parameter", message: "'useChunking' must be boolean", details: { useChunking } }));
+    }
+    if (chunkSize != null && (!Number.isFinite(chunkSize) || chunkSize <= 0)) {
+      logger.error("scan_text_nodes failed", { code: "invalid_parameter", originalError: "'chunkSize' must be a positive number", details: { chunkSize } });
+      throw new Error(JSON.stringify({ code: "invalid_parameter", message: "'chunkSize' must be a positive number", details: { chunkSize } }));
+    }
+    if (maxDepth != null && (!Number.isInteger(maxDepth) || maxDepth < 0)) {
+      logger.error("scan_text_nodes failed", { code: "invalid_parameter", originalError: "'maxDepth' must be a non-negative integer", details: { maxDepth } });
+      throw new Error(JSON.stringify({ code: "invalid_parameter", message: "'maxDepth' must be a non-negative integer", details: { maxDepth } }));
+    }
+    if (textFilter != null && typeof textFilter !== "string") {
+      logger.error("scan_text_nodes failed", { code: "invalid_parameter", originalError: "'textFilter' must be a string", details: { textFilter } });
+      throw new Error(JSON.stringify({ code: "invalid_parameter", message: "'textFilter' must be a string", details: { textFilter } }));
+    }
 
-  if (!node) {
-    console.error(`Node with ID ${nodeId} not found`);
-    // Send error progress update
-    sendProgressUpdate(
-      commandId,
-      "scan_text_nodes",
-      "error",
-      0,
-      0,
-      0,
-      `Node with ID ${nodeId} not found`,
-      { error: `Node not found: ${nodeId}` }
-    );
-    throw new Error(`Node with ID ${nodeId} not found`);
-  }
+    logger.info("🔎 Starting to scan text nodes", { nodeId, useChunking, chunkSize, includeInvisible, highlight, maxDepth, hasTextFilter: !!textFilter, caseSensitive, includeCharacters });
 
-  // If chunking is not enabled, use the original implementation
-  if (!useChunking) {
-    const textNodes = [];
-    try {
-      // Send started progress update
+    const node = await figma.getNodeByIdAsync(nodeId);
+    if (!node) {
+      const message = `Node not found`;
+      sendProgressUpdate(commandId, "scan_text_nodes", "error", 0, 0, 0, message, { nodeId });
+      logger.error("❌ scan_text_nodes failed", { code: "node_not_found", originalError: message, details: { nodeId } });
+      throw new Error(JSON.stringify({ code: "node_not_found", message, details: { nodeId } }));
+    }
+
+    const matchesFilter = (chars) => {
+      if (!textFilter) return true;
+      try {
+        if (chars == null) return false;
+        const source = String(chars);
+        return caseSensitive ? source.includes(textFilter) : source.toLowerCase().includes(textFilter.toLowerCase());
+      } catch (_) { return false; }
+    };
+
+    if (!useChunking) {
+      const textNodes = [];
       sendProgressUpdate(
         commandId,
         "scan_text_nodes",
         "started",
         0,
-        1, // Not known yet how many nodes there are
+        1,
         0,
         `Starting scan of node "${node.name || nodeId}" without chunking`,
         null
       );
 
-      await findTextNodes(node, [], 0, textNodes);
+      await findTextNodes(node, [], 0, textNodes, { includeInvisible, highlight, maxDepth, includeCharacters });
 
-      // Send completed progress update
+      const filtered = textNodes.filter(n => matchesFilter(n.characters));
+
       sendProgressUpdate(
         commandId,
         "scan_text_nodes",
         "completed",
         100,
-        textNodes.length,
-        textNodes.length,
-        `Scan complete. Found ${textNodes.length} text nodes.`,
-        { textNodes }
+        filtered.length,
+        filtered.length,
+        `Scan complete. Found ${filtered.length} text nodes.`,
+        { textNodes: filtered }
       );
 
-      return {
-        success: true,
-        message: `Scanned ${textNodes.length} text nodes.`,
-        count: textNodes.length,
-        textNodes: textNodes,
-        commandId,
-      };
-    } catch (error) {
-      console.error("Error scanning text nodes:", error);
+      const payload = { nodesCount: filtered.length, textNodes: filtered, commandId };
+      logger.info("✅ scan_text_nodes succeeded", { nodesCount: payload.nodesCount });
+      return payload;
+    }
 
-      // Send error progress update
+    logger.info("⏩ Using chunked scanning", { chunkSize });
+    const nodesToProcess = [];
+    sendProgressUpdate(
+      commandId,
+      "scan_text_nodes",
+      "started",
+      0,
+      0,
+      0,
+      `Starting chunked scan of node "${node.name || nodeId}"`,
+      { chunkSize }
+    );
+
+    await collectNodesToProcess(node, [], 0, nodesToProcess, { includeInvisible, maxDepth });
+
+    const totalNodes = nodesToProcess.length;
+    const totalChunks = Math.ceil(totalNodes / chunkSize);
+
+    sendProgressUpdate(
+      commandId,
+      "scan_text_nodes",
+      "in_progress",
+      5,
+      totalNodes,
+      0,
+      `Found ${totalNodes} nodes to scan. Will process in ${totalChunks} chunks.`,
+      { totalNodes, totalChunks, chunkSize }
+    );
+
+    const allTextNodes = [];
+    let processedNodes = 0;
+    let chunksProcessed = 0;
+
+    for (let i = 0; i < totalNodes; i += chunkSize) {
+      const chunkEnd = Math.min(i + chunkSize, totalNodes);
       sendProgressUpdate(
         commandId,
         "scan_text_nodes",
-        "error",
-        0,
-        0,
-        0,
-        `Error scanning text nodes: ${error.message}`,
-        { error: error.message }
+        "in_progress",
+        Math.round(5 + (chunksProcessed / totalChunks) * 90),
+        totalNodes,
+        processedNodes,
+        `Processing chunk ${chunksProcessed + 1}/${totalChunks}`,
+        { currentChunk: chunksProcessed + 1, totalChunks, textNodesFound: allTextNodes.length }
       );
 
-      throw new Error(`Error scanning text nodes: ${error.message}`);
-    }
-  }
+      const chunkNodes = nodesToProcess.slice(i, chunkEnd);
+      const chunkTextNodes = [];
 
-  // Chunked implementation
-  console.log(`Using chunked scanning with chunk size: ${chunkSize}`);
-
-  // First, collect all nodes to process (without processing them yet)
-  const nodesToProcess = [];
-
-  // Send started progress update
-  sendProgressUpdate(
-    commandId,
-    "scan_text_nodes",
-    "started",
-    0,
-    0, // Not known yet how many nodes there are
-    0,
-    `Starting chunked scan of node "${node.name || nodeId}"`,
-    { chunkSize }
-  );
-
-  await collectNodesToProcess(node, [], 0, nodesToProcess);
-
-  const totalNodes = nodesToProcess.length;
-  console.log(`Found ${totalNodes} total nodes to process`);
-
-  // Calculate number of chunks needed
-  const totalChunks = Math.ceil(totalNodes / chunkSize);
-  console.log(`Will process in ${totalChunks} chunks`);
-
-  // Send update after node collection
-  sendProgressUpdate(
-    commandId,
-    "scan_text_nodes",
-    "in_progress",
-    5, // 5% progress for collection phase
-    totalNodes,
-    0,
-    `Found ${totalNodes} nodes to scan. Will process in ${totalChunks} chunks.`,
-    {
-      totalNodes,
-      totalChunks,
-      chunkSize,
-    }
-  );
-
-  // Process nodes in chunks
-  const allTextNodes = [];
-  let processedNodes = 0;
-  let chunksProcessed = 0;
-
-  for (let i = 0; i < totalNodes; i += chunkSize) {
-    const chunkEnd = Math.min(i + chunkSize, totalNodes);
-    console.log(
-      `Processing chunk ${chunksProcessed + 1}/${totalChunks} (nodes ${i} to ${chunkEnd - 1
-      })`
-    );
-
-    // Send update before processing chunk
-    sendProgressUpdate(
-      commandId,
-      "scan_text_nodes",
-      "in_progress",
-      Math.round(5 + (chunksProcessed / totalChunks) * 90), // 5-95% for processing
-      totalNodes,
-      processedNodes,
-      `Processing chunk ${chunksProcessed + 1}/${totalChunks}`,
-      {
-        currentChunk: chunksProcessed + 1,
-        totalChunks,
-        textNodesFound: allTextNodes.length,
-      }
-    );
-
-    const chunkNodes = nodesToProcess.slice(i, chunkEnd);
-    const chunkTextNodes = [];
-
-    // Process each node in this chunk
-    for (const nodeInfo of chunkNodes) {
-      if (nodeInfo.node.type === "TEXT") {
-        try {
-          const textNodeInfo = await processTextNode(
-            nodeInfo.node,
-            nodeInfo.parentPath,
-            nodeInfo.depth
-          );
-          if (textNodeInfo) {
-            chunkTextNodes.push(textNodeInfo);
+      for (const nodeInfo of chunkNodes) {
+        if (nodeInfo.node.type === "TEXT") {
+          try {
+            const textNodeInfo = await processTextNode(
+              nodeInfo.node,
+              nodeInfo.parentPath,
+              nodeInfo.depth,
+              { highlight, includeCharacters }
+            );
+            if (textNodeInfo && matchesFilter(textNodeInfo.characters)) {
+              chunkTextNodes.push(textNodeInfo);
+            }
+          } catch (error) {
+            logger.error("scan_text_nodes text node processing failed", { code: "process_text_node_failed", originalError: (error && error.message) || String(error) });
           }
-        } catch (error) {
-          console.error(`Error processing text node: ${error.message}`);
-          // Continue with other nodes
         }
+        await delay(5);
       }
 
-      // Brief delay to allow UI updates and prevent freezing
-      await delay(5);
+      Array.prototype.push.apply(allTextNodes, chunkTextNodes);
+      processedNodes += chunkNodes.length;
+      chunksProcessed++;
+
+      sendProgressUpdate(
+        commandId,
+        "scan_text_nodes",
+        "in_progress",
+        Math.round(5 + (chunksProcessed / totalChunks) * 90),
+        totalNodes,
+        processedNodes,
+        `Processed chunk ${chunksProcessed}/${totalChunks}. Found ${allTextNodes.length} text nodes so far.`,
+        { currentChunk: chunksProcessed, totalChunks, processedNodes, textNodesFound: allTextNodes.length, chunkResult: chunkTextNodes }
+      );
+
+      if (i + chunkSize < totalNodes) {
+        await delay(50);
+      }
     }
 
-    // Add results from this chunk
-    Array.prototype.push.apply(allTextNodes, chunkTextNodes);
-    processedNodes += chunkNodes.length;
-    chunksProcessed++;
-
-    // Send update after processing chunk
     sendProgressUpdate(
       commandId,
       "scan_text_nodes",
-      "in_progress",
-      Math.round(5 + (chunksProcessed / totalChunks) * 90), // 5-95% for processing
+      "completed",
+      100,
       totalNodes,
       processedNodes,
-      `Processed chunk ${chunksProcessed}/${totalChunks}. Found ${allTextNodes.length} text nodes so far.`,
-      {
-        currentChunk: chunksProcessed,
-        totalChunks,
-        processedNodes,
-        textNodesFound: allTextNodes.length,
-        chunkResult: chunkTextNodes,
-      }
+      `Scan complete. Found ${allTextNodes.length} text nodes.`,
+      { textNodes: allTextNodes, processedNodes, chunks: chunksProcessed }
     );
 
-    // Small delay between chunks to prevent UI freezing
-    if (i + chunkSize < totalNodes) {
-      await delay(50);
-    }
+    const payload = { nodesCount: allTextNodes.length, textNodes: allTextNodes, commandId };
+    logger.info("✅ scan_text_nodes succeeded", { nodesCount: payload.nodesCount });
+    return payload;
+  } catch (error) {
+    try {
+      const payload = JSON.parse(error && error.message ? error.message : String(error));
+      if (payload && payload.code) {
+        logger.error("❌ scan_text_nodes failed", { code: payload.code, originalError: (error && error.message) || String(error), details: payload.details || {} });
+        throw new Error(JSON.stringify(payload));
+      }
+    } catch (_) {}
+    logger.error("❌ scan_text_nodes failed", { code: "scan_failed", originalError: (error && error.message) || String(error) });
+    throw new Error(JSON.stringify({ code: "scan_failed", message: "Failed to scan text nodes", details: {} }));
   }
-
-  // Send completed progress update
-  sendProgressUpdate(
-    commandId,
-    "scan_text_nodes",
-    "completed",
-    100,
-    totalNodes,
-    processedNodes,
-    `Scan complete. Found ${allTextNodes.length} text nodes.`,
-    {
-      textNodes: allTextNodes,
-      processedNodes,
-      chunks: chunksProcessed,
-    }
-  );
-
-  return {
-    success: true,
-    message: `Chunked scan complete. Found ${allTextNodes.length} text nodes.`,
-    totalNodes: allTextNodes.length,
-    processedNodes: processedNodes,
-    chunks: chunksProcessed,
-    textNodes: allTextNodes,
-    commandId,
-  };
 }
 
 // Helper function to collect all nodes that need to be processed
@@ -4348,10 +4334,12 @@ async function collectNodesToProcess(
   node,
   parentPath = [],
   depth = 0,
-  nodesToProcess = []
+  nodesToProcess = [],
+  opts = {}
 ) {
-  // Skip invisible nodes
-  if (node.visible === false) return;
+  const { includeInvisible = false, maxDepth } = opts || {};
+  if (typeof maxDepth === "number" && depth > maxDepth) return;
+  if (!includeInvisible && node.visible === false) return;
 
   // Get the path to this node
   const nodePath = parentPath.concat([node.name || `Unnamed ${node.type}`]);
@@ -4366,14 +4354,15 @@ async function collectNodesToProcess(
   // Recursively add children
   if ("children" in node) {
     for (const child of node.children) {
-      await collectNodesToProcess(child, nodePath, depth + 1, nodesToProcess);
+      await collectNodesToProcess(child, nodePath, depth + 1, nodesToProcess, opts);
     }
   }
 }
 
 // Process a single text node
-async function processTextNode(node, parentPath, depth) {
+async function processTextNode(node, parentPath, depth, opts = {}) {
   if (node.type !== "TEXT") return null;
+  const { highlight = true, includeCharacters = true } = opts || {};
 
   try {
     // Safely extract font information
@@ -4392,7 +4381,6 @@ async function processTextNode(node, parentPath, depth) {
       id: node.id,
       name: node.name || "Text",
       type: node.type,
-      characters: node.characters,
       fontSize: typeof node.fontSize === "number" ? node.fontSize : 0,
       fontFamily: fontFamily,
       fontStyle: fontStyle,
@@ -4403,34 +4391,24 @@ async function processTextNode(node, parentPath, depth) {
       path: parentPath.join(" > "),
       depth: depth,
     };
+    if (includeCharacters) {
+      safeTextNode.characters = node.characters;
+    }
 
-    // Highlight the node briefly (optional visual feedback)
-    try {
-      const originalFills = JSON.parse(JSON.stringify(node.fills));
-      node.fills = [
-        {
-          type: "SOLID",
-          color: { r: 1, g: 0.5, b: 0 },
-          opacity: 0.3,
-        },
-      ];
-
-      // Brief delay for the highlight to be visible
-      await delay(100);
-
+    if (highlight) {
       try {
-        node.fills = originalFills;
-      } catch (err) {
-        console.error("Error resetting fills:", err);
+        const originalFills = JSON.parse(JSON.stringify(node.fills));
+        node.fills = [ { type: "SOLID", color: { r: 1, g: 0.5, b: 0 }, opacity: 0.3 } ];
+        await delay(100);
+        try { node.fills = originalFills; } catch (err) { logger.error("scan_text_nodes highlight reset failed", { code: "highlight_reset_failed", originalError: (err && err.message) || String(err) }); }
+      } catch (highlightErr) {
+        logger.error("scan_text_nodes highlight failed", { code: "highlight_failed", originalError: (highlightErr && highlightErr.message) || String(highlightErr) });
       }
-    } catch (highlightErr) {
-      console.error("Error highlighting text node:", highlightErr);
-      // Continue anyway, highlighting is just visual feedback
     }
 
     return safeTextNode;
   } catch (nodeErr) {
-    console.error("Error processing text node:", nodeErr);
+    logger.error("scan_text_nodes processing failed", { code: "process_text_node_failed", originalError: (nodeErr && nodeErr.message) || String(nodeErr) });
     return null;
   }
 }
@@ -4441,9 +4419,10 @@ function delay(ms) {
 }
 
 // Keep the original findTextNodes for backward compatibility
-async function findTextNodes(node, parentPath = [], depth = 0, textNodes = []) {
-  // Skip invisible nodes
-  if (node.visible === false) return;
+async function findTextNodes(node, parentPath = [], depth = 0, textNodes = [], opts = {}) {
+  const { includeInvisible = false, highlight = true, maxDepth, includeCharacters = true } = opts || {};
+  if (typeof maxDepth === "number" && depth > maxDepth) return;
+  if (!includeInvisible && node.visible === false) return;
 
   // Get the path to this node including its name
   const nodePath = parentPath.concat([node.name || `Unnamed ${node.type}`]);
@@ -4466,7 +4445,6 @@ async function findTextNodes(node, parentPath = [], depth = 0, textNodes = []) {
         id: node.id,
         name: node.name || "Text",
         type: node.type,
-        characters: node.characters,
         fontSize: typeof node.fontSize === "number" ? node.fontSize : 0,
         fontFamily: fontFamily,
         fontStyle: fontStyle,
@@ -4477,30 +4455,18 @@ async function findTextNodes(node, parentPath = [], depth = 0, textNodes = []) {
         path: nodePath.join(" > "),
         depth: depth,
       };
-
-      // Only highlight the node if it's not being done via API
-      try {
-        // Safe way to create a temporary highlight without causing serialization issues
-        const originalFills = JSON.parse(JSON.stringify(node.fills));
-        node.fills = [
-          {
-            type: "SOLID",
-            color: { r: 1, g: 0.5, b: 0 },
-            opacity: 0.3,
-          },
-        ];
-
-        // Promise-based delay instead of setTimeout
-        await delay(500);
-
+      if (includeCharacters) {
+        safeTextNode.characters = node.characters;
+      }
+      if (highlight) {
         try {
-          node.fills = originalFills;
-        } catch (err) {
-          console.error("Error resetting fills:", err);
+          const originalFills = JSON.parse(JSON.stringify(node.fills));
+          node.fills = [ { type: "SOLID", color: { r: 1, g: 0.5, b: 0 }, opacity: 0.3 } ];
+          await delay(500);
+          try { node.fills = originalFills; } catch (err) { logger.error("scan_text_nodes highlight reset failed", { code: "highlight_reset_failed", originalError: (err && err.message) || String(err) }); }
+        } catch (highlightErr) {
+          logger.error("scan_text_nodes highlight failed", { code: "highlight_failed", originalError: (highlightErr && highlightErr.message) || String(highlightErr) });
         }
-      } catch (highlightErr) {
-        console.error("Error highlighting text node:", highlightErr);
-        // Continue anyway, highlighting is just visual feedback
       }
 
       textNodes.push(safeTextNode);
@@ -4513,7 +4479,7 @@ async function findTextNodes(node, parentPath = [], depth = 0, textNodes = []) {
   // Recursively process children of container nodes
   if ("children" in node) {
     for (const child of node.children) {
-      await findTextNodes(child, nodePath, depth + 1, textNodes);
+      await findTextNodes(child, nodePath, depth + 1, textNodes, opts);
     }
   }
 }
@@ -4521,272 +4487,282 @@ async function findTextNodes(node, parentPath = [], depth = 0, textNodes = []) {
 // Replace text in a specific node
 // -------- TOOL : set_multiple_text_contents --------
 async function setMultipleTextContents(params) {
-  const { nodeId, text } = params || {};
-  const commandId = params.commandId || generateCommandId();
+  const {
+    nodeId,
+    text,
+    smartStrategy,
+    fallbackFont,
+    select,
+    chunkSize,
+    delayMsBetweenChunks,
+    highlight,
+    skipLocked,
+    stopOnFailure,
+    ignoreMissing,
+    previewOnly,
+  } = params || {};
+  const commandId = (params && params.commandId) || generateCommandId();
 
-  if (!nodeId || !text || !Array.isArray(text)) {
-    const errorMsg = "Missing required parameters: nodeId and text array";
-
-    // Send error progress update
-    sendProgressUpdate(
-      commandId,
-      "set_multiple_text_contents",
-      "error",
-      0,
-      0,
-      0,
-      errorMsg,
-      { error: errorMsg }
-    );
-
-    throw new Error(errorMsg);
+  // Validate required params
+  if (!nodeId || typeof nodeId !== "string") {
+    logger.error("❌ set_multiple_text_contents failed", { code: "missing_parameter", originalError: "nodeId is required", details: { nodeId } });
+    throw new Error(JSON.stringify({ code: "missing_parameter", message: "Missing required parameter 'nodeId'", details: { nodeId } }));
+  }
+  if (!Array.isArray(text)) {
+    logger.error("❌ set_multiple_text_contents failed", { code: "invalid_parameter", originalError: "'text' must be an array", details: { textType: typeof text } });
+    throw new Error(JSON.stringify({ code: "invalid_parameter", message: "Parameter 'text' must be an array of { nodeId, text }", details: {} }));
+  }
+  if (text.length === 0 && !previewOnly) {
+    logger.error("❌ set_multiple_text_contents failed", { code: "invalid_parameter", originalError: "'text' cannot be empty", details: {} });
+    throw new Error(JSON.stringify({ code: "invalid_parameter", message: "Parameter 'text' cannot be empty", details: {} }));
   }
 
-  console.log(
-    `Starting text replacement for node: ${nodeId} with ${text.length} text replacements`
-  );
+  // Validate optional parameters
+  const allowedStrategies = ["prevail", "strict", "experimental"];
+  if (smartStrategy !== undefined && smartStrategy !== null && !allowedStrategies.includes(smartStrategy)) {
+    logger.error("❌ set_multiple_text_contents failed", { code: "invalid_parameter", originalError: "Invalid smartStrategy", details: { smartStrategy, allowed: allowedStrategies } });
+    throw new Error(JSON.stringify({ code: "invalid_parameter", message: "Invalid 'smartStrategy' value", details: { smartStrategy, allowed: allowedStrategies } }));
+  }
+  let validatedFallbackFont = undefined;
+  if (fallbackFont !== undefined) {
+    if (fallbackFont && typeof fallbackFont === "object" && typeof fallbackFont.family === "string" && typeof fallbackFont.style === "string") {
+      validatedFallbackFont = { family: fallbackFont.family, style: fallbackFont.style };
+    } else {
+      logger.error("❌ set_multiple_text_contents failed", { code: "invalid_parameter", originalError: "fallbackFont must be { family, style }", details: { fallbackFont } });
+      throw new Error(JSON.stringify({ code: "invalid_parameter", message: "'fallbackFont' must be an object with string family and style", details: {} }));
+    }
+  }
+  const CHUNK_SIZE = Number.isInteger(chunkSize) && chunkSize > 0 && chunkSize <= 50 ? chunkSize : 5;
+  const INTER_CHUNK_DELAY = Number.isInteger(delayMsBetweenChunks) && delayMsBetweenChunks >= 0 ? delayMsBetweenChunks : 1000;
+  const SHOULD_HIGHLIGHT = highlight !== false; // default true
+  const SKIP_LOCKED = skipLocked !== false; // default true
+  const STOP_ON_FAILURE = stopOnFailure === true; // default false
+  const IGNORE_MISSING = ignoreMissing === true; // default false
+  const PREVIEW_ONLY = previewOnly === true; // default false
 
-  // Send started progress update
+  // Normalize entries and validate each replacement shape quickly
+  const replacements = text.map((entry, idx) => {
+    if (!entry || typeof entry !== "object") {
+      return { __invalid: true, index: idx, reason: "invalid_entry_type" };
+    }
+    const nid = entry.nodeId;
+    const t = entry.text;
+    if (typeof nid !== "string") {
+      return { __invalid: true, index: idx, reason: "missing_node_id", nodeId: nid };
+    }
+    if (t === undefined || t === null) {
+      return { __invalid: true, index: idx, reason: "missing_text", nodeId: nid };
+    }
+    return { nodeId: nid, text: String(t) };
+  });
+
+  const invalidEntries = replacements.filter(r => r.__invalid);
+  if (invalidEntries.length > 0) {
+    logger.error("❌ set_multiple_text_contents failed", { code: "invalid_parameter", originalError: "Invalid replacement entries", details: { invalidCount: invalidEntries.length } });
+    throw new Error(JSON.stringify({ code: "invalid_parameter", message: "Some replacement entries are invalid", details: { invalidCount: invalidEntries.length } }));
+  }
+
+  logger.info("🛠️ set_multiple_text_contents starting", { nodeId, totalReplacements: replacements.length, chunkSize: CHUNK_SIZE, previewOnly: PREVIEW_ONLY });
+
+  // Emit progress: started
   sendProgressUpdate(
     commandId,
     "set_multiple_text_contents",
     "started",
     0,
-    text.length,
+    replacements.length,
     0,
-    `Starting text replacement for ${text.length} nodes`,
-    { totalReplacements: text.length }
+    `Starting text replacement for ${replacements.length} nodes`,
+    { totalReplacements: replacements.length }
   );
 
-  // Define the results array and counters
   const results = [];
   let successCount = 0;
   let failureCount = 0;
+  let stoppedEarly = false;
 
-  // Split text replacements into chunks of 5
-  const CHUNK_SIZE = 5;
+  // Split into chunks
   const chunks = [];
-
-  for (let i = 0; i < text.length; i += CHUNK_SIZE) {
-    chunks.push(text.slice(i, i + CHUNK_SIZE));
+  for (let i = 0; i < replacements.length; i += CHUNK_SIZE) {
+    chunks.push(replacements.slice(i, i + CHUNK_SIZE));
   }
 
-  console.log(`Split ${text.length} replacements into ${chunks.length} chunks`);
-
-  // Send chunking info update
   sendProgressUpdate(
     commandId,
     "set_multiple_text_contents",
     "in_progress",
-    5, // 5% progress for planning phase
-    text.length,
+    5,
+    replacements.length,
     0,
-    `Preparing to replace text in ${text.length} nodes using ${chunks.length} chunks`,
-    {
-      totalReplacements: text.length,
-      chunks: chunks.length,
-      chunkSize: CHUNK_SIZE,
-    }
+    `Preparing to replace text using ${chunks.length} chunks`,
+    { totalReplacements: replacements.length, chunks: chunks.length, chunkSize: CHUNK_SIZE }
   );
 
-  // Process each chunk sequentially
+  // Process each chunk sequentially to avoid UI freezes
   for (let chunkIndex = 0; chunkIndex < chunks.length; chunkIndex++) {
     const chunk = chunks[chunkIndex];
-    console.log(
-      `Processing chunk ${chunkIndex + 1}/${chunks.length} with ${chunk.length
-      } replacements`
-    );
 
-    // Send chunk processing start update
     sendProgressUpdate(
       commandId,
       "set_multiple_text_contents",
       "in_progress",
-      Math.round(5 + (chunkIndex / chunks.length) * 90), // 5-95% for processing
-      text.length,
+      Math.round(5 + (chunkIndex / chunks.length) * 90),
+      replacements.length,
       successCount + failureCount,
       `Processing text replacements chunk ${chunkIndex + 1}/${chunks.length}`,
-      {
-        currentChunk: chunkIndex + 1,
-        totalChunks: chunks.length,
-        successCount,
-        failureCount,
-      }
+      { currentChunk: chunkIndex + 1, totalChunks: chunks.length, successCount, failureCount }
     );
 
-    // Process replacements within a chunk in parallel
+    // Process in parallel within a chunk
     const chunkPromises = chunk.map(async (replacement) => {
-      if (!replacement.nodeId || replacement.text === undefined) {
-        console.error(`Missing nodeId or text for replacement`);
-        return {
-          success: false,
-          nodeId: replacement.nodeId || "unknown",
-          error: "Missing nodeId or text in replacement entry",
-        };
-      }
-
+      const { nodeId: targetId, text: nextText } = replacement;
       try {
-        console.log(
-          `Attempting to replace text in node: ${replacement.nodeId}`
-        );
-
-        // Get the text node to update (just to check it exists and get original text)
-        const textNode = await figma.getNodeByIdAsync(replacement.nodeId);
-
+        // Resolve node
+        const textNode = await figma.getNodeByIdAsync(targetId);
         if (!textNode) {
-          console.error(`Text node not found: ${replacement.nodeId}`);
-          return {
-            success: false,
-            nodeId: replacement.nodeId,
-            error: `Node not found: ${replacement.nodeId}`,
-          };
+          return { success: false, nodeId: targetId, errorCode: "node_not_found", errorMessage: `Node not found: ${targetId}` };
         }
-
         if (textNode.type !== "TEXT") {
-          console.error(
-            `Node is not a text node: ${replacement.nodeId} (type: ${textNode.type})`
-          );
-          return {
-            success: false,
-            nodeId: replacement.nodeId,
-            error: `Node is not a text node: ${replacement.nodeId} (type: ${textNode.type})`,
-          };
+          return { success: false, nodeId: targetId, errorCode: "invalid_node_type", errorMessage: `Node is not a TEXT node: ${textNode.type}` };
         }
-
-        // Save original text for the result
-        const originalText = textNode.characters;
-        console.log(`Original text: "${originalText}"`);
-        console.log(`Will translate to: "${replacement.text}"`);
-
-        // Highlight the node before changing text
-        let originalFills;
-        try {
-          // Save original fills for restoration later
-          originalFills = JSON.parse(JSON.stringify(textNode.fills));
-          // Apply highlight color (orange with 30% opacity)
-          textNode.fills = [
-            {
-              type: "SOLID",
-              color: { r: 1, g: 0.5, b: 0 },
-              opacity: 0.3,
-            },
-          ];
-        } catch (highlightErr) {
-          console.error(
-            `Error highlighting text node: ${highlightErr.message}`
-          );
-          // Continue anyway, highlighting is just visual feedback
-        }
-
-        // Use the existing setTextContent function to handle font loading and text setting
-        await setTextContent({
-          nodeId: replacement.nodeId,
-          text: replacement.text,
-        });
-
-        // Keep highlight for a moment after text change, then restore original fills
-        if (originalFills) {
-          try {
-            // Use delay function for consistent timing
-            await delay(500);
-            textNode.fills = originalFills;
-          } catch (restoreErr) {
-            console.error(`Error restoring fills: ${restoreErr.message}`);
+        if (textNode.locked === true) {
+          if (SKIP_LOCKED) {
+            return { success: false, nodeId: targetId, errorCode: "node_locked", errorMessage: `Node is locked` };
+          } else {
+            return { success: false, nodeId: targetId, errorCode: "node_locked", errorMessage: `Node is locked` };
           }
         }
 
-        console.log(
-          `Successfully replaced text in node: ${replacement.nodeId}`
-        );
-        return {
-          success: true,
-          nodeId: replacement.nodeId,
-          originalText: originalText,
-          translatedText: replacement.text,
-        };
+        const originalText = textNode.characters;
+
+        if (PREVIEW_ONLY) {
+          return { success: true, nodeId: targetId, originalText, translatedText: nextText, preview: true };
+        }
+
+        // Optional highlight
+        let originalFills;
+        if (SHOULD_HIGHLIGHT) {
+          try {
+            originalFills = JSON.parse(JSON.stringify(textNode.fills));
+            textNode.fills = [{ type: "SOLID", color: { r: 1, g: 0.5, b: 0 }, opacity: 0.3 }];
+          } catch (_) {
+            // ignore highlight errors
+          }
+        }
+
+        // Delegate to setTextContent to handle font loading and replacement with structured errors
+        try {
+          await setTextContent({ nodeId: targetId, text: nextText, smartStrategy, fallbackFont: validatedFallbackFont });
+        } catch (err) {
+          try {
+            const parsed = JSON.parse(err && err.message ? err.message : String(err));
+            return { success: false, nodeId: targetId, errorCode: parsed.code || "set_text_content_failed", errorMessage: parsed.message || String(err) };
+          } catch (_) {
+            return { success: false, nodeId: targetId, errorCode: "set_text_content_failed", errorMessage: (err && err.message) || String(err) };
+          }
+        }
+
+        // Restore highlight
+        if (originalFills) {
+          try { await delay(500); textNode.fills = originalFills; } catch (_) {}
+        }
+
+        return { success: true, nodeId: targetId, originalText, translatedText: nextText };
       } catch (error) {
-        console.error(
-          `Error replacing text in node ${replacement.nodeId}: ${error.message}`
-        );
-        return {
-          success: false,
-          nodeId: replacement.nodeId,
-          error: `Error applying replacement: ${error.message}`,
-        };
+        return { success: false, nodeId: targetId, errorCode: "unexpected_error", errorMessage: (error && error.message) || String(error) };
       }
     });
 
-    // Wait for all replacements in this chunk to complete
     const chunkResults = await Promise.all(chunkPromises);
 
-    // Process results for this chunk
-    chunkResults.forEach((result) => {
-      if (result.success) {
+    for (const r of chunkResults) {
+      if (r && r.success) {
         successCount++;
       } else {
         failureCount++;
       }
-      results.push(result);
-    });
+      results.push(r);
+    }
 
-    // Send chunk processing complete update with partial results
+    // Emit per-chunk completion update
     sendProgressUpdate(
       commandId,
       "set_multiple_text_contents",
       "in_progress",
-      Math.round(5 + ((chunkIndex + 1) / chunks.length) * 90), // 5-95% for processing
-      text.length,
+      Math.round(5 + ((chunkIndex + 1) / chunks.length) * 90),
+      replacements.length,
       successCount + failureCount,
-      `Completed chunk ${chunkIndex + 1}/${chunks.length
-      }. ${successCount} successful, ${failureCount} failed so far.`,
-      {
-        currentChunk: chunkIndex + 1,
-        totalChunks: chunks.length,
-        successCount,
-        failureCount,
-        chunkResults: chunkResults,
-      }
+      `Completed chunk ${chunkIndex + 1}/${chunks.length}. ${successCount} successful, ${failureCount} failed so far.`,
+      { currentChunk: chunkIndex + 1, totalChunks: chunks.length, successCount, failureCount, chunkResults }
     );
 
-    // Add a small delay between chunks to avoid overloading Figma
-    if (chunkIndex < chunks.length - 1) {
-      console.log("Pausing between chunks to avoid overloading Figma...");
-      await delay(1000); // 1 second delay between chunks
+    if (STOP_ON_FAILURE && failureCount > 0) {
+      stoppedEarly = true;
+      break;
+    }
+
+    if (chunkIndex < chunks.length - 1 && INTER_CHUNK_DELAY > 0) {
+      try { await delay(INTER_CHUNK_DELAY); } catch (_) {}
     }
   }
 
-  console.log(
-    `Replacement complete: ${successCount} successful, ${failureCount} failed`
-  );
+  const modifiedNodeIds = results.filter(r => r && r.success).map(r => r.nodeId);
 
-  // Send completed progress update
+  // Optionally select modified nodes
+  if (select === true && !PREVIEW_ONLY) {
+    try {
+      const nodes = [];
+      for (const id of modifiedNodeIds) {
+        const n = await figma.getNodeByIdAsync(id);
+        if (n) nodes.push(n);
+      }
+      if (nodes.length > 0) figma.currentPage.selection = nodes;
+    } catch (_) {}
+  }
+
+  // Completed progress
   sendProgressUpdate(
     commandId,
     "set_multiple_text_contents",
     "completed",
     100,
-    text.length,
+    replacements.length,
     successCount + failureCount,
     `Text replacement complete: ${successCount} successful, ${failureCount} failed`,
-    {
-      totalReplacements: text.length,
-      replacementsApplied: successCount,
-      replacementsFailed: failureCount,
-      completedInChunks: chunks.length,
-      results: results,
-    }
+    { totalReplacements: replacements.length, replacementsApplied: successCount, replacementsFailed: failureCount, completedInChunks: Math.max(1, chunks.length), results, stoppedEarly, preview: PREVIEW_ONLY }
   );
 
-  return {
-    success: successCount > 0,
-    nodeId: nodeId,
+  if (successCount === 0 && !PREVIEW_ONLY) {
+    // Nothing was applied → specialize error for better self-correction
+    const failures = results.filter(r => !r.success);
+    const byCode = failures.reduce((acc, r) => { const c = r.errorCode || "unknown"; (acc[c] = acc[c] || []).push(r.nodeId); return acc; }, {});
+    let code = "all_replacements_failed";
+    if (byCode["node_locked"] && Object.keys(byCode).length === 1) code = "locked_nodes";
+    else if (byCode["node_not_found"] && Object.keys(byCode).length === 1) code = "nodes_not_found";
+    else if (byCode["invalid_node_type"] && Object.keys(byCode).length === 1) code = "invalid_node_types";
+    const details = { nodeId, total: replacements.length, failureCount, failureGroups: byCode };
+    logger.error("❌ set_multiple_text_contents failed", { code, originalError: "No replacements succeeded", details });
+    throw new Error(JSON.stringify({ code, message: "No replacements succeeded", details }));
+  }
+
+  const payload = {
+    success: true,
+    summary: PREVIEW_ONLY
+      ? `Previewed ${replacements.length} text updates (no changes applied)`
+      : `Applied ${successCount}/${replacements.length} text updates (${failureCount} failed)` ,
+    modifiedNodeIds,
+    nodeId,
     replacementsApplied: successCount,
     replacementsFailed: failureCount,
-    totalReplacements: text.length,
-    results: results,
-    completedInChunks: chunks.length,
+    totalReplacements: replacements.length,
+    results,
+    completedInChunks: Math.max(1, chunks.length),
+    stoppedEarly: stoppedEarly || undefined,
+    preview: PREVIEW_ONLY || undefined,
     commandId,
   };
+  logger.info("✅ set_multiple_text_contents succeeded", { nodeId, applied: successCount, failed: failureCount, preview: PREVIEW_ONLY });
+  return payload;
 }
 
 // ======================================================
@@ -4834,59 +4810,66 @@ function withProgress(commandType, totalItems, runner) {
  */
 // -------- TOOL : scan_nodes_by_types --------
 async function scanNodesByTypes(params) {
-  console.log(`Starting to scan nodes by types from node ID: ${params.nodeId}`);
-  const { nodeId, types = [] } = params || {};
+  try {
+    const { nodeId, types } = params || {};
 
-  if (!types || types.length === 0) {
-    throw new Error("No types specified to search for");
+    if (!nodeId || typeof nodeId !== "string") {
+      logger.error("scan_nodes_by_types failed", { code: "missing_parameter", originalError: "nodeId is required", details: { nodeId } });
+      throw new Error(JSON.stringify({ code: "missing_parameter", message: "'nodeId' is required", details: { nodeId } }));
+    }
+    if (!Array.isArray(types) || types.length === 0) {
+      logger.error("scan_nodes_by_types failed", { code: "invalid_parameter", originalError: "types must be a non-empty string[]", details: { types } });
+      throw new Error(JSON.stringify({ code: "invalid_parameter", message: "'types' must be a non-empty array of strings", details: { types } }));
+    }
+
+    const node = await figma.getNodeByIdAsync(nodeId);
+    if (!node) {
+      logger.error("scan_nodes_by_types failed", { code: "node_not_found", originalError: `Node not found`, details: { nodeId } });
+      throw new Error(JSON.stringify({ code: "node_not_found", message: `Node with ID ${nodeId} not found`, details: { nodeId } }));
+    }
+
+    const matchingNodes = [];
+
+    const commandId = generateCommandId();
+    sendProgressUpdate(
+      commandId,
+      "scan_nodes_by_types",
+      "started",
+      0,
+      1,
+      0,
+      `Starting scan of node "${node.name || nodeId}" for types: ${types.join(", ")}`,
+      null
+    );
+
+    await findNodesByTypes(node, types, matchingNodes);
+
+    sendProgressUpdate(
+      commandId,
+      "scan_nodes_by_types",
+      "completed",
+      100,
+      matchingNodes.length,
+      matchingNodes.length,
+      `Scan complete. Found ${matchingNodes.length} matching nodes.`,
+      { matchingNodes }
+    );
+
+    const payload = { nodesCount: matchingNodes.length, matchingNodes, searchedTypes: types, commandId };
+    logger.info("✅ scan_nodes_by_types succeeded", { nodesCount: payload.nodesCount });
+    return payload;
+  } catch (error) {
+    try {
+      const maybe = JSON.parse(error && error.message ? error.message : "");
+      if (maybe && typeof maybe === "object" && maybe.code) {
+        throw error; // Already structured; let bridge/backend parse
+      }
+    } catch (_) {
+      // fall through
+    }
+    logger.error("❌ scan_nodes_by_types failed", { code: "unknown_plugin_error", originalError: (error && error.message) || String(error), details: {} });
+    throw new Error(JSON.stringify({ code: "unknown_plugin_error", message: (error && error.message) || String(error), details: {} }));
   }
-
-  const node = await figma.getNodeByIdAsync(nodeId);
-
-  if (!node) {
-    throw new Error(`Node with ID ${nodeId} not found`);
-  }
-
-  // Simple implementation without chunking
-  const matchingNodes = [];
-
-  // Send a single progress update to notify start
-  const commandId = generateCommandId();
-  sendProgressUpdate(
-    commandId,
-    "scan_nodes_by_types",
-    "started",
-    0,
-    1,
-    0,
-    `Starting scan of node "${node.name || nodeId}" for types: ${types.join(
-      ", "
-    )}`,
-    null
-  );
-
-  // Recursively find nodes with specified types
-  await findNodesByTypes(node, types, matchingNodes);
-
-  // Send completion update
-  sendProgressUpdate(
-    commandId,
-    "scan_nodes_by_types",
-    "completed",
-    100,
-    matchingNodes.length,
-    matchingNodes.length,
-    `Scan complete. Found ${matchingNodes.length} matching nodes.`,
-    { matchingNodes }
-  );
-
-  return {
-    success: true,
-    message: `Found ${matchingNodes.length} matching nodes.`,
-    count: matchingNodes.length,
-    matchingNodes: matchingNodes,
-    searchedTypes: types,
-  };
 }
 
 /**
@@ -4931,287 +4914,298 @@ async function findNodesByTypes(node, types, matchingNodes = []) {
 // ======================================================
 // -------- TOOL : delete_multiple_nodes --------
 async function deleteMultipleNodes(params) {
-  const { nodeIds } = params || {};
+  const logger = (globalThis && globalThis.logger) || console;
   const commandId = generateCommandId();
+  try {
+    const {
+      nodeIds,
+      chunkSize,
+      delayMsBetweenChunks,
+      skipLocked,
+      stopOnFailure,
+      previewOnly,
+    } = params || {};
 
-  if (!nodeIds || !Array.isArray(nodeIds) || nodeIds.length === 0) {
-    const errorMsg = "Missing or invalid nodeIds parameter";
+    // Validate params
+    if (!nodeIds || !Array.isArray(nodeIds) || nodeIds.length === 0) {
+      const payload = {
+        code: "invalid_params",
+        message: "Missing or invalid nodeIds parameter",
+        details: { receivedType: typeof nodeIds, isArray: Array.isArray(nodeIds), length: nodeIds && nodeIds.length },
+      };
+      sendProgressUpdate(commandId, "delete_multiple_nodes", "error", 0, 0, 0, payload.message, { error: payload });
+      logger.error("❌ delete_multiple_nodes failed", { code: payload.code, details: payload.details });
+      throw new Error(JSON.stringify(payload));
+    }
+
+    const TOTAL = nodeIds.length;
+    const CHUNK_SIZE = Math.max(1, Math.min(50, Number.isFinite(chunkSize) ? Math.floor(chunkSize) : 5));
+    const DELAY_MS = Number.isFinite(delayMsBetweenChunks) ? Math.max(0, Math.floor(delayMsBetweenChunks)) : 1000;
+    const SKIP_LOCKED = skipLocked !== false; // default true
+    const STOP_ON_FAILURE = stopOnFailure === true; // default false
+    const PREVIEW_ONLY = previewOnly === true; // default false
+
+    logger.info(`🗑️ Starting deletion of ${TOTAL} nodes (chunkSize=${CHUNK_SIZE}, delayMs=${DELAY_MS}, skipLocked=${SKIP_LOCKED}, stopOnFailure=${STOP_ON_FAILURE}, previewOnly=${PREVIEW_ONLY})`);
+
+    // Send started progress update
     sendProgressUpdate(
       commandId,
       "delete_multiple_nodes",
-      "error",
+      "started",
       0,
+      TOTAL,
       0,
-      0,
-      errorMsg,
-      { error: errorMsg }
+      `Starting deletion of ${TOTAL} nodes`,
+      { totalNodes: TOTAL }
     );
-    throw new Error(errorMsg);
-  }
 
-  console.log(`Starting deletion of ${nodeIds.length} nodes`);
+    const results = [];
+    const modifiedNodeIds = [];
+    let successCount = 0;
+    let failureCount = 0;
+    let stoppedEarly = false;
 
-  // Send started progress update
-  sendProgressUpdate(
-    commandId,
-    "delete_multiple_nodes",
-    "started",
-    0,
-    nodeIds.length,
-    0,
-    `Starting deletion of ${nodeIds.length} nodes`,
-    { totalNodes: nodeIds.length }
-  );
-
-  const results = [];
-  let successCount = 0;
-  let failureCount = 0;
-
-  // Process nodes in chunks of 5 to avoid overwhelming Figma
-  const CHUNK_SIZE = 5;
-  const chunks = [];
-
-  for (let i = 0; i < nodeIds.length; i += CHUNK_SIZE) {
-    chunks.push(nodeIds.slice(i, i + CHUNK_SIZE));
-  }
-
-  console.log(`Split ${nodeIds.length} deletions into ${chunks.length} chunks`);
-
-  // Send chunking info update
-  sendProgressUpdate(
-    commandId,
-    "delete_multiple_nodes",
-    "in_progress",
-    5,
-    nodeIds.length,
-    0,
-    `Preparing to delete ${nodeIds.length} nodes using ${chunks.length} chunks`,
-    {
-      totalNodes: nodeIds.length,
-      chunks: chunks.length,
-      chunkSize: CHUNK_SIZE,
+    const chunks = [];
+    for (let i = 0; i < nodeIds.length; i += CHUNK_SIZE) {
+      chunks.push(nodeIds.slice(i, i + CHUNK_SIZE));
     }
-  );
 
-  // Process each chunk sequentially
-  for (let chunkIndex = 0; chunkIndex < chunks.length; chunkIndex++) {
-    const chunk = chunks[chunkIndex];
-    console.log(
-      `Processing chunk ${chunkIndex + 1}/${chunks.length} with ${chunk.length
-      } nodes`
-    );
+    logger.info(`🧩 Split ${TOTAL} deletions into ${chunks.length} chunks`);
 
-    // Send chunk processing start update
+    // Send chunking info update
     sendProgressUpdate(
       commandId,
       "delete_multiple_nodes",
       "in_progress",
-      Math.round(5 + (chunkIndex / chunks.length) * 90),
-      nodeIds.length,
-      successCount + failureCount,
-      `Processing deletion chunk ${chunkIndex + 1}/${chunks.length}`,
-      {
-        currentChunk: chunkIndex + 1,
-        totalChunks: chunks.length,
-        successCount,
-        failureCount,
-      }
+      5,
+      TOTAL,
+      0,
+      `Preparing to delete ${TOTAL} nodes using ${chunks.length} chunks`,
+      { totalNodes: TOTAL, chunks: chunks.length, chunkSize: CHUNK_SIZE }
     );
 
-    // Process deletions within a chunk in parallel
-    const chunkPromises = chunk.map(async (nodeId) => {
-      try {
-        const node = await figma.getNodeByIdAsync(nodeId);
+    // Process each chunk sequentially
+    for (let chunkIndex = 0; chunkIndex < chunks.length; chunkIndex++) {
+      if (stoppedEarly) break;
+      const chunk = chunks[chunkIndex];
+      logger.info(`🔧 Processing chunk ${chunkIndex + 1}/${chunks.length} with ${chunk.length} nodes`);
 
-        if (!node) {
-          console.error(`Node not found: ${nodeId}`);
-          return {
-            success: false,
-            nodeId: nodeId,
-            error: `Node not found: ${nodeId}`,
-          };
+      // Send chunk processing start update
+      sendProgressUpdate(
+        commandId,
+        "delete_multiple_nodes",
+        "in_progress",
+        Math.round(5 + (chunkIndex / chunks.length) * 90),
+        TOTAL,
+        successCount + failureCount,
+        `Processing deletion chunk ${chunkIndex + 1}/${chunks.length}`,
+        { currentChunk: chunkIndex + 1, totalChunks: chunks.length, successCount, failureCount }
+      );
+
+      // Process deletions within a chunk in parallel
+      const chunkPromises = chunk.map(async (nodeId) => {
+        try {
+          const node = await figma.getNodeByIdAsync(nodeId);
+
+          if (!node) {
+            return { success: false, nodeId, code: "node_not_found", error: `Node not found: ${nodeId}` };
+          }
+
+          // Cannot delete Document or Page
+          if (node.type === "DOCUMENT" || node.type === "PAGE") {
+            return { success: false, nodeId, code: "cannot_delete_root_or_page", error: `Cannot delete ${node.type}` };
+          }
+
+          // Locked node handling
+          if (node.locked) {
+            if (SKIP_LOCKED) {
+              return { success: false, nodeId, code: "locked_node", error: `Node is locked: ${nodeId}` };
+            }
+            return { success: false, nodeId, code: "locked_node", error: `Node is locked: ${nodeId}` };
+          }
+
+          // Save node info before deleting
+          const nodeInfo = { id: node.id, name: node.name, type: node.type };
+
+          if (PREVIEW_ONLY) {
+            return { success: true, nodeId, nodeInfo, preview: true, wouldDelete: true };
+          }
+
+          // Delete the node
+          node.remove();
+
+          return { success: true, nodeId, nodeInfo };
+        } catch (error) {
+          return { success: false, nodeId, code: "delete_failed", error: (error && error.message) || String(error) };
         }
+      });
 
-        // Save node info before deleting
-        const nodeInfo = {
-          id: node.id,
-          name: node.name,
-          type: node.type,
-        };
+      // Wait for all deletions in this chunk to complete
+      const chunkResults = await Promise.all(chunkPromises);
 
-        // Delete the node
-        node.remove();
-
-        console.log(`Successfully deleted node: ${nodeId}`);
-        return {
-          success: true,
-          nodeId: nodeId,
-          nodeInfo: nodeInfo,
-        };
-      } catch (error) {
-        console.error(`Error deleting node ${nodeId}: ${error.message}`);
-        return {
-          success: false,
-          nodeId: nodeId,
-          error: error.message,
-        };
+      // Process results for this chunk
+      for (const result of chunkResults) {
+        if (result.success && !result.preview) {
+          successCount++;
+          modifiedNodeIds.push(result.nodeId);
+        } else if (!result.success) {
+          failureCount++;
+        }
+        results.push(result);
+        if (STOP_ON_FAILURE && !result.success) {
+          stoppedEarly = true;
+          break;
+        }
       }
-    });
 
-    // Wait for all deletions in this chunk to complete
-    const chunkResults = await Promise.all(chunkPromises);
+      // Send chunk processing complete update
+      sendProgressUpdate(
+        commandId,
+        "delete_multiple_nodes",
+        "in_progress",
+        Math.round(5 + ((chunkIndex + 1) / chunks.length) * 90),
+        TOTAL,
+        successCount + failureCount,
+        `Completed chunk ${chunkIndex + 1}/${chunks.length}. ${successCount} successful, ${failureCount} failed so far.`,
+        { currentChunk: chunkIndex + 1, totalChunks: chunks.length, successCount, failureCount, chunkResults }
+      );
 
-    // Process results for this chunk
-    chunkResults.forEach((result) => {
-      if (result.success) {
-        successCount++;
-      } else {
-        failureCount++;
+      // Add a small delay between chunks
+      if (!stoppedEarly && chunkIndex < chunks.length - 1) {
+        await delay(DELAY_MS);
       }
-      results.push(result);
-    });
+    }
 
-    // Send chunk processing complete update
+    const completedChunks = stoppedEarly ? results.length === 0 ? 0 : Math.ceil(results.length / CHUNK_SIZE) : chunks.length;
+    const summary = PREVIEW_ONLY
+      ? `Previewed deletion for ${TOTAL} nodes`
+      : `Deleted ${successCount}/${TOTAL} nodes (${failureCount} failed)`;
+
+    if (!PREVIEW_ONLY && successCount === 0) {
+      const payload = {
+        code: failureCount > 0 ? "all_deletions_failed" : "no_nodes_deleted",
+        message: failureCount > 0 ? "No nodes were deleted (all failed)" : "No nodes were deleted",
+        details: {
+          totalNodes: TOTAL,
+          nodesDeleted: successCount,
+          nodesFailed: failureCount,
+          completedInChunks: completedChunks,
+          stoppedEarly,
+          results,
+        },
+      };
+      sendProgressUpdate(commandId, "delete_multiple_nodes", "error", 100, TOTAL, successCount + failureCount, payload.message, payload);
+      logger.error("❌ delete_multiple_nodes failed", { code: payload.code, details: payload.details });
+      throw new Error(JSON.stringify(payload));
+    }
+
+    // Send completed progress update
     sendProgressUpdate(
       commandId,
       "delete_multiple_nodes",
-      "in_progress",
-      Math.round(5 + ((chunkIndex + 1) / chunks.length) * 90),
-      nodeIds.length,
+      "completed",
+      100,
+      TOTAL,
       successCount + failureCount,
-      `Completed chunk ${chunkIndex + 1}/${chunks.length
-      }. ${successCount} successful, ${failureCount} failed so far.`,
-      {
-        currentChunk: chunkIndex + 1,
-        totalChunks: chunks.length,
-        successCount,
-        failureCount,
-        chunkResults: chunkResults,
-      }
+      PREVIEW_ONLY ? `Preview complete: ${TOTAL} nodes would be deleted` : `Node deletion complete: ${successCount} successful, ${failureCount} failed`,
+      { totalNodes: TOTAL, nodesDeleted: successCount, nodesFailed: failureCount, completedInChunks: completedChunks, results, stoppedEarly, preview: PREVIEW_ONLY }
     );
 
-    // Add a small delay between chunks
-    if (chunkIndex < chunks.length - 1) {
-      console.log("Pausing between chunks...");
-      await delay(1000);
-    }
-  }
+    logger.info("✅ delete_multiple_nodes succeeded", { deleted: successCount, failed: failureCount, preview: PREVIEW_ONLY });
 
-  console.log(
-    `Deletion complete: ${successCount} successful, ${failureCount} failed`
-  );
-
-  // Send completed progress update
-  sendProgressUpdate(
-    commandId,
-    "delete_multiple_nodes",
-    "completed",
-    100,
-    nodeIds.length,
-    successCount + failureCount,
-    `Node deletion complete: ${successCount} successful, ${failureCount} failed`,
-    {
-      totalNodes: nodeIds.length,
+    return {
+      success: true,
+      summary,
+      modifiedNodeIds,
       nodesDeleted: successCount,
       nodesFailed: failureCount,
-      completedInChunks: chunks.length,
-      results: results,
+      totalNodes: TOTAL,
+      results,
+      completedInChunks: completedChunks,
+      stoppedEarly,
+      preview: PREVIEW_ONLY,
+      commandId,
+    };
+  } catch (error) {
+    // Pass through structured errors; wrap unknowns
+    try {
+      const parsed = JSON.parse(error && error.message);
+      if (parsed && parsed.code) {
+        throw error;
+      }
+    } catch (_) {
+      const payload = { code: "unexpected_error", message: (error && error.message) || String(error), details: { commandId } };
+      const logger2 = (globalThis && globalThis.logger) || console;
+      logger2.error("❌ delete_multiple_nodes failed", { code: payload.code, originalError: payload.message, details: payload.details });
+      throw new Error(JSON.stringify(payload));
     }
-  );
-
-  return {
-    success: successCount > 0,
-    nodesDeleted: successCount,
-    nodesFailed: failureCount,
-    totalNodes: nodeIds.length,
-    results: results,
-    completedInChunks: chunks.length,
-    commandId,
-  };
+    throw error;
+  }
 }
 
 // ------------------------- Instance Overrides -------------------------
-// -------- TOOL : get_instance_overrides --------
+// -------- TOOL INCOMPLETE : get_instance_overrides --------
 async function getInstanceOverrides(instanceNode = null) {
-  console.log("=== getInstanceOverrides called ===");
-
-  let sourceInstance = null;
-
-  // Check if an instance node was passed directly
-  if (instanceNode) {
-    console.log("Using provided instance node");
-
-    // Validate that the provided node is an instance
-    if (instanceNode.type !== "INSTANCE") {
-      console.error("Provided node is not an instance");
-      figma.notify("Provided node is not a component instance");
-      return { success: false, message: "Provided node is not a component instance" };
-    }
-
-    sourceInstance = instanceNode;
-  } else {
-    // No node provided, use selection
-    console.log("No node provided, using current selection");
-
-    // Get the current selection
-    const selection = figma.currentPage.selection;
-
-    // Check if there's anything selected
-    if (selection.length === 0) {
-      console.log("No nodes selected");
-      figma.notify("Please select at least one instance");
-      return { success: false, message: "No nodes selected" };
-    }
-
-    // Filter for instances in the selection
-    const instances = selection.filter(node => node.type === "INSTANCE");
-
-    if (instances.length === 0) {
-      console.log("No instances found in selection");
-      figma.notify("Please select at least one component instance");
-      return { success: false, message: "No instances found in selection" };
-    }
-
-    // Take the first instance from the selection
-    sourceInstance = instances[0];
-  }
-
   try {
-    console.log(`Getting instance information:`);
-    console.log(sourceInstance);
+    logger.info("🔎 get_instance_overrides called");
 
-    // Get component overrides and main component
+    let sourceInstance = null;
+
+    if (instanceNode) {
+      if (instanceNode.type !== "INSTANCE") {
+        const payload = { code: "invalid_node_type", message: "Provided node is not a component instance", details: { nodeId: instanceNode.id, nodeType: instanceNode.type } };
+        logger.error("❌ get_instance_overrides failed", { code: payload.code, originalError: payload.message, details: payload.details });
+        figma.notify("Provided node is not a component instance");
+        throw new Error(JSON.stringify(payload));
+      }
+      sourceInstance = instanceNode;
+    } else {
+      const selection = figma.currentPage.selection;
+      if (selection.length === 0) {
+        const payload = { code: "selection_empty", message: "Please select at least one instance", details: {} };
+        logger.error("❌ get_instance_overrides failed", { code: payload.code, originalError: payload.message, details: payload.details });
+        figma.notify("Please select at least one instance");
+        throw new Error(JSON.stringify(payload));
+      }
+      const instances = selection.filter(node => node.type === "INSTANCE");
+      if (instances.length === 0) {
+        const payload = { code: "no_instances_in_selection", message: "Please select at least one component instance", details: { selectionCount: selection.length } };
+        logger.error("❌ get_instance_overrides failed", { code: payload.code, originalError: payload.message, details: payload.details });
+        figma.notify("Please select at least one component instance");
+        throw new Error(JSON.stringify(payload));
+      }
+      sourceInstance = instances[0];
+    }
+
+    // Read component overrides and main component
     const overrides = sourceInstance.overrides || [];
-    console.log(`  Raw Overrides:`, overrides);
-
-    // Get main component
     const mainComponent = await sourceInstance.getMainComponentAsync();
     if (!mainComponent) {
-      console.error("Failed to get main component");
+      const payload = { code: "main_component_not_found", message: "Failed to get main component", details: { instanceId: sourceInstance.id } };
+      logger.error("❌ get_instance_overrides failed", { code: payload.code, originalError: payload.message, details: payload.details });
       figma.notify("Failed to get main component");
-      return { success: false, message: "Failed to get main component" };
+      throw new Error(JSON.stringify(payload));
     }
 
-    // return data to MCP server
-    const returnData = {
-      success: true,
-      message: `Got component information from "${sourceInstance.name}" for overrides.length: ${overrides.length}`,
+    const data = {
       sourceInstanceId: sourceInstance.id,
+      sourceInstanceName: sourceInstance.name,
       mainComponentId: mainComponent.id,
-      overridesCount: overrides.length
+      overridesCount: overrides.length,
+      overrides
     };
-
-    console.log("Data to return to MCP server:", returnData);
+    logger.info("✅ get_instance_overrides succeeded", { overridesCount: overrides.length, instanceId: sourceInstance.id });
     figma.notify(`Got component information from "${sourceInstance.name}"`);
-
-    return returnData;
+    // Read-only tools must return data directly
+    return data;
   } catch (error) {
-    console.error("Error in getInstanceOverrides:", error);
-    figma.notify(`Error: ${error.message}`);
-    return {
-      success: false,
-      message: `Error: ${error.message}`
-    };
+    try {
+      const maybe = JSON.parse(error && error.message ? error.message : String(error));
+      if (maybe && maybe.code) throw error;
+    } catch (_) {}
+    const payload = { code: "unknown_plugin_error", message: (error && error.message) || String(error), details: {} };
+    logger.error("❌ get_instance_overrides failed", { code: payload.code, originalError: payload.message, details: payload.details });
+    throw new Error(JSON.stringify(payload));
   }
 }
 
@@ -5295,155 +5289,158 @@ async function getSourceInstanceData(sourceInstanceId) {
  * @param {Object} sourceResult - Source instance data from getSourceInstanceData
  * @returns {Promise<Object>} - Result of the set operation
  */
-// -------- TOOL : set_instance_overrides --------
-async function setInstanceOverrides(targetInstances, sourceResult) {
+// -------- TOOL INCOMPLETE : set_instance_overrides --------
+async function setInstanceOverrides(targetInstances, sourceResult, options = {}) {
+  const {
+    swapComponent = true,
+    includeFields,
+    excludeFields,
+    previewOnly = false,
+    stopOnFirstError = false
+  } = options || {};
+
+  const includeSet = Array.isArray(includeFields) ? new Set(includeFields) : null;
+  const excludeSet = Array.isArray(excludeFields) ? new Set(excludeFields) : null;
+
   try {
-
-
     const { sourceInstance, mainComponent, overrides } = sourceResult;
+    logger.info("🧩 set_instance_overrides started", { targets: targetInstances.length, overrides: overrides.length, swapComponent, previewOnly });
 
-    console.log(`Processing ${targetInstances.length} instances with ${overrides.length} overrides`);
-    console.log(`Source instance: ${sourceInstance.id}, Main component: ${mainComponent.id}`);
-    console.log(`Overrides:`, overrides);
-
-    // Process all instances
     const results = [];
     let totalAppliedCount = 0;
+    const modifiedNodeIdsSet = new Set();
 
     for (const targetInstance of targetInstances) {
       try {
-       
+        let instanceAppliedCount = 0;
 
-        // Swap component
-        try {
-          targetInstance.swapComponent(mainComponent);
-          console.log(`Swapped component for instance "${targetInstance.name}"`);
-        } catch (error) {
-          console.error(`Error swapping component for instance "${targetInstance.name}":`, error);
-          results.push({
-            success: false,
-            instanceId: targetInstance.id,
-            instanceName: targetInstance.name,
-            message: `Error: ${error.message}`
-          });
+        // Swap component (optional)
+        if (swapComponent) {
+          try {
+            if (!previewOnly) {
+              targetInstance.swapComponent(mainComponent);
+              modifiedNodeIdsSet.add(targetInstance.id);
+            }
+          } catch (error) {
+            const payload = { code: "swap_failed", message: `Failed to swap component for instance`, details: { instanceId: targetInstance.id, name: targetInstance.name, error: (error && error.message) || String(error) } };
+            logger.error("❌ set_instance_overrides failed", { code: payload.code, originalError: payload.message, details: payload.details });
+            if (stopOnFirstError) throw new Error(JSON.stringify(payload));
+            results.push({ success: false, instanceId: targetInstance.id, instanceName: targetInstance.name, code: payload.code, message: payload.message });
+          }
         }
 
-        // Prepare overrides by replacing node IDs
-        let appliedCount = 0;
-
-        // Apply each override
         for (const override of overrides) {
-          // Skip if no ID or overriddenFields
-          if (!override.id || !override.overriddenFields || override.overriddenFields.length === 0) {
-            continue;
-          }
+          if (!override.id || !override.overriddenFields || override.overriddenFields.length === 0) continue;
 
-          // Replace source instance ID with target instance ID in the node path
+          // Map override path to target instance
           const overrideNodeId = override.id.replace(sourceInstance.id, targetInstance.id);
           const overrideNode = await figma.getNodeByIdAsync(overrideNodeId);
-
           if (!overrideNode) {
-            console.log(`Override node not found: ${overrideNodeId}`);
+            // Missing target node for this override, skip
             continue;
           }
-
-          // Get source node to copy properties from
           const sourceNode = await figma.getNodeByIdAsync(override.id);
           if (!sourceNode) {
-            console.log(`Source node not found: ${override.id}`);
             continue;
           }
 
-          // Apply each overridden field
           let fieldApplied = false;
           for (const field of override.overriddenFields) {
+            if (includeSet && !includeSet.has(field)) continue;
+            if (excludeSet && excludeSet.has(field)) continue;
+
             try {
+              if (previewOnly) {
+                fieldApplied = true; // would apply
+                continue;
+              }
+
               if (field === "componentProperties") {
-                // Apply component properties
                 if (sourceNode.componentProperties && overrideNode.componentProperties) {
                   const properties = {};
                   for (const key in sourceNode.componentProperties) {
-                    // if INSTANCE_SWAP use id, otherwise use value
-                    if (sourceNode.componentProperties[key].type === 'INSTANCE_SWAP') {
-                      properties[key] = sourceNode.componentProperties[key].value;
-                    
-                    } else {
-                      properties[key] = sourceNode.componentProperties[key].value;
-                    }
+                    properties[key] = sourceNode.componentProperties[key].value;
                   }
                   overrideNode.setProperties(properties);
                   fieldApplied = true;
                 }
               } else if (field === "characters" && overrideNode.type === "TEXT") {
-                // For text nodes, need to load fonts first
-                await figma.loadFontAsync(overrideNode.fontName);
+                // Load font from overrideNode or fallback to sourceNode
+                const fontNameToLoad = (overrideNode.fontName !== figma.mixed) ? overrideNode.fontName : (sourceNode.fontName !== figma.mixed ? sourceNode.fontName : null);
+                if (fontNameToLoad) {
+                  try {
+                    await figma.loadFontAsync(fontNameToLoad);
+                  } catch (fontErr) {
+                    const payload = { code: "font_load_failed", message: `Cannot load font for text override`, details: { nodeId: overrideNode.id, font: fontNameToLoad, error: (fontErr && fontErr.message) || String(fontErr) } };
+                    logger.error("❌ set_instance_overrides failed", { code: payload.code, originalError: payload.message, details: payload.details });
+                    if (stopOnFirstError) throw new Error(JSON.stringify(payload));
+                    continue;
+                  }
+                }
                 overrideNode.characters = sourceNode.characters;
                 fieldApplied = true;
               } else if (field in overrideNode) {
-                // Direct property assignment
                 overrideNode[field] = sourceNode[field];
                 fieldApplied = true;
               }
             } catch (fieldError) {
-              console.error(`Error applying field ${field}:`, fieldError);
+              const payload = { code: "override_field_error", message: `Error applying field ${field}`, details: { nodeId: overrideNode.id, field, error: (fieldError && fieldError.message) || String(fieldError) } };
+              logger.error("❌ set_instance_overrides failed", { code: payload.code, originalError: payload.message, details: payload.details });
+              if (stopOnFirstError) throw new Error(JSON.stringify(payload));
             }
           }
 
-          if (fieldApplied) {
-            appliedCount++;
+          if (!previewOnly && fieldApplied) {
+            instanceAppliedCount++;
+            modifiedNodeIdsSet.add(overrideNode.id);
+          } else if (previewOnly && fieldApplied) {
+            instanceAppliedCount++;
           }
         }
 
-        if (appliedCount > 0) {
-          totalAppliedCount += appliedCount;
-          results.push({
-            success: true,
-            instanceId: targetInstance.id,
-            instanceName: targetInstance.name,
-            appliedCount
-          });
-          console.log(`Applied ${appliedCount} overrides to "${targetInstance.name}"`);
+        if (instanceAppliedCount > 0) {
+          totalAppliedCount += instanceAppliedCount;
+          results.push({ success: true, instanceId: targetInstance.id, instanceName: targetInstance.name, appliedCount: instanceAppliedCount });
         } else {
-          results.push({
-            success: false,
-            instanceId: targetInstance.id,
-            instanceName: targetInstance.name,
-            message: "No overrides were applied"
-          });
+          results.push({ success: false, instanceId: targetInstance.id, instanceName: targetInstance.name, message: previewOnly ? "No changes would be applied" : "No overrides were applied" });
         }
       } catch (instanceError) {
-        console.error(`Error processing instance "${targetInstance.name}":`, instanceError);
-        results.push({
-          success: false,
-          instanceId: targetInstance.id,
-          instanceName: targetInstance.name,
-          message: `Error: ${instanceError.message}`
-        });
+        const payload = { code: "instance_process_failed", message: `Error processing instance`, details: { instanceId: targetInstance.id, name: targetInstance.name, error: (instanceError && instanceError.message) || String(instanceError) } };
+        logger.error("❌ set_instance_overrides failed", { code: payload.code, originalError: payload.message, details: payload.details });
+        if (stopOnFirstError) throw new Error(JSON.stringify(payload));
+        results.push({ success: false, instanceId: targetInstance.id, instanceName: targetInstance.name, code: payload.code, message: payload.message });
       }
     }
 
-    // Return results
-    if (totalAppliedCount > 0) {
-      const instanceCount = results.filter(r => r.success).length;
-      const message = `Applied ${totalAppliedCount} overrides to ${instanceCount} instances`;
-      figma.notify(message);
-      return {
-        success: true,
-        message,
-        totalCount: totalAppliedCount,
-        results
-      };
-    } else {
-      const message = "No overrides applied to any instance";
-      figma.notify(message);
-      return { success: false, message, results };
+    const modifiedNodeIds = Array.from(modifiedNodeIdsSet);
+
+    if (previewOnly) {
+      const summary = `Would apply ${totalAppliedCount} overrides to ${results.filter(r => r.success).length} instances`;
+      logger.info("✅ set_instance_overrides preview", { totalAppliedCount, targets: targetInstances.length });
+      return { success: true, summary, modifiedNodeIds: [], sourceInstanceId: sourceResult.sourceInstance.id, mainComponentId: sourceResult.mainComponent.id, targetInstanceIds: targetInstances.map(i => i.id), totalOverridesApplied: totalAppliedCount, results, preview: true };
     }
 
+    if (totalAppliedCount > 0) {
+      const instanceCount = results.filter(r => r.success).length;
+      const summary = `Applied ${totalAppliedCount} overrides to ${instanceCount} instances`;
+      figma.notify(summary);
+      logger.info("✅ set_instance_overrides succeeded", { totalAppliedCount, instanceCount });
+      return { success: true, summary, modifiedNodeIds, sourceInstanceId: sourceResult.sourceInstance.id, mainComponentId: sourceResult.mainComponent.id, targetInstanceIds: targetInstances.map(i => i.id), totalOverridesApplied: totalAppliedCount, results };
+    } else {
+      const payload = { code: "no_overrides_applied", message: "No overrides applied to any instance", details: { targetInstanceIds: targetInstances.map(i => i.id) } };
+      logger.error("❌ set_instance_overrides failed", { code: payload.code, originalError: payload.message, details: payload.details });
+      figma.notify(payload.message);
+      throw new Error(JSON.stringify(payload));
+    }
   } catch (error) {
-    console.error("Error in setInstanceOverrides:", error);
-    const message = `Error: ${error.message}`;
-    figma.notify(message);
-    return { success: false, message };
+    try {
+      const maybe = JSON.parse(error && error.message ? error.message : String(error));
+      if (maybe && maybe.code) throw error;
+    } catch (_) {}
+    const payload = { code: "unknown_plugin_error", message: (error && error.message) || String(error), details: {} };
+    logger.error("❌ set_instance_overrides failed", { code: payload.code, originalError: payload.message, details: payload.details });
+    figma.notify(payload.message);
+    throw new Error(JSON.stringify(payload));
   }
 }
 
@@ -5453,300 +5450,455 @@ async function setInstanceOverrides(targetInstances, sourceResult) {
 // -------- TOOL : set_layout_mode --------
 async function setLayoutMode(params) {
   const { nodeId, layoutMode = "NONE", layoutWrap = "NO_WRAP" } = params || {};
+  try {
+    if (!nodeId) {
+      const payload = { code: "missing_parameter", message: "Provide nodeId", details: { command: "set_layout_mode" } };
+      logger.error("❌ set_layout_mode failed", { code: payload.code, details: payload.details });
+      throw new Error(JSON.stringify(payload));
+    }
 
-  // Get the target node
-  const node = await figma.getNodeByIdAsync(nodeId);
-  if (!node) {
-    throw new Error(`Node with ID ${nodeId} not found`);
+    const node = await figma.getNodeByIdAsync(nodeId);
+    if (!node) {
+      const payload = { code: "node_not_found", message: `Node with ID ${nodeId} not found`, details: { nodeId } };
+      logger.error("❌ set_layout_mode failed", { code: payload.code, originalError: payload.message, details: payload.details });
+      throw new Error(JSON.stringify(payload));
+    }
+
+    // Check if node supports layout properties (exclude COMPONENT_SET)
+    if (node.type !== "FRAME" && node.type !== "COMPONENT" && node.type !== "INSTANCE") {
+      const payload = { code: "unsupported_node_type", message: `Node type ${node.type} does not support layoutMode`, details: { nodeId, type: node.type } };
+      logger.error("❌ set_layout_mode failed", { code: payload.code, originalError: payload.message, details: payload.details });
+      throw new Error(JSON.stringify(payload));
+    }
+
+    if ("locked" in node && node.locked) {
+      const payload = { code: "locked_node", message: "Target node is locked", details: { nodeIds: [nodeId] } };
+      logger.error("❌ set_layout_mode failed", { code: payload.code, originalError: payload.message, details: payload.details });
+      throw new Error(JSON.stringify(payload));
+    }
+
+    const allowedModes = ["NONE", "HORIZONTAL", "VERTICAL", "GRID"];
+    const allowedWrap = ["NO_WRAP", "WRAP"];
+    if (!allowedModes.includes(layoutMode)) {
+      const payload = { code: "invalid_parameter", message: `Invalid layoutMode: ${layoutMode}`, details: { allowedModes } };
+      logger.error("❌ set_layout_mode failed", { code: payload.code, originalError: payload.message, details: payload.details });
+      throw new Error(JSON.stringify(payload));
+    }
+    if (!allowedWrap.includes(layoutWrap)) {
+      const payload = { code: "invalid_parameter", message: `Invalid layoutWrap: ${layoutWrap}`, details: { allowedWrap } };
+      logger.error("❌ set_layout_mode failed", { code: payload.code, originalError: payload.message, details: payload.details });
+      throw new Error(JSON.stringify(payload));
+    }
+
+    node.layoutMode = layoutMode;
+    if (layoutMode === "HORIZONTAL" || layoutMode === "VERTICAL") {
+      node.layoutWrap = layoutWrap;
+    }
+
+    const summary = `Set layout mode to ${node.layoutMode}${node.layoutMode !== "NONE" && node.layoutMode !== "GRID" ? ` (${node.layoutWrap})` : ""} on '${node.name}'`;
+    const payload = {
+      success: true,
+      summary,
+      modifiedNodeIds: [node.id],
+      node: {
+        id: node.id,
+        name: node.name,
+        layoutMode: node.layoutMode,
+        layoutWrap: node.layoutWrap,
+      },
+    };
+    logger.info("✅ set_layout_mode succeeded", { nodeId: node.id, layoutMode: node.layoutMode, layoutWrap: node.layoutWrap });
+    return payload;
+  } catch (error) {
+    // Normalize unknown errors
+    try {
+      if (typeof (error && error.message) === "string") {
+        JSON.parse(error.message);
+        throw error; // already structured
+      }
+    } catch (_) {
+      // not structured, fall through
+    }
+    const payload = { code: "unknown_plugin_error", message: (error && error.message) || String(error), details: { command: "set_layout_mode" } };
+    logger.error("❌ set_layout_mode failed", { code: payload.code, originalError: (error && error.message) || String(error), details: payload.details });
+    throw new Error(JSON.stringify(payload));
   }
-
-  // Check if node is a frame or component that supports layoutMode
-  if (
-    node.type !== "FRAME" &&
-    node.type !== "COMPONENT" &&
-    node.type !== "COMPONENT_SET" &&
-    node.type !== "INSTANCE"
-  ) {
-    throw new Error(`Node type ${node.type} does not support layoutMode`);
-  }
-
-  // Set layout mode
-  node.layoutMode = layoutMode;
-
-  // Set layoutWrap if applicable
-  if (layoutMode !== "NONE") {
-    node.layoutWrap = layoutWrap;
-  }
-
-  return {
-    id: node.id,
-    name: node.name,
-    layoutMode: node.layoutMode,
-    layoutWrap: node.layoutWrap,
-  };
 }
 
 // -------- TOOL : set_padding --------
 async function setPadding(params) {
-  const { nodeId, paddingTop, paddingRight, paddingBottom, paddingLeft } =
-    params || {};
+  const { nodeId, paddingTop, paddingRight, paddingBottom, paddingLeft } = params || {};
+  try {
+    if (!nodeId) {
+      const payload = { code: "missing_parameter", message: "Provide nodeId", details: { command: "set_padding" } };
+      logger.error("❌ set_padding failed", { code: payload.code, details: payload.details });
+      throw new Error(JSON.stringify(payload));
+    }
+    if (paddingTop === undefined && paddingRight === undefined && paddingBottom === undefined && paddingLeft === undefined) {
+      const payload = { code: "missing_parameter", message: "Provide at least one of paddingTop|paddingRight|paddingBottom|paddingLeft", details: { nodeId } };
+      logger.error("❌ set_padding failed", { code: payload.code, details: payload.details });
+      throw new Error(JSON.stringify(payload));
+    }
 
-  // Get the target node
-  const node = await figma.getNodeByIdAsync(nodeId);
-  if (!node) {
-    throw new Error(`Node with ID ${nodeId} not found`);
+    const node = await figma.getNodeByIdAsync(nodeId);
+    if (!node) {
+      const payload = { code: "node_not_found", message: `Node with ID ${nodeId} not found`, details: { nodeId } };
+      logger.error("❌ set_padding failed", { code: payload.code, originalError: payload.message, details: payload.details });
+      throw new Error(JSON.stringify(payload));
+    }
+
+    if (node.type !== "FRAME" && node.type !== "COMPONENT" && node.type !== "INSTANCE") {
+      const payload = { code: "unsupported_node_type", message: `Node type ${node.type} does not support padding`, details: { nodeId, type: node.type } };
+      logger.error("❌ set_padding failed", { code: payload.code, originalError: payload.message, details: payload.details });
+      throw new Error(JSON.stringify(payload));
+    }
+
+    if ("locked" in node && node.locked) {
+      const payload = { code: "locked_node", message: "Target node is locked", details: { nodeIds: [nodeId] } };
+      logger.error("❌ set_padding failed", { code: payload.code, originalError: payload.message, details: payload.details });
+      throw new Error(JSON.stringify(payload));
+    }
+
+    if (node.layoutMode === "NONE") {
+      const payload = { code: "auto_layout_required", message: "Padding can only be set on auto-layout frames", details: { nodeId } };
+      logger.error("❌ set_padding failed", { code: payload.code, originalError: payload.message, details: payload.details });
+      throw new Error(JSON.stringify(payload));
+    }
+
+    // Validate numbers if provided
+    const checks = [
+      ["paddingTop", paddingTop],
+      ["paddingRight", paddingRight],
+      ["paddingBottom", paddingBottom],
+      ["paddingLeft", paddingLeft],
+    ];
+    for (const [key, value] of checks) {
+      if (value !== undefined && typeof value !== "number") {
+        const payload = { code: "invalid_parameter", message: `${key} must be a number`, details: { key, value } };
+        logger.error("❌ set_padding failed", { code: payload.code, originalError: payload.message, details: payload.details });
+        throw new Error(JSON.stringify(payload));
+      }
+    }
+
+    if (paddingTop !== undefined) node.paddingTop = paddingTop;
+    if (paddingRight !== undefined) node.paddingRight = paddingRight;
+    if (paddingBottom !== undefined) node.paddingBottom = paddingBottom;
+    if (paddingLeft !== undefined) node.paddingLeft = paddingLeft;
+
+    const changedKeys = checks.filter(([, v]) => v !== undefined).map(([k]) => k);
+    const summary = `Updated padding ${changedKeys.join(", ")} on '${node.name}'`;
+    const payload = {
+      success: true,
+      summary,
+      modifiedNodeIds: [node.id],
+      node: {
+        id: node.id,
+        name: node.name,
+        paddingTop: node.paddingTop,
+        paddingRight: node.paddingRight,
+        paddingBottom: node.paddingBottom,
+        paddingLeft: node.paddingLeft,
+      },
+    };
+    logger.info("✅ set_padding succeeded", { nodeId: node.id, changed: changedKeys });
+    return payload;
+  } catch (error) {
+    try {
+      if (typeof (error && error.message) === "string") {
+        JSON.parse(error.message);
+        throw error; // already structured
+      }
+    } catch (_) {
+      // not structured, fall through
+    }
+    const payload = { code: "unknown_plugin_error", message: (error && error.message) || String(error), details: { command: "set_padding" } };
+    logger.error("❌ set_padding failed", { code: payload.code, originalError: (error && error.message) || String(error), details: payload.details });
+    throw new Error(JSON.stringify(payload));
   }
-
-  // Check if node is a frame or component that supports padding
-  if (
-    node.type !== "FRAME" &&
-    node.type !== "COMPONENT" &&
-    node.type !== "COMPONENT_SET" &&
-    node.type !== "INSTANCE"
-  ) {
-    throw new Error(`Node type ${node.type} does not support padding`);
-  }
-
-  // Check if the node has auto-layout enabled
-  if (node.layoutMode === "NONE") {
-    throw new Error(
-      "Padding can only be set on auto-layout frames (layoutMode must not be NONE)"
-    );
-  }
-
-  // Set padding values if provided
-  if (paddingTop !== undefined) node.paddingTop = paddingTop;
-  if (paddingRight !== undefined) node.paddingRight = paddingRight;
-  if (paddingBottom !== undefined) node.paddingBottom = paddingBottom;
-  if (paddingLeft !== undefined) node.paddingLeft = paddingLeft;
-
-  return {
-    id: node.id,
-    name: node.name,
-    paddingTop: node.paddingTop,
-    paddingRight: node.paddingRight,
-    paddingBottom: node.paddingBottom,
-    paddingLeft: node.paddingLeft,
-  };
 }
 
 // -------- TOOL : set_axis_align --------
 async function setAxisAlign(params) {
   const { nodeId, primaryAxisAlignItems, counterAxisAlignItems } = params || {};
-
-  // Get the target node
-  const node = await figma.getNodeByIdAsync(nodeId);
-  if (!node) {
-    throw new Error(`Node with ID ${nodeId} not found`);
-  }
-
-  // Check if node is a frame or component that supports axis alignment
-  if (
-    node.type !== "FRAME" &&
-    node.type !== "COMPONENT" &&
-    node.type !== "COMPONENT_SET" &&
-    node.type !== "INSTANCE"
-  ) {
-    throw new Error(`Node type ${node.type} does not support axis alignment`);
-  }
-
-  // Check if the node has auto-layout enabled
-  if (node.layoutMode === "NONE") {
-    throw new Error(
-      "Axis alignment can only be set on auto-layout frames (layoutMode must not be NONE)"
-    );
-  }
-
-  // Validate and set primaryAxisAlignItems if provided
-  if (primaryAxisAlignItems !== undefined) {
-    if (
-      !["MIN", "MAX", "CENTER", "SPACE_BETWEEN"].includes(primaryAxisAlignItems)
-    ) {
-      throw new Error(
-        "Invalid primaryAxisAlignItems value. Must be one of: MIN, MAX, CENTER, SPACE_BETWEEN"
-      );
+  try {
+    if (!nodeId) {
+      const payload = { code: "missing_parameter", message: "Provide nodeId", details: { command: "set_axis_align" } };
+      logger.error("❌ set_axis_align failed", { code: payload.code, details: payload.details });
+      throw new Error(JSON.stringify(payload));
     }
-    node.primaryAxisAlignItems = primaryAxisAlignItems;
-  }
 
-  // Validate and set counterAxisAlignItems if provided
-  if (counterAxisAlignItems !== undefined) {
-    if (!["MIN", "MAX", "CENTER", "BASELINE"].includes(counterAxisAlignItems)) {
-      throw new Error(
-        "Invalid counterAxisAlignItems value. Must be one of: MIN, MAX, CENTER, BASELINE"
-      );
+    const node = await figma.getNodeByIdAsync(nodeId);
+    if (!node) {
+      const payload = { code: "node_not_found", message: `Node with ID ${nodeId} not found`, details: { nodeId } };
+      logger.error("❌ set_axis_align failed", { code: payload.code, originalError: payload.message, details: payload.details });
+      throw new Error(JSON.stringify(payload));
     }
-    // BASELINE is only valid for horizontal layout
-    if (
-      counterAxisAlignItems === "BASELINE" &&
-      node.layoutMode !== "HORIZONTAL"
-    ) {
-      throw new Error(
-        "BASELINE alignment is only valid for horizontal auto-layout frames"
-      );
+    if (node.type !== "FRAME" && node.type !== "COMPONENT" && node.type !== "INSTANCE") {
+      const payload = { code: "unsupported_node_type", message: `Node type ${node.type} does not support axis alignment`, details: { nodeId, type: node.type } };
+      logger.error("❌ set_axis_align failed", { code: payload.code, originalError: payload.message, details: payload.details });
+      throw new Error(JSON.stringify(payload));
     }
-    node.counterAxisAlignItems = counterAxisAlignItems;
-  }
+    if ("locked" in node && node.locked) {
+      const payload = { code: "locked_node", message: "Target node is locked", details: { nodeIds: [nodeId] } };
+      logger.error("❌ set_axis_align failed", { code: payload.code, originalError: payload.message, details: payload.details });
+      throw new Error(JSON.stringify(payload));
+    }
+    if (node.layoutMode === "NONE") {
+      const payload = { code: "auto_layout_required", message: "Axis alignment can only be set on auto-layout frames", details: { nodeId } };
+      logger.error("❌ set_axis_align failed", { code: payload.code, originalError: payload.message, details: payload.details });
+      throw new Error(JSON.stringify(payload));
+    }
 
-  return {
-    id: node.id,
-    name: node.name,
-    primaryAxisAlignItems: node.primaryAxisAlignItems,
-    counterAxisAlignItems: node.counterAxisAlignItems,
-    layoutMode: node.layoutMode,
-  };
+    const primaryAllowed = ["MIN", "MAX", "CENTER", "SPACE_BETWEEN"];
+    const counterAllowed = ["MIN", "MAX", "CENTER", "BASELINE"];
+    if (primaryAxisAlignItems !== undefined && !primaryAllowed.includes(primaryAxisAlignItems)) {
+      const payload = { code: "invalid_parameter", message: `Invalid primaryAxisAlignItems: ${primaryAxisAlignItems}`, details: { allowed: primaryAllowed } };
+      logger.error("❌ set_axis_align failed", { code: payload.code, originalError: payload.message, details: payload.details });
+      throw new Error(JSON.stringify(payload));
+    }
+    if (counterAxisAlignItems !== undefined && !counterAllowed.includes(counterAxisAlignItems)) {
+      const payload = { code: "invalid_parameter", message: `Invalid counterAxisAlignItems: ${counterAxisAlignItems}`, details: { allowed: counterAllowed } };
+      logger.error("❌ set_axis_align failed", { code: payload.code, originalError: payload.message, details: payload.details });
+      throw new Error(JSON.stringify(payload));
+    }
+    if (counterAxisAlignItems === "BASELINE" && node.layoutMode !== "HORIZONTAL") {
+      const payload = { code: "baseline_requires_horizontal_layout", message: "BASELINE alignment is only valid for horizontal auto-layout frames", details: { nodeId, layoutMode: node.layoutMode } };
+      logger.error("❌ set_axis_align failed", { code: payload.code, originalError: payload.message, details: payload.details });
+      throw new Error(JSON.stringify(payload));
+    }
+    if (primaryAxisAlignItems !== undefined) node.primaryAxisAlignItems = primaryAxisAlignItems;
+    if (counterAxisAlignItems !== undefined) node.counterAxisAlignItems = counterAxisAlignItems;
+
+    const summary = `Aligned '${node.name}' (primary=${node.primaryAxisAlignItems}, counter=${node.counterAxisAlignItems})`;
+    const payload = {
+      success: true,
+      summary,
+      modifiedNodeIds: [node.id],
+      node: {
+        id: node.id,
+        name: node.name,
+        layoutMode: node.layoutMode,
+        primaryAxisAlignItems: node.primaryAxisAlignItems,
+        counterAxisAlignItems: node.counterAxisAlignItems,
+      },
+    };
+    logger.info("✅ set_axis_align succeeded", { nodeId: node.id, primary: node.primaryAxisAlignItems, counter: node.counterAxisAlignItems });
+    return payload;
+  } catch (error) {
+    try {
+      if (typeof (error && error.message) === "string") {
+        JSON.parse(error.message);
+        throw error; // already structured
+      }
+    } catch (_) {
+      // not structured, fall through
+    }
+    const payload = { code: "unknown_plugin_error", message: (error && error.message) || String(error), details: { command: "set_axis_align" } };
+    logger.error("❌ set_axis_align failed", { code: payload.code, originalError: (error && error.message) || String(error), details: payload.details });
+    throw new Error(JSON.stringify(payload));
+  }
 }
 
 // -------- TOOL : set_layout_sizing --------
 async function setLayoutSizing(params) {
   const { nodeId, layoutSizingHorizontal, layoutSizingVertical } = params || {};
+  try {
+    if (!nodeId) {
+      const payload = { code: "missing_parameter", message: "Provide nodeId", details: { command: "set_layout_sizing" } };
+      logger.error("❌ set_layout_sizing failed", { code: payload.code, details: payload.details });
+      throw new Error(JSON.stringify(payload));
+    }
+    if (layoutSizingHorizontal === undefined && layoutSizingVertical === undefined) {
+      const payload = { code: "missing_parameter", message: "Provide at least one of layoutSizingHorizontal|layoutSizingVertical", details: { nodeId } };
+      logger.error("❌ set_layout_sizing failed", { code: payload.code, details: payload.details });
+      throw new Error(JSON.stringify(payload));
+    }
 
-  // Get the target node
-  const node = await figma.getNodeByIdAsync(nodeId);
-  if (!node) {
-    throw new Error(`Node with ID ${nodeId} not found`);
+    const node = await figma.getNodeByIdAsync(nodeId);
+    if (!node) {
+      const payload = { code: "node_not_found", message: `Node with ID ${nodeId} not found`, details: { nodeId } };
+      logger.error("❌ set_layout_sizing failed", { code: payload.code, originalError: payload.message, details: payload.details });
+      throw new Error(JSON.stringify(payload));
+    }
+    // Allow TEXT nodes in addition to FRAME/COMPONENT/INSTANCE
+    if (node.type !== "FRAME" && node.type !== "COMPONENT" && node.type !== "INSTANCE" && node.type !== "TEXT") {
+      const payload = { code: "unsupported_node_type", message: `Node type ${node.type} does not support layout sizing`, details: { nodeId, type: node.type } };
+      logger.error("❌ set_layout_sizing failed", { code: payload.code, originalError: payload.message, details: payload.details });
+      throw new Error(JSON.stringify(payload));
+    }
+    if ("locked" in node && node.locked) {
+      const payload = { code: "locked_node", message: "Target node is locked", details: { nodeIds: [nodeId] } };
+      logger.error("❌ set_layout_sizing failed", { code: payload.code, originalError: payload.message, details: payload.details });
+      throw new Error(JSON.stringify(payload));
+    }
+    // For non-TEXT nodes, require auto-layout
+    if (node.type !== "TEXT" && node.layoutMode === "NONE") {
+      const payload = { code: "auto_layout_required", message: "Layout sizing can only be set on auto-layout frames or text nodes", details: { nodeId, type: node.type } };
+      logger.error("❌ set_layout_sizing failed", { code: payload.code, originalError: payload.message, details: payload.details });
+      throw new Error(JSON.stringify(payload));
+    }
+
+    const allowed = ["FIXED", "HUG", "FILL"];
+    if (layoutSizingHorizontal !== undefined) {
+      if (!allowed.includes(layoutSizingHorizontal)) {
+        const payload = { code: "invalid_parameter", message: `Invalid layoutSizingHorizontal: ${layoutSizingHorizontal}`, details: { allowed } };
+        logger.error("❌ set_layout_sizing failed", { code: payload.code, originalError: payload.message, details: payload.details });
+        throw new Error(JSON.stringify(payload));
+      }
+      if (layoutSizingHorizontal === "HUG" && !(node.type === "FRAME" || node.type === "TEXT")) {
+        const payload = { code: "unsupported_sizing_target", message: "HUG sizing is only valid on auto-layout frames and text nodes", details: { nodeId, type: node.type } };
+        logger.error("❌ set_layout_sizing failed", { code: payload.code, originalError: payload.message, details: payload.details });
+        throw new Error(JSON.stringify(payload));
+      }
+      if (layoutSizingHorizontal === "FILL" && (!node.parent || node.parent.layoutMode === "NONE")) {
+        const payload = { code: "fill_requires_autolayout_parent", message: "FILL sizing is only valid on auto-layout children", details: { nodeId, parentId: node.parent && node.parent.id } };
+        logger.error("❌ set_layout_sizing failed", { code: payload.code, originalError: payload.message, details: payload.details });
+        throw new Error(JSON.stringify(payload));
+      }
+      node.layoutSizingHorizontal = layoutSizingHorizontal;
+    }
+
+    if (layoutSizingVertical !== undefined) {
+      if (!allowed.includes(layoutSizingVertical)) {
+        const payload = { code: "invalid_parameter", message: `Invalid layoutSizingVertical: ${layoutSizingVertical}`, details: { allowed } };
+        logger.error("❌ set_layout_sizing failed", { code: payload.code, originalError: payload.message, details: payload.details });
+        throw new Error(JSON.stringify(payload));
+      }
+      if (layoutSizingVertical === "HUG" && !(node.type === "FRAME" || node.type === "TEXT")) {
+        const payload = { code: "unsupported_sizing_target", message: "HUG sizing is only valid on auto-layout frames and text nodes", details: { nodeId, type: node.type } };
+        logger.error("❌ set_layout_sizing failed", { code: payload.code, originalError: payload.message, details: payload.details });
+        throw new Error(JSON.stringify(payload));
+      }
+      if (layoutSizingVertical === "FILL" && (!node.parent || node.parent.layoutMode === "NONE")) {
+        const payload = { code: "fill_requires_autolayout_parent", message: "FILL sizing is only valid on auto-layout children", details: { nodeId, parentId: node.parent && node.parent.id } };
+        logger.error("❌ set_layout_sizing failed", { code: payload.code, originalError: payload.message, details: payload.details });
+        throw new Error(JSON.stringify(payload));
+      }
+      node.layoutSizingVertical = layoutSizingVertical;
+    }
+
+    const summary = `Updated layout sizing on '${node.name}' (h=${node.layoutSizingHorizontal || "unchanged"}, v=${node.layoutSizingVertical || "unchanged"})`;
+    const payload = {
+      success: true,
+      summary,
+      modifiedNodeIds: [node.id],
+      node: {
+        id: node.id,
+        name: node.name,
+        layoutMode: node.layoutMode,
+        layoutSizingHorizontal: node.layoutSizingHorizontal,
+        layoutSizingVertical: node.layoutSizingVertical,
+      },
+    };
+    logger.info("✅ set_layout_sizing succeeded", { nodeId: node.id, h: node.layoutSizingHorizontal, v: node.layoutSizingVertical });
+    return payload;
+  } catch (error) {
+    try {
+      if (typeof (error && error.message) === "string") {
+        JSON.parse(error.message);
+        throw error; // already structured
+      }
+    } catch (_) {
+      // not structured, fall through
+    }
+    const payload = { code: "unknown_plugin_error", message: (error && error.message) || String(error), details: { command: "set_layout_sizing" } };
+    logger.error("❌ set_layout_sizing failed", { code: payload.code, originalError: (error && error.message) || String(error), details: payload.details });
+    throw new Error(JSON.stringify(payload));
   }
-
-  // Check if node is a frame or component that supports layout sizing
-  if (
-    node.type !== "FRAME" &&
-    node.type !== "COMPONENT" &&
-    node.type !== "COMPONENT_SET" &&
-    node.type !== "INSTANCE"
-  ) {
-    throw new Error(`Node type ${node.type} does not support layout sizing`);
-  }
-
-  // Check if the node has auto-layout enabled
-  if (node.layoutMode === "NONE") {
-    throw new Error(
-      "Layout sizing can only be set on auto-layout frames (layoutMode must not be NONE)"
-    );
-  }
-
-  // Validate and set layoutSizingHorizontal if provided
-  if (layoutSizingHorizontal !== undefined) {
-    if (!["FIXED", "HUG", "FILL"].includes(layoutSizingHorizontal)) {
-      throw new Error(
-        "Invalid layoutSizingHorizontal value. Must be one of: FIXED, HUG, FILL"
-      );
-    }
-    // HUG is only valid on auto-layout frames and text nodes
-    if (
-      layoutSizingHorizontal === "HUG" &&
-      !["FRAME", "TEXT"].includes(node.type)
-    ) {
-      throw new Error(
-        "HUG sizing is only valid on auto-layout frames and text nodes"
-      );
-    }
-    // FILL is only valid on auto-layout children
-    if (
-      layoutSizingHorizontal === "FILL" &&
-      (!node.parent || node.parent.layoutMode === "NONE")
-    ) {
-      throw new Error("FILL sizing is only valid on auto-layout children");
-    }
-    node.layoutSizingHorizontal = layoutSizingHorizontal;
-  }
-
-  // Validate and set layoutSizingVertical if provided
-  if (layoutSizingVertical !== undefined) {
-    if (!["FIXED", "HUG", "FILL"].includes(layoutSizingVertical)) {
-      throw new Error(
-        "Invalid layoutSizingVertical value. Must be one of: FIXED, HUG, FILL"
-      );
-    }
-    // HUG is only valid on auto-layout frames and text nodes
-    if (
-      layoutSizingVertical === "HUG" &&
-      !["FRAME", "TEXT"].includes(node.type)
-    ) {
-      throw new Error(
-        "HUG sizing is only valid on auto-layout frames and text nodes"
-      );
-    }
-    // FILL is only valid on auto-layout children
-    if (
-      layoutSizingVertical === "FILL" &&
-      (!node.parent || node.parent.layoutMode === "NONE")
-    ) {
-      throw new Error("FILL sizing is only valid on auto-layout children");
-    }
-    node.layoutSizingVertical = layoutSizingVertical;
-  }
-
-  return {
-    id: node.id,
-    name: node.name,
-    layoutSizingHorizontal: node.layoutSizingHorizontal,
-    layoutSizingVertical: node.layoutSizingVertical,
-    layoutMode: node.layoutMode,
-  };
 }
 
 // -------- TOOL : set_item_spacing --------
 async function setItemSpacing(params) {
   const { nodeId, itemSpacing, counterAxisSpacing } = params || {};
-
-  // Validate that at least one spacing parameter is provided
-  if (itemSpacing === undefined && counterAxisSpacing === undefined) {
-    throw new Error("At least one of itemSpacing or counterAxisSpacing must be provided");
-  }
-
-  // Get the target node
-  const node = await figma.getNodeByIdAsync(nodeId);
-  if (!node) {
-    throw new Error(`Node with ID ${nodeId} not found`);
-  }
-
-  // Check if node is a frame or component that supports item spacing
-  if (
-    node.type !== "FRAME" &&
-    node.type !== "COMPONENT" &&
-    node.type !== "COMPONENT_SET" &&
-    node.type !== "INSTANCE"
-  ) {
-    throw new Error(`Node type ${node.type} does not support item spacing`);
-  }
-
-  // Check if the node has auto-layout enabled
-  if (node.layoutMode === "NONE") {
-    throw new Error(
-      "Item spacing can only be set on auto-layout frames (layoutMode must not be NONE)"
-    );
-  }
-
-  // Set item spacing if provided
-  if (itemSpacing !== undefined) {
-    if (typeof itemSpacing !== "number") {
-      throw new Error("Item spacing must be a number");
+  try {
+    if (!nodeId) {
+      const payload = { code: "missing_parameter", message: "Provide nodeId", details: { command: "set_item_spacing" } };
+      logger.error("❌ set_item_spacing failed", { code: payload.code, details: payload.details });
+      throw new Error(JSON.stringify(payload));
     }
-    node.itemSpacing = itemSpacing;
-  }
-
-  // Set counter axis spacing if provided
-  if (counterAxisSpacing !== undefined) {
-    if (typeof counterAxisSpacing !== "number") {
-      throw new Error("Counter axis spacing must be a number");
+    if (itemSpacing === undefined && counterAxisSpacing === undefined) {
+      const payload = { code: "missing_parameter", message: "Provide at least one of itemSpacing|counterAxisSpacing", details: { nodeId } };
+      logger.error("❌ set_item_spacing failed", { code: payload.code, details: payload.details });
+      throw new Error(JSON.stringify(payload));
     }
-    // counterAxisSpacing only applies when layoutWrap is WRAP
-    if (node.layoutWrap !== "WRAP") {
-      throw new Error(
-        "Counter axis spacing can only be set on frames with layoutWrap set to WRAP"
-      );
-    }
-    node.counterAxisSpacing = counterAxisSpacing;
-  }
 
-  return {
-    id: node.id,
-    name: node.name,
-    itemSpacing: node.itemSpacing || undefined,
-    counterAxisSpacing: node.counterAxisSpacing || undefined,
-    layoutMode: node.layoutMode,
-    layoutWrap: node.layoutWrap,
-  };
+    const node = await figma.getNodeByIdAsync(nodeId);
+    if (!node) {
+      const payload = { code: "node_not_found", message: `Node with ID ${nodeId} not found`, details: { nodeId } };
+      logger.error("❌ set_item_spacing failed", { code: payload.code, originalError: payload.message, details: payload.details });
+      throw new Error(JSON.stringify(payload));
+    }
+    if (node.type !== "FRAME" && node.type !== "COMPONENT" && node.type !== "INSTANCE") {
+      const payload = { code: "unsupported_node_type", message: `Node type ${node.type} does not support item spacing`, details: { nodeId, type: node.type } };
+      logger.error("❌ set_item_spacing failed", { code: payload.code, originalError: payload.message, details: payload.details });
+      throw new Error(JSON.stringify(payload));
+    }
+    if ("locked" in node && node.locked) {
+      const payload = { code: "locked_node", message: "Target node is locked", details: { nodeIds: [nodeId] } };
+      logger.error("❌ set_item_spacing failed", { code: payload.code, originalError: payload.message, details: payload.details });
+      throw new Error(JSON.stringify(payload));
+    }
+    if (node.layoutMode === "NONE") {
+      const payload = { code: "auto_layout_required", message: "Item spacing can only be set on auto-layout frames", details: { nodeId } };
+      logger.error("❌ set_item_spacing failed", { code: payload.code, originalError: payload.message, details: payload.details });
+      throw new Error(JSON.stringify(payload));
+    }
+
+    if (itemSpacing !== undefined) {
+      if (typeof itemSpacing !== "number") {
+        const payload = { code: "invalid_parameter", message: "itemSpacing must be a number", details: { value: itemSpacing } };
+        logger.error("❌ set_item_spacing failed", { code: payload.code, originalError: payload.message, details: payload.details });
+        throw new Error(JSON.stringify(payload));
+      }
+      node.itemSpacing = itemSpacing;
+    }
+
+    if (counterAxisSpacing !== undefined) {
+      if (typeof counterAxisSpacing !== "number") {
+        const payload = { code: "invalid_parameter", message: "counterAxisSpacing must be a number", details: { value: counterAxisSpacing } };
+        logger.error("❌ set_item_spacing failed", { code: payload.code, originalError: payload.message, details: payload.details });
+        throw new Error(JSON.stringify(payload));
+      }
+      if (node.layoutWrap !== "WRAP") {
+        const payload = { code: "wrap_required_for_counter_axis_spacing", message: "counterAxisSpacing requires layoutWrap=WRAP", details: { nodeId, layoutWrap: node.layoutWrap } };
+        logger.error("❌ set_item_spacing failed", { code: payload.code, originalError: payload.message, details: payload.details });
+        throw new Error(JSON.stringify(payload));
+      }
+      node.counterAxisSpacing = counterAxisSpacing;
+    }
+
+    const changed = [];
+    if (itemSpacing !== undefined) changed.push("itemSpacing");
+    if (counterAxisSpacing !== undefined) changed.push("counterAxisSpacing");
+    const summary = `Updated ${changed.join(" and ")} on '${node.name}'`;
+    const payload = {
+      success: true,
+      summary,
+      modifiedNodeIds: [node.id],
+      node: {
+        id: node.id,
+        name: node.name,
+        layoutMode: node.layoutMode,
+        layoutWrap: node.layoutWrap,
+        itemSpacing: node.itemSpacing,
+        counterAxisSpacing: node.counterAxisSpacing,
+      },
+    };
+    logger.info("✅ set_item_spacing succeeded", { nodeId: node.id, changed });
+    return payload;
+  } catch (error) {
+    try {
+      if (typeof (error && error.message) === "string") {
+        JSON.parse(error.message);
+        throw error; // already structured
+      }
+    } catch (_) {
+      // not structured, fall through
+    }
+    const payload = { code: "unknown_plugin_error", message: (error && error.message) || String(error), details: { command: "set_item_spacing" } };
+    logger.error("❌ set_item_spacing failed", { code: payload.code, originalError: (error && error.message) || String(error), details: payload.details });
+    throw new Error(JSON.stringify(payload));
+  }
 }
 
 
@@ -5758,65 +5910,157 @@ async function setItemSpacing(params) {
 // ======================================================
 // -------- TOOL : zoom --------
 async function zoom(params) {
-  const { zoomLevel, center } = params || {};
+  const logger = (globalThis.logger && typeof globalThis.logger.info === 'function') ? globalThis.logger : console;
+  try {
+    const { zoomLevel, center } = params || {};
 
-  if (zoomLevel === undefined) {
-    throw new Error("Missing zoomLevel parameter");
-  }
+    if (zoomLevel === undefined) {
+      const payload = { code: "missing_required_parameter", message: "Parameter 'zoomLevel' is required.", details: { missing: ["zoomLevel"] } };
+      logger.error("❌ zoom failed", { code: payload.code, originalError: payload.message, details: payload.details });
+      throw new Error(JSON.stringify(payload));
+    }
 
-  if (center) {
-    figma.viewport.center = center;
-  }
+    if (typeof zoomLevel !== "number" || !isFinite(zoomLevel) || zoomLevel <= 0) {
+      const payload = { code: "invalid_zoom_level_range", message: "zoomLevel must be a finite number > 0.", details: { zoomLevel } };
+      logger.error("❌ zoom failed", { code: payload.code, originalError: payload.message, details: payload.details });
+      throw new Error(JSON.stringify(payload));
+    }
+
+    if (center !== undefined) {
+      if (!center || typeof center !== "object" || typeof center.x !== "number" || typeof center.y !== "number" || !isFinite(center.x) || !isFinite(center.y)) {
+        const payload = { code: "invalid_coordinates", message: "center must be an object with numeric x and y.", details: { center } };
+        logger.error("❌ zoom failed", { code: payload.code, originalError: payload.message, details: payload.details });
+        throw new Error(JSON.stringify(payload));
+      }
+      figma.viewport.center = { x: center.x, y: center.y };
+    }
   
-  figma.viewport.zoom = zoomLevel;
+    figma.viewport.zoom = zoomLevel;
 
-  return {
-    success: true,
-    zoom: figma.viewport.zoom,
-    center: figma.viewport.center,
-  };
+    const result = {
+      success: true,
+      summary: `Set zoom to ${Number(figma.viewport.zoom).toFixed(2)}${center ? ` and centered at (${center.x.toFixed(1)}, ${center.y.toFixed(1)})` : ""}.`,
+      modifiedNodeIds: [],
+      zoom: figma.viewport.zoom,
+      center: figma.viewport.center,
+    };
+    logger.info("✅ zoom succeeded", { zoom: result.zoom, center: result.center });
+    return result;
+  } catch (error) {
+    if (error && typeof error.message === "string") {
+      try {
+        JSON.parse(error.message);
+        throw error;
+      } catch (_) {}
+    }
+    const payload = { code: "figma_api_error", message: "Failed to set zoom.", details: { originalError: String((error && error.message) || error) } };
+    logger.error("❌ zoom failed", { code: payload.code, originalError: payload.details.originalError, details: {} });
+    throw new Error(JSON.stringify(payload));
+  }
 }
 
 // -------- TOOL : center --------
 async function center(params) {
-    const { x, y } = params || {};
+    const logger = (globalThis.logger && typeof globalThis.logger.info === 'function') ? globalThis.logger : console;
+    try {
+        const { x, y } = params || {};
 
-    if (x === undefined || y === undefined) {
-        throw new Error("Missing x or y parameters");
+        const missing = [];
+        if (x === undefined) missing.push("x");
+        if (y === undefined) missing.push("y");
+        if (missing.length) {
+            const payload = { code: "missing_required_parameter", message: "Parameters 'x' and 'y' are required.", details: { missing } };
+            logger.error("❌ center failed", { code: payload.code, originalError: payload.message, details: payload.details });
+            throw new Error(JSON.stringify(payload));
+        }
+
+        if (typeof x !== "number" || typeof y !== "number" || !isFinite(x) || !isFinite(y)) {
+            const payload = { code: "invalid_coordinates", message: "x and y must be finite numbers.", details: { x, y } };
+            logger.error("❌ center failed", { code: payload.code, originalError: payload.message, details: payload.details });
+            throw new Error(JSON.stringify(payload));
+        }
+
+        figma.viewport.center = { x, y };
+
+        const result = {
+            success: true,
+            summary: `Centered viewport at (${x.toFixed(1)}, ${y.toFixed(1)}).`,
+            modifiedNodeIds: [],
+            center: figma.viewport.center,
+        };
+        logger.info("✅ center succeeded", { center: result.center });
+        return result;
+    } catch (error) {
+        if (error && typeof error.message === "string") {
+            try { JSON.parse(error.message); throw error; } catch (_) {}
+        }
+        const payload = { code: "figma_api_error", message: "Failed to center viewport.", details: { originalError: String((error && error.message) || error) } };
+        logger.error("❌ center failed", { code: payload.code, originalError: payload.details.originalError });
+        throw new Error(JSON.stringify(payload));
     }
-
-    figma.viewport.center = { x, y };
-
-    return {
-        success: true,
-        center: figma.viewport.center,
-    };
 }
 
 // -------- TOOL : scroll_and_zoom_into_view --------
 async function scrollAndZoomIntoView(params) {
-    const { nodeIds } = params || {};
+    const logger = (globalThis.logger && typeof globalThis.logger.info === 'function') ? globalThis.logger : console;
+    try {
+        const { nodeIds } = params || {};
 
-    if (!nodeIds || !Array.isArray(nodeIds) || nodeIds.length === 0) {
-        throw new Error("Missing or invalid nodeIds parameter");
-    }
-
-    const nodes = [];
-    for (const nodeId of nodeIds) {
-        const node = await figma.getNodeByIdAsync(nodeId);
-        if (node) {
-            nodes.push(node);
+        if (!Array.isArray(nodeIds)) {
+            const payload = { code: "invalid_node_ids", message: "Parameter 'nodeIds' must be a non-empty string array.", details: { nodeIds } };
+            logger.error("❌ scroll_and_zoom_into_view failed", { code: payload.code, originalError: payload.message, details: payload.details });
+            throw new Error(JSON.stringify(payload));
         }
-    }
 
-    if (nodes.length > 0) {
+        const uniqueIds = Array.from(new Set(nodeIds)).filter((id) => typeof id === "string" && id.length > 0);
+        if (uniqueIds.length === 0) {
+            const payload = { code: "missing_required_parameter", message: "Parameter 'nodeIds' is required and must include at least one ID.", details: { missing: ["nodeIds"] } };
+            logger.error("❌ scroll_and_zoom_into_view failed", { code: payload.code, originalError: payload.message, details: payload.details });
+            throw new Error(JSON.stringify(payload));
+        }
+
+        const nodes = [];
+        const resolvedNodeIds = [];
+        const unresolvedNodeIds = [];
+        for (const nodeId of uniqueIds) {
+            try {
+                const node = await figma.getNodeByIdAsync(nodeId);
+                if (node) {
+                    nodes.push(node);
+                    resolvedNodeIds.push(nodeId);
+                } else {
+                    unresolvedNodeIds.push(nodeId);
+                }
+            } catch (_) {
+                unresolvedNodeIds.push(nodeId);
+            }
+        }
+
+        if (nodes.length === 0) {
+            const payload = { code: "nodes_not_found", message: "None of the provided nodes exist.", details: { nodeIds: uniqueIds } };
+            logger.error("❌ scroll_and_zoom_into_view failed", { code: payload.code, originalError: payload.message, details: payload.details });
+            throw new Error(JSON.stringify(payload));
+        }
+
         figma.viewport.scrollAndZoomIntoView(nodes);
-        return {
+        const result = {
             success: true,
-            message: `Scrolled and zoomed into ${nodes.length} nodes.`,
+            summary: `Brought ${nodes.length} node(s) into view.${unresolvedNodeIds.length ? ` ${unresolvedNodeIds.length} unresolved.` : ''}`,
+            modifiedNodeIds: [],
+            resolvedNodeIds,
+            unresolvedNodeIds,
+            zoom: figma.viewport.zoom,
+            center: figma.viewport.center,
         };
-    } else {
-        throw new Error("No valid nodes found to scroll and zoom into.");
+        logger.info("✅ scroll_and_zoom_into_view succeeded", { resolved: resolvedNodeIds.length, unresolved: unresolvedNodeIds.length, zoom: result.zoom, center: result.center });
+        return result;
+    } catch (error) {
+        if (error && typeof error.message === "string") {
+            try { JSON.parse(error.message); throw error; } catch (_) {}
+        }
+        const payload = { code: "figma_api_error", message: "Failed to scroll and zoom into view.", details: { originalError: String((error && error.message) || error) } };
+        logger.error("❌ scroll_and_zoom_into_view failed", { code: payload.code, originalError: payload.details.originalError });
+        throw new Error(JSON.stringify(payload));
     }
 }
 
@@ -5825,75 +6069,184 @@ async function scrollAndZoomIntoView(params) {
 // ======================================================
 // -------- TOOL : group --------
 async function group(params) {
-    const { nodeIds, parentId, name } = params || {};
+    const { nodeIds, parentId, name, index } = params || {};
 
-    if (!nodeIds || !Array.isArray(nodeIds) || nodeIds.length === 0) {
-        throw new Error("Missing or invalid nodeIds parameter. Please provide an array of node IDs.");
-    }
-
-    const nodes = [];
-    for (const nodeId of nodeIds) {
-        const node = await figma.getNodeByIdAsync(nodeId);
-        if (node) {
-            nodes.push(node);
+    try {
+        if (!Array.isArray(nodeIds) || nodeIds.length === 0) {
+            const payload = { code: "missing_parameter", message: "'nodeIds' must be a non-empty array", details: { nodeIds } };
+            logger.error("❌ group failed", { code: payload.code, originalError: payload.message, details: payload.details });
+            throw new Error(JSON.stringify(payload));
         }
-    }
 
-    if (nodes.length > 0) {
+        // Resolve nodes and validate
+        const nodes = [];
+        const missingNodeIds = [];
+        for (const nodeId of nodeIds) {
+            const node = await figma.getNodeByIdAsync(nodeId);
+            if (node) nodes.push(node); else missingNodeIds.push(nodeId);
+        }
+        if (missingNodeIds.length > 0) {
+            const payload = { code: "node_not_found", message: "Some nodes were not found", details: { missingNodeIds } };
+            logger.error("❌ group failed", { code: payload.code, originalError: payload.message, details: payload.details });
+            throw new Error(JSON.stringify(payload));
+        }
+        if (nodes.length === 0) {
+            const payload = { code: "no_valid_nodes", message: "No valid nodes to group", details: {} };
+            logger.error("❌ group failed", { code: payload.code, originalError: payload.message, details: payload.details });
+            throw new Error(JSON.stringify(payload));
+        }
+
+        // Resolve/validate parent
         let parent = figma.currentPage;
         if (parentId) {
             const parentNode = await figma.getNodeByIdAsync(parentId);
-            if (parentNode && 'appendChild' in parentNode) {
-                parent = parentNode;
-            } else {
-                throw new Error(`Invalid parentId: ${parentId}`);
+            if (!(parentNode && 'appendChild' in parentNode)) {
+                const payload = { code: "invalid_parent", message: `Parent cannot accept children`, details: { parentId, parentType: parentNode ? parentNode.type : undefined } };
+                logger.error("❌ group failed", { code: payload.code, originalError: payload.message, details: payload.details });
+                throw new Error(JSON.stringify(payload));
             }
+            parent = parentNode;
         }
-        
-        const groupNode = figma.group(nodes, parent);
+
+        // Helper to find page root for a node
+        function findPage(node) {
+            let cur = node;
+            while (cur && cur.type !== 'PAGE' && cur.type !== 'DOCUMENT') {
+                cur = cur.parent;
+            }
+            return cur && cur.type === 'PAGE' ? cur : null;
+        }
+
+        // Enforce same page constraint
+        const parentPage = findPage(parent) || figma.currentPage;
+        const crossPageNodes = nodes.filter(n => (findPage(n) && findPage(n).id) !== parentPage.id);
+        if (crossPageNodes.length > 0) {
+            const payload = { code: "mixed_pages", message: "Grouped nodes must be in the same page as the parent", details: { parentPageId: parentPage.id, offendingNodeIds: crossPageNodes.map(n => n.id) } };
+            logger.error("❌ group failed", { code: payload.code, originalError: payload.message, details: payload.details });
+            throw new Error(JSON.stringify(payload));
+        }
+
+        // Locked nodes check
+        const locked = nodes.filter(n => n.locked === true);
+        if (locked.length > 0) {
+            const payload = { code: "locked_nodes", message: "Cannot group locked nodes", details: { nodeIds: locked.map(n => n.id) } };
+            logger.error("❌ group failed", { code: payload.code, originalError: payload.message, details: payload.details });
+            throw new Error(JSON.stringify(payload));
+        }
+
+        // Validate optional index
+        let usedIndex = undefined;
+        if (index !== undefined) {
+            if (typeof index !== 'number' || index < 0 || index > parent.children.length) {
+                const payload = { code: "index_out_of_bounds", message: "Index must be between 0 and parent.children.length", details: { index, max: parent.children.length } };
+                logger.error("❌ group failed", { code: payload.code, originalError: payload.message, details: payload.details });
+                throw new Error(JSON.stringify(payload));
+            }
+            usedIndex = index;
+        }
+
+        // Create group
+        let groupNode;
+        try {
+            groupNode = usedIndex === undefined ? figma.group(nodes, parent) : figma.group(nodes, parent, usedIndex);
+        } catch (e) {
+            const originalError = (e && e.message) || String(e);
+            let code = "group_failed";
+            if (/index greater than the number of existing siblings/i.test(originalError)) code = "index_out_of_bounds";
+            else if (/must be in the same page/i.test(originalError)) code = "mixed_pages";
+            else if (/scene root.*cannot be reparented/i.test(originalError)) code = "cannot_reparent_scene_root";
+            else if (/create a parenting cycle/i.test(originalError)) code = "parenting_cycle";
+            else if (/inside of an instance/i.test(originalError)) code = "inside_instance";
+            const payload = { code, message: `Failed to group nodes: ${originalError}`, details: { parentId: parent.id, nodeIds } };
+            logger.error("❌ group failed", { code: payload.code, originalError, details: payload.details });
+            throw new Error(JSON.stringify(payload));
+        }
+
         if (name) {
             groupNode.name = name;
         }
 
-        return {
+        const createdIndex = parent.children.indexOf(groupNode);
+        const result = {
             success: true,
+            summary: `Grouped ${nodes.length} node(s) into parent ${parent.name}`,
+            modifiedNodeIds: [groupNode.id, ...nodes.map(n => n.id)],
             groupId: groupNode.id,
             name: groupNode.name,
-            children: groupNode.children.map(child => child.id),
+            parentId: parent.id,
+            index: createdIndex,
+            children: groupNode.children.map(child => child.id)
         };
-    } else {
-        throw new Error("No valid nodes found to group. Please check the provided node IDs.");
+        logger.info("✅ group succeeded", { groupId: groupNode.id, count: nodes.length, parentId: parent.id, index: createdIndex });
+        return result;
+    } catch (error) {
+        try {
+            const maybe = JSON.parse(error && error.message ? error.message : String(error));
+            if (maybe && maybe.code) throw error;
+        } catch (_) {}
+        const payload = { code: "unknown_plugin_error", message: (error && error.message) || String(error), details: {} };
+        logger.error("❌ group failed", { code: payload.code, originalError: payload.message, details: payload.details });
+        throw new Error(JSON.stringify(payload));
     }
 }
 
 // -------- TOOL : ungroup --------
 async function ungroup(params) {
     const { nodeId } = params || {};
+    try {
+        if (!nodeId) {
+            const payload = { code: "missing_parameter", message: "'nodeId' is required", details: {} };
+            logger.error("❌ ungroup failed", { code: payload.code, originalError: payload.message, details: payload.details });
+            throw new Error(JSON.stringify(payload));
+        }
 
-    if (!nodeId) {
-        throw new Error("Missing nodeId parameter");
-    }
+        const node = await figma.getNodeByIdAsync(nodeId);
+        if (!node) {
+            const payload = { code: "node_not_found", message: `Node not found with ID: ${nodeId}` , details: { nodeId } };
+            logger.error("❌ ungroup failed", { code: payload.code, originalError: payload.message, details: payload.details });
+            throw new Error(JSON.stringify(payload));
+        }
+        if (node.type !== 'GROUP') {
+            const payload = { code: "invalid_node_type", message: `Node is not a GROUP`, details: { nodeId, type: node.type } };
+            logger.error("❌ ungroup failed", { code: payload.code, originalError: payload.message, details: payload.details });
+            throw new Error(JSON.stringify(payload));
+        }
 
-    const node = await figma.getNodeByIdAsync(nodeId);
-
-    if (node && node.type === 'GROUP') {
         const parent = node.parent;
         const children = Array.prototype.slice.call(node.children);
         if (parent && 'insertChild' in parent) {
-            const index = parent.children.indexOf(node);
-            children.forEach(child => parent.insertChild(index, child));
-            node.remove(); // a group with no children is automatically removed
+            const insertIndex = parent.children.indexOf(node);
+            try {
+                children.forEach((child, i) => parent.insertChild(insertIndex + i, child));
+                node.remove();
+            } catch (e) {
+                const originalError = (e && e.message) || String(e);
+                const payload = { code: "ungroup_failed", message: `Failed to ungroup: ${originalError}`, details: { nodeId } };
+                logger.error("❌ ungroup failed", { code: payload.code, originalError, details: payload.details });
+                throw new Error(JSON.stringify(payload));
+            }
+            const result = {
+                success: true,
+                summary: `Ungrouped ${children.length} node(s) from group`,
+                modifiedNodeIds: [nodeId, ...children.map(c => c.id)],
+                childrenIds: children.map(child => child.id),
+                parentId: parent.id,
+                removedGroupId: nodeId,
+            };
+            logger.info("✅ ungroup succeeded", { groupId: nodeId, childrenCount: children.length, parentId: parent.id });
+            return result;
         }
-        
-        return {
-            success: true,
-            message: `Ungrouped node ${nodeId}.`,
-            childrenIds: children.map(child => child.id),
-        };
-    } else if (!node) {
-        throw new Error(`Node not found with ID: ${nodeId}`);
-    } else {
-        throw new Error(`Node with ID ${nodeId} is not a group.`);
+        const payload = { code: "invalid_parent", message: "Parent does not support child insertion", details: { nodeId } };
+        logger.error("❌ ungroup failed", { code: payload.code, originalError: payload.message, details: payload.details });
+        throw new Error(JSON.stringify(payload));
+    } catch (error) {
+        try {
+            const maybe = JSON.parse(error && error.message ? error.message : String(error));
+            if (maybe && maybe.code) throw error;
+        } catch (_) {}
+        const payload = { code: "unknown_plugin_error", message: (error && error.message) || String(error), details: {} };
+        logger.error("❌ ungroup failed", { code: payload.code, originalError: payload.message, details: payload.details });
+        throw new Error(JSON.stringify(payload));
     }
 }
 
@@ -5901,131 +6254,484 @@ async function ungroup(params) {
 
 // -------- TOOL : reparent --------
 async function reparent(params) {
-    const { nodeIds, newParentId } = params || {};
-
-    if (!nodeIds || !Array.isArray(nodeIds) || nodeIds.length === 0 || !newParentId) {
-        throw new Error("Missing or invalid parameters. 'nodeIds' and 'newParentId' are required.");
-    }
-    if (nodeIds.includes(newParentId)) {
-        throw new Error("A node cannot be reparented to itself.");
-    }
-
-    const newParent = await figma.getNodeByIdAsync(newParentId);
-    if (!newParent || !('appendChild' in newParent)) {
-        throw new Error(`Invalid new parent: ${newParentId}`);
-    }
-
-    for (const nodeId of nodeIds) {
-        const node = await figma.getNodeByIdAsync(nodeId);
-        if (node) {
-            newParent.appendChild(node);
+    const { nodeIds, newParentId, index } = params || {};
+    try {
+        if (!Array.isArray(nodeIds) || nodeIds.length === 0 || !newParentId) {
+            const payload = { code: "missing_parameter", message: "'nodeIds' (non-empty) and 'newParentId' are required", details: { nodeIds, newParentId } };
+            logger.error("❌ reparent failed", { code: payload.code, originalError: payload.message, details: payload.details });
+            throw new Error(JSON.stringify(payload));
         }
-    }
+        if (nodeIds.includes(newParentId)) {
+            const payload = { code: "invalid_parameter", message: "A node cannot be reparented to itself", details: { newParentId } };
+            logger.error("❌ reparent failed", { code: payload.code, originalError: payload.message, details: payload.details });
+            throw new Error(JSON.stringify(payload));
+        }
 
-    return {
-        success: true,
-        message: `Reparented ${nodeIds.length} nodes to ${newParentId}.`,
-    };
+        const newParent = await figma.getNodeByIdAsync(newParentId);
+        if (!(newParent && ('appendChild' in newParent) && ('insertChild' in newParent))) {
+            const payload = { code: "invalid_parent", message: `New parent cannot accept children`, details: { newParentId, parentType: newParent ? newParent.type : undefined } };
+            logger.error("❌ reparent failed", { code: payload.code, originalError: payload.message, details: payload.details });
+            throw new Error(JSON.stringify(payload));
+        }
+        if (newParent.locked) {
+            const payload = { code: "locked_parent", message: "Parent is locked", details: { newParentId } };
+            logger.error("❌ reparent failed", { code: payload.code, originalError: payload.message, details: payload.details });
+            throw new Error(JSON.stringify(payload));
+        }
+
+        // Helper to find page
+        function findPage(node) {
+            let cur = node;
+            while (cur && cur.type !== 'PAGE' && cur.type !== 'DOCUMENT') cur = cur.parent;
+            return cur && cur.type === 'PAGE' ? cur : null;
+        }
+        const parentPage = findPage(newParent) || figma.currentPage;
+
+        const nodes = [];
+        const unresolvedNodeIds = [];
+        for (const nodeId of nodeIds) {
+            const node = await figma.getNodeByIdAsync(nodeId);
+            if (!node) {
+                unresolvedNodeIds.push(nodeId);
+                continue;
+            }
+            nodes.push(node);
+        }
+        if (nodes.length === 0) {
+            const payload = { code: "no_valid_nodes", message: "None of the provided nodeIds could be resolved", details: { unresolvedNodeIds } };
+            logger.error("❌ reparent failed", { code: payload.code, originalError: payload.message, details: payload.details });
+            throw new Error(JSON.stringify(payload));
+        }
+
+        // Validate locked nodes
+        const locked = nodes.filter(n => n.locked === true);
+        if (locked.length > 0) {
+            const payload = { code: "locked_nodes", message: "Cannot move locked nodes", details: { nodeIds: locked.map(n => n.id) } };
+            logger.error("❌ reparent failed", { code: payload.code, originalError: payload.message, details: payload.details });
+            throw new Error(JSON.stringify(payload));
+        }
+
+        // Same-page constraint
+        const crossPageNodes = nodes.filter(n => (findPage(n) && findPage(n).id) !== parentPage.id);
+        if (crossPageNodes.length > 0) {
+            const payload = { code: "mixed_pages", message: "Nodes must be in the same page as the new parent", details: { parentPageId: parentPage.id, offendingNodeIds: crossPageNodes.map(n => n.id) } };
+            logger.error("❌ reparent failed", { code: payload.code, originalError: payload.message, details: payload.details });
+            throw new Error(JSON.stringify(payload));
+        }
+
+        // Validate optional index
+        let usedIndex = undefined;
+        if (index !== undefined) {
+            if (typeof index !== 'number' || index < 0 || index > newParent.children.length) {
+                const payload = { code: "index_out_of_bounds", message: "Index must be between 0 and parent.children.length", details: { index, max: newParent.children.length } };
+                logger.error("❌ reparent failed", { code: payload.code, originalError: payload.message, details: payload.details });
+                throw new Error(JSON.stringify(payload));
+            }
+            usedIndex = index;
+        }
+
+        const movedNodeIds = [];
+        const failedNodeIds = [];
+        let insertionIndex = usedIndex;
+        for (const node of nodes) {
+            try {
+                if (insertionIndex === undefined) newParent.appendChild(node); else newParent.insertChild(insertionIndex, node), insertionIndex++;
+                movedNodeIds.push(node.id);
+            } catch (e) {
+                failedNodeIds.push(node.id);
+            }
+        }
+
+        if (failedNodeIds.length > 0) {
+            const payload = { code: "reparent_failed", message: "Some nodes could not be reparented", details: { movedNodeIds, failedNodeIds, unresolvedNodeIds, parentId: newParentId } };
+            logger.error("❌ reparent failed", { code: payload.code, originalError: payload.message, details: payload.details });
+            throw new Error(JSON.stringify(payload));
+        }
+
+        const result = {
+            success: true,
+            summary: `Reparented ${movedNodeIds.length} node(s) to ${newParent.name}`,
+            modifiedNodeIds: movedNodeIds,
+            parentId: newParentId,
+            insertIndex: usedIndex,
+            movedNodeIds,
+            unresolvedNodeIds,
+        };
+        logger.info("✅ reparent succeeded", { moved: movedNodeIds.length, parentId: newParentId, insertIndex: usedIndex });
+        return result;
+    } catch (error) {
+        try {
+            const maybe = JSON.parse(error && error.message ? error.message : String(error));
+            if (maybe && maybe.code) throw error;
+        } catch (_) {}
+        const payload = { code: "unknown_plugin_error", message: (error && error.message) || String(error), details: {} };
+        logger.error("❌ reparent failed", { code: payload.code, originalError: payload.message, details: payload.details });
+        throw new Error(JSON.stringify(payload));
+    }
 }
 
 // -------- TOOL : insert_child --------
 async function insertChild(params) {
     const { parentId, childId, index } = params || {};
+    try {
+        if (!parentId || !childId || index === undefined) {
+            const payload = { code: "missing_parameter", message: "'parentId', 'childId', and 'index' are required", details: { parentId, childId, index } };
+            logger.error("❌ insert_child failed", { code: payload.code, originalError: payload.message, details: payload.details });
+            throw new Error(JSON.stringify(payload));
+        }
+        if (parentId === childId) {
+            const payload = { code: "invalid_parameter", message: "A node cannot be inserted into itself", details: { parentId, childId } };
+            logger.error("❌ insert_child failed", { code: payload.code, originalError: payload.message, details: payload.details });
+            throw new Error(JSON.stringify(payload));
+        }
 
-    if (!parentId || !childId || index === undefined) {
-        throw new Error("Missing or invalid parameters. 'parentId', 'childId', and 'index' are required.");
+        const parent = await figma.getNodeByIdAsync(parentId);
+        if (!(parent && 'insertChild' in parent)) {
+            const payload = { code: "invalid_parent", message: `Parent cannot accept children`, details: { parentId, parentType: parent ? parent.type : undefined } };
+            logger.error("❌ insert_child failed", { code: payload.code, originalError: payload.message, details: payload.details });
+            throw new Error(JSON.stringify(payload));
+        }
+        const child = await figma.getNodeByIdAsync(childId);
+        if (!child) {
+            const payload = { code: "node_not_found", message: `Child node not found`, details: { childId } };
+            logger.error("❌ insert_child failed", { code: payload.code, originalError: payload.message, details: payload.details });
+            throw new Error(JSON.stringify(payload));
+        }
+        if (typeof index !== 'number' || index < 0 || index > parent.children.length) {
+            const payload = { code: "index_out_of_bounds", message: "Index must be within [0, parent.children.length]", details: { index, max: parent.children.length } };
+            logger.error("❌ insert_child failed", { code: payload.code, originalError: payload.message, details: payload.details });
+            throw new Error(JSON.stringify(payload));
+        }
+        if (child.locked) {
+            const payload = { code: "locked_nodes", message: "Child is locked", details: { nodeIds: [childId] } };
+            logger.error("❌ insert_child failed", { code: payload.code, originalError: payload.message, details: payload.details });
+            throw new Error(JSON.stringify(payload));
+        }
+
+        try {
+            parent.insertChild(index, child);
+        } catch (e) {
+            const originalError = (e && e.message) || String(e);
+            let code = "insert_failed";
+            if (/index greater than the number of existing siblings/i.test(originalError)) code = "index_out_of_bounds";
+            const payload = { code, message: `Failed to insert child: ${originalError}`, details: { parentId, childId, index } };
+            logger.error("❌ insert_child failed", { code: payload.code, originalError, details: payload.details });
+            throw new Error(JSON.stringify(payload));
+        }
+
+        const result = {
+            success: true,
+            summary: `Inserted child into parent at index ${index}`,
+            modifiedNodeIds: [childId],
+            parentId,
+            childId,
+            index,
+        };
+        logger.info("✅ insert_child succeeded", { parentId, childId, index });
+        return result;
+    } catch (error) {
+        try {
+            const maybe = JSON.parse(error && error.message ? error.message : String(error));
+            if (maybe && maybe.code) throw error;
+        } catch (_) {}
+        const payload = { code: "unknown_plugin_error", message: (error && error.message) || String(error), details: {} };
+        logger.error("❌ insert_child failed", { code: payload.code, originalError: payload.message, details: payload.details });
+        throw new Error(JSON.stringify(payload));
     }
-    if (parentId === childId) {
-        throw new Error("A node cannot be inserted into itself.");
-    }
-
-    const parent = await figma.getNodeByIdAsync(parentId);
-    if (!parent || !('insertChild' in parent)) {
-        throw new Error(`Invalid parent: ${parentId}`);
-    }
-
-    const child = await figma.getNodeByIdAsync(childId);
-    if (!child) {
-        throw new Error(`Child node not found: ${childId}`);
-    }
-
-    parent.insertChild(index, child);
-
-    return {
-        success: true,
-        message: `Inserted child ${childId} into parent ${parentId} at index ${index}.`,
-    };
 }
 
 // ======================================================
 // Section: Style Creation (Paint/Text/Effect/Grid Styles)
 // ======================================================
 async function createPaintStyle(params) {
-    const { name, paints } = params || {};
-    if (!name || !paints) {
-        throw new Error("Missing 'name' or 'paints' parameter. Please provide a name and a list of paint objects.");
+    try {
+        const { name, paints, onConflict } = params || {};
+
+        // Validate editor type
+        if (figma.editorType !== 'figma') {
+            const payload = { code: "unsupported_editor_type", message: "Style APIs are only available in Figma Design", details: { editorType: figma.editorType } };
+            logger.error("❌ create_paint_style failed", { code: payload.code, originalError: payload.message, details: payload.details });
+            throw new Error(JSON.stringify(payload));
+        }
+
+        // Validate params
+        if (typeof name !== 'string' || name.trim().length === 0) {
+            const payload = { code: "missing_parameter", message: "'name' is required and must be a non-empty string", details: { name } };
+            logger.error("❌ create_paint_style failed", { code: payload.code, originalError: payload.message, details: payload.details });
+            throw new Error(JSON.stringify(payload));
+        }
+        if (!Array.isArray(paints) || paints.length === 0) {
+            const payload = { code: "invalid_parameter", message: "'paints' must be a non-empty array of Paint objects", details: { paintsType: Array.isArray(paints) ? 'array' : typeof paints } };
+            logger.error("❌ create_paint_style failed", { code: payload.code, originalError: payload.message, details: payload.details });
+            throw new Error(JSON.stringify(payload));
+        }
+
+        const conflictMode = (onConflict === 'skip' || onConflict === 'suffix' || onConflict === 'error') ? onConflict : 'error';
+
+        // Conflict handling by name
+        const existing = await figma.getLocalPaintStylesAsync();
+        const exact = existing.find(s => String(s.name) === name);
+        if (exact) {
+            if (conflictMode === 'skip') {
+                logger.info("✅ create_paint_style skipped (name exists)", { styleId: exact.id, name: exact.name });
+                return { success: true, summary: `Skipped: paint style '${name}' already exists`, modifiedNodeIds: [], createdStyleId: exact.id, name: exact.name, type: 'paint', skipped: true };
+            }
+            if (conflictMode === 'error') {
+                const payload = { code: "conflict_style_name", message: `A paint style named '${name}' already exists`, details: { name, existingStyleId: exact.id } };
+                logger.error("❌ create_paint_style failed", { code: payload.code, originalError: payload.message, details: payload.details });
+                throw new Error(JSON.stringify(payload));
+            }
+        }
+
+        const style = figma.createPaintStyle();
+        // If suffix mode, ensure unique name
+        if (exact && conflictMode === 'suffix') {
+            let i = 2; let candidate = `${name} (${i})`;
+            const names = new Set(existing.map(s => String(s.name)));
+            while (names.has(candidate)) { i += 1; candidate = `${name} (${i})`; }
+            style.name = candidate;
+        } else {
+            style.name = name;
+        }
+        style.paints = paints;
+
+        const result = { success: true, summary: `Created paint style '${style.name}'`, modifiedNodeIds: [], createdStyleId: style.id, name: style.name, type: 'paint' };
+        logger.info("✅ create_paint_style succeeded", { styleId: style.id, name: style.name });
+        return result;
+    } catch (error) {
+        try {
+            const payload = JSON.parse((error && error.message) || String(error));
+            if (payload && payload.code) {
+                logger.error("❌ create_paint_style failed", { code: payload.code, originalError: (error && error.message) || String(error), details: payload.details || {} });
+                throw new Error(JSON.stringify(payload));
+            }
+        } catch (_) {}
+        const payload = { code: "unknown_plugin_error", message: (error && error.message) || String(error), details: {} };
+        logger.error("❌ create_paint_style failed", { code: payload.code, originalError: payload.message, details: payload.details });
+        throw new Error(JSON.stringify(payload));
     }
-
-    const style = figma.createPaintStyle();
-    style.name = name;
-    style.paints = paints;
-
-    return {
-        success: true,
-        styleId: style.id,
-        name: style.name,
-    };
 }
 
 async function createTextStyle(params) {
-    const { name, style } = params || {};
-    if (!name || !style) {
-        throw new Error("Missing 'name' or 'style' parameter. Please provide a name and a text style object.");
+    try {
+        const { name, style, onConflict } = params || {};
+
+        if (figma.editorType !== 'figma') {
+            const payload = { code: "unsupported_editor_type", message: "Style APIs are only available in Figma Design", details: { editorType: figma.editorType } };
+            logger.error("❌ create_text_style failed", { code: payload.code, originalError: payload.message, details: payload.details });
+            throw new Error(JSON.stringify(payload));
+        }
+
+        if (typeof name !== 'string' || name.trim().length === 0) {
+            const payload = { code: "missing_parameter", message: "'name' is required and must be a non-empty string", details: { name } };
+            logger.error("❌ create_text_style failed", { code: payload.code, originalError: payload.message, details: payload.details });
+            throw new Error(JSON.stringify(payload));
+        }
+        if (typeof style !== 'object' || style == null) {
+            const payload = { code: "invalid_parameter", message: "'style' must be an object with text style properties", details: {} };
+            logger.error("❌ create_text_style failed", { code: payload.code, originalError: payload.message, details: payload.details });
+            throw new Error(JSON.stringify(payload));
+        }
+
+        const conflictMode = (onConflict === 'skip' || onConflict === 'suffix' || onConflict === 'error') ? onConflict : 'error';
+        const existing = await figma.getLocalTextStylesAsync();
+        const exact = existing.find(s => String(s.name) === name);
+        if (exact) {
+            if (conflictMode === 'skip') {
+                logger.info("✅ create_text_style skipped (name exists)", { styleId: exact.id, name: exact.name });
+                return { success: true, summary: `Skipped: text style '${name}' already exists`, modifiedNodeIds: [], createdStyleId: exact.id, name: exact.name, type: 'text', skipped: true };
+            }
+            if (conflictMode === 'error') {
+                const payload = { code: "conflict_style_name", message: `A text style named '${name}' already exists`, details: { name, existingStyleId: exact.id } };
+                logger.error("❌ create_text_style failed", { code: payload.code, originalError: payload.message, details: payload.details });
+                throw new Error(JSON.stringify(payload));
+            }
+        }
+
+        const textStyle = figma.createTextStyle();
+        if (exact && conflictMode === 'suffix') {
+            let i = 2; let candidate = `${name} (${i})`;
+            const names = new Set(existing.map(s => String(s.name)));
+            while (names.has(candidate)) { i += 1; candidate = `${name} (${i})`; }
+            textStyle.name = candidate;
+        } else {
+            textStyle.name = name;
+        }
+
+        // Ensure font is loaded BEFORE setting any font-dependent properties
+        let targetFontName = (style && style.fontName && typeof style.fontName === 'object') ? style.fontName : textStyle.fontName;
+        try {
+            if (targetFontName && typeof targetFontName === 'object') {
+                await figma.loadFontAsync(targetFontName);
+            }
+        } catch (e) {
+            const payload = { code: "font_load_failed", message: (e && e.message) || "Failed to load specified font", details: { fontName: targetFontName } };
+            logger.error("❌ create_text_style failed", { code: payload.code, originalError: payload.message, details: payload.details });
+            throw new Error(JSON.stringify(payload));
+        }
+
+        // Apply fontName first (if provided), then remaining properties
+        if (style && typeof style === 'object') {
+            if (style.fontName) {
+                try { textStyle.fontName = style.fontName; } catch (e) {
+                    const payload = { code: "invalid_parameter", message: (e && e.message) || "Invalid fontName provided", details: { fontName: style.fontName } };
+                    logger.error("❌ create_text_style failed", { code: payload.code, originalError: payload.message, details: payload.details });
+                    throw new Error(JSON.stringify(payload));
+                }
+            }
+            for (const key of Object.keys(style)) {
+                if (key === 'fontName' || key === 'name') continue;
+                try {
+                    textStyle[key] = style[key];
+                } catch (e) {
+                    const payload = { code: "invalid_parameter", message: (e && e.message) || `Invalid style property '${key}'`, details: { key, valueType: typeof style[key] } };
+                    logger.error("❌ create_text_style failed", { code: payload.code, originalError: payload.message, details: payload.details });
+                    throw new Error(JSON.stringify(payload));
+                }
+            }
+        }
+
+        const result = { success: true, summary: `Created text style '${textStyle.name}'`, modifiedNodeIds: [], createdStyleId: textStyle.id, name: textStyle.name, type: 'text' };
+        logger.info("✅ create_text_style succeeded", { styleId: textStyle.id, name: textStyle.name });
+        return result;
+    } catch (error) {
+        try {
+            const payload = JSON.parse((error && error.message) || String(error));
+            if (payload && payload.code) {
+                logger.error("❌ create_text_style failed", { code: payload.code, originalError: (error && error.message) || String(error), details: payload.details || {} });
+                throw new Error(JSON.stringify(payload));
+            }
+        } catch (_) {}
+        const payload = { code: "unknown_plugin_error", message: (error && error.message) || String(error), details: {} };
+        logger.error("❌ create_text_style failed", { code: payload.code, originalError: payload.message, details: payload.details });
+        throw new Error(JSON.stringify(payload));
     }
-    
-    const textStyle = figma.createTextStyle();
-    textStyle.name = name;
-    Object.assign(textStyle, style);
-    
-    return {
-        success: true,
-        styleId: textStyle.id,
-        name: textStyle.name,
-    };
 }
 
 async function createEffectStyle(params) {
-    const { name, effects } = params || {};
-    if (!name || !effects) {
-        throw new Error("Missing 'name' or 'effects' parameter. Please provide a name and a list of effect objects.");
+    try {
+        const { name, effects, onConflict } = params || {};
+
+        if (figma.editorType !== 'figma') {
+            const payload = { code: "unsupported_editor_type", message: "Style APIs are only available in Figma Design", details: { editorType: figma.editorType } };
+            logger.error("❌ create_effect_style failed", { code: payload.code, originalError: payload.message, details: payload.details });
+            throw new Error(JSON.stringify(payload));
+        }
+        if (typeof name !== 'string' || name.trim().length === 0) {
+            const payload = { code: "missing_parameter", message: "'name' is required and must be a non-empty string", details: { name } };
+            logger.error("❌ create_effect_style failed", { code: payload.code, originalError: payload.message, details: payload.details });
+            throw new Error(JSON.stringify(payload));
+        }
+        if (!Array.isArray(effects) || effects.length === 0) {
+            const payload = { code: "invalid_parameter", message: "'effects' must be a non-empty array of Effect objects", details: { effectsType: Array.isArray(effects) ? 'array' : typeof effects } };
+            logger.error("❌ create_effect_style failed", { code: payload.code, originalError: payload.message, details: payload.details });
+            throw new Error(JSON.stringify(payload));
+        }
+
+        const conflictMode = (onConflict === 'skip' || onConflict === 'suffix' || onConflict === 'error') ? onConflict : 'error';
+        const existing = await figma.getLocalEffectStylesAsync();
+        const exact = existing.find(s => String(s.name) === name);
+        if (exact) {
+            if (conflictMode === 'skip') {
+                logger.info("✅ create_effect_style skipped (name exists)", { styleId: exact.id, name: exact.name });
+                return { success: true, summary: `Skipped: effect style '${name}' already exists`, modifiedNodeIds: [], createdStyleId: exact.id, name: exact.name, type: 'effect', skipped: true };
+            }
+            if (conflictMode === 'error') {
+                const payload = { code: "conflict_style_name", message: `An effect style named '${name}' already exists`, details: { name, existingStyleId: exact.id } };
+                logger.error("❌ create_effect_style failed", { code: payload.code, originalError: payload.message, details: payload.details });
+                throw new Error(JSON.stringify(payload));
+            }
+        }
+
+        const effectStyle = figma.createEffectStyle();
+        if (exact && conflictMode === 'suffix') {
+            let i = 2; let candidate = `${name} (${i})`;
+            const names = new Set(existing.map(s => String(s.name)));
+            while (names.has(candidate)) { i += 1; candidate = `${name} (${i})`; }
+            effectStyle.name = candidate;
+        } else {
+            effectStyle.name = name;
+        }
+        effectStyle.effects = effects;
+
+        const result = { success: true, summary: `Created effect style '${effectStyle.name}'`, modifiedNodeIds: [], createdStyleId: effectStyle.id, name: effectStyle.name, type: 'effect' };
+        logger.info("✅ create_effect_style succeeded", { styleId: effectStyle.id, name: effectStyle.name });
+        return result;
+    } catch (error) {
+        try {
+            const payload = JSON.parse((error && error.message) || String(error));
+            if (payload && payload.code) {
+                logger.error("❌ create_effect_style failed", { code: payload.code, originalError: (error && error.message) || String(error), details: payload.details || {} });
+                throw new Error(JSON.stringify(payload));
+            }
+        } catch (_) {}
+        const payload = { code: "unknown_plugin_error", message: (error && error.message) || String(error), details: {} };
+        logger.error("❌ create_effect_style failed", { code: payload.code, originalError: payload.message, details: payload.details });
+        throw new Error(JSON.stringify(payload));
     }
-
-    const effectStyle = figma.createEffectStyle();
-    effectStyle.name = name;
-    effectStyle.effects = effects;
-
-    return {
-        success: true,
-        styleId: effectStyle.id,
-        name: effectStyle.name,
-    };
 }
 
 async function createGridStyle(params) {
-    const { name, layoutGrids } = params || {};
-    if (!name || !layoutGrids) {
-        throw new Error("Missing 'name' or 'layoutGrids' parameter. Please provide a name and a list of layout grid objects.");
+    try {
+        const { name, layoutGrids, onConflict } = params || {};
+
+        if (figma.editorType !== 'figma') {
+            const payload = { code: "unsupported_editor_type", message: "Style APIs are only available in Figma Design", details: { editorType: figma.editorType } };
+            logger.error("❌ create_grid_style failed", { code: payload.code, originalError: payload.message, details: payload.details });
+            throw new Error(JSON.stringify(payload));
+        }
+        if (typeof name !== 'string' || name.trim().length === 0) {
+            const payload = { code: "missing_parameter", message: "'name' is required and must be a non-empty string", details: { name } };
+            logger.error("❌ create_grid_style failed", { code: payload.code, originalError: payload.message, details: payload.details });
+            throw new Error(JSON.stringify(payload));
+        }
+        if (!Array.isArray(layoutGrids) || layoutGrids.length === 0) {
+            const payload = { code: "invalid_parameter", message: "'layoutGrids' must be a non-empty array of LayoutGrid objects", details: { layoutGridsType: Array.isArray(layoutGrids) ? 'array' : typeof layoutGrids } };
+            logger.error("❌ create_grid_style failed", { code: payload.code, originalError: payload.message, details: payload.details });
+            throw new Error(JSON.stringify(payload));
+        }
+
+        const conflictMode = (onConflict === 'skip' || onConflict === 'suffix' || onConflict === 'error') ? onConflict : 'error';
+        const existing = await figma.getLocalGridStylesAsync();
+        const exact = existing.find(s => String(s.name) === name);
+        if (exact) {
+            if (conflictMode === 'skip') {
+                logger.info("✅ create_grid_style skipped (name exists)", { styleId: exact.id, name: exact.name });
+                return { success: true, summary: `Skipped: grid style '${name}' already exists`, modifiedNodeIds: [], createdStyleId: exact.id, name: exact.name, type: 'grid', skipped: true };
+            }
+            if (conflictMode === 'error') {
+                const payload = { code: "conflict_style_name", message: `A grid style named '${name}' already exists`, details: { name, existingStyleId: exact.id } };
+                logger.error("❌ create_grid_style failed", { code: payload.code, originalError: payload.message, details: payload.details });
+                throw new Error(JSON.stringify(payload));
+            }
+        }
+
+        const gridStyle = figma.createGridStyle();
+        if (exact && conflictMode === 'suffix') {
+            let i = 2; let candidate = `${name} (${i})`;
+            const names = new Set(existing.map(s => String(s.name)));
+            while (names.has(candidate)) { i += 1; candidate = `${name} (${i})`; }
+            gridStyle.name = candidate;
+        } else {
+            gridStyle.name = name;
+        }
+        gridStyle.layoutGrids = layoutGrids;
+
+        const result = { success: true, summary: `Created grid style '${gridStyle.name}'`, modifiedNodeIds: [], createdStyleId: gridStyle.id, name: gridStyle.name, type: 'grid' };
+        logger.info("✅ create_grid_style succeeded", { styleId: gridStyle.id, name: gridStyle.name });
+        return result;
+    } catch (error) {
+        try {
+            const payload = JSON.parse((error && error.message) || String(error));
+            if (payload && payload.code) {
+                logger.error("❌ create_grid_style failed", { code: payload.code, originalError: (error && error.message) || String(error), details: payload.details || {} });
+                throw new Error(JSON.stringify(payload));
+            }
+        } catch (_) {}
+        const payload = { code: "unknown_plugin_error", message: (error && error.message) || String(error), details: {} };
+        logger.error("❌ create_grid_style failed", { code: payload.code, originalError: payload.message, details: payload.details });
+        throw new Error(JSON.stringify(payload));
     }
-
-    const gridStyle = figma.createGridStyle();
-    gridStyle.name = name;
-    gridStyle.layoutGrids = layoutGrids;
-
-    return {
-        success: true,
-        styleId: gridStyle.id,
-        name: gridStyle.name,
-    };
 }
 
 // -------- TOOL : create_image --------
@@ -6075,19 +6781,49 @@ async function getImageByHash(params) {
 // Section: Comments (Read-only)
 // ======================================================
 // -------- TOOL : get_comments --------
-async function getComments(params) {
+async function getComments(params = {}) {
+  try {
+    // Guard: editor type and feature availability
+    if (figma && figma.editorType && figma.editorType !== 'figma') {
+      const payload = { code: "unsupported_editor_type", message: "Comments API is only available in Figma Design", details: { editorType: figma.editorType } };
+      logger.error("❌ get_comments failed", { code: payload.code, originalError: payload.message, details: payload.details });
+      throw new Error(JSON.stringify(payload));
+    }
+    if (!(figma && figma.root && typeof figma.root.getCommentsAsync === "function")) {
+      const payload = { code: "comments_feature_unavailable", message: "Comments API not available in this context", details: { editorType: figma && figma.editorType ? figma.editorType : undefined } };
+      logger.error("❌ get_comments failed", { code: payload.code, originalError: payload.message, details: payload.details });
+      throw new Error(JSON.stringify(payload));
+    }
+
     const comments = await figma.root.getCommentsAsync();
-    return {
-        success: true,
-        comments: comments.map(c => ({
-            id: c.id,
-            message: c.message,
-            clientMeta: c.clientMeta,
-            createdAt: c.createdAt,
-            resolvedAt: c.resolvedAt,
-            user: c.user,
-        })),
-    };
+    const payload = comments.map(c => ({
+      id: c.id,
+      message: c.message,
+      clientMeta: c.clientMeta,
+      createdAt: c.createdAt,
+      resolvedAt: c.resolvedAt,
+      user: c.user,
+    }));
+    logger.info("✅ get_comments succeeded", { count: payload.length });
+    // Read-only tool: return data directly
+    return payload;
+  } catch (error) {
+    // Pass through structured errors if already formatted
+    try {
+      const maybe = JSON.parse(error && error.message ? error.message : String(error));
+      if (maybe && maybe.code) {
+        logger.error("❌ get_comments failed", { code: maybe.code, originalError: (error && error.message) || String(error), details: maybe.details || {} });
+        throw new Error(JSON.stringify(maybe));
+      }
+    } catch (_) { /* ignore parse attempt */ }
+
+    const isUnavailable = !(figma && figma.root && typeof figma.root.getCommentsAsync === "function");
+    const code = isUnavailable ? "comments_feature_unavailable" : "figma_api_error";
+    const message = isUnavailable ? "Comments API not available in this context" : ((error && error.message) || "Failed to get comments");
+    const payload = { code, message, details: {} };
+    logger.error("❌ get_comments failed", { code: payload.code, originalError: (error && error.message) || String(error), details: payload.details });
+    throw new Error(JSON.stringify(payload));
+  }
 }
  
 
@@ -6099,109 +6835,110 @@ async function getComments(params) {
 // === Full-context gatherer (max depth, no truncation) ===
 // -------- TOOL : gather_full_context --------
 async function gatherFullContext(params) {
-  const includeComments = params && params.includeComments !== false;
+  try {
+    const includeComments = params && params.includeComments !== false;
 
-  const page = figma.currentPage;
-  const selection = page.selection || [];
+    const page = figma.currentPage;
+    const selection = page.selection || [];
 
-  const selectionSignature = computeSelectionSignature(selection);
-  const force = !!(params && params.force === true);
+    const selectionSignature = computeSelectionSignature(selection);
+    const force = !!(params && params.force === true);
 
-  if (!force && fullContextCache.data && fullContextCache.lastSignature === selectionSignature && fullContextCache.includeComments === includeComments && (Date.now() - fullContextCache.ts) <= FULL_CONTEXT_TTL_MS) {
-    const cached = Object.assign({}, fullContextCache.data, { cache: { hit: true, ageMs: Date.now() - fullContextCache.ts, ttlMs: FULL_CONTEXT_TTL_MS } });
-    return sanitize(cached);
-  }
+    if (!force && fullContextCache.data && fullContextCache.lastSignature === selectionSignature && fullContextCache.includeComments === includeComments && (Date.now() - fullContextCache.ts) <= FULL_CONTEXT_TTL_MS) {
+      const cached = Object.assign({}, fullContextCache.data, { cache: { hit: true, ageMs: Date.now() - fullContextCache.ts, ttlMs: FULL_CONTEXT_TTL_MS } });
+      return sanitize(cached);
+    }
 
-  function safeAssign(target, node, key) {
-    try {
-      if (key in node) target[key] = node[key];
-    } catch (_) {}
-  }
-
-  function collectAutoLayout(node, out) {
-    if (!('layoutMode' in node)) return;
-    out.autoLayout = {
-      layoutMode: node.layoutMode,
-      layoutWrap: ('layoutWrap' in node) ? node.layoutWrap : undefined,
-      primaryAxisAlignItems: ('primaryAxisAlignItems' in node) ? node.primaryAxisAlignItems : undefined,
-      counterAxisAlignItems: ('counterAxisAlignItems' in node) ? node.counterAxisAlignItems : undefined,
-      primaryAxisSizingMode: ('primaryAxisSizingMode' in node) ? node.primaryAxisSizingMode : undefined,
-      counterAxisSizingMode: ('counterAxisSizingMode' in node) ? node.counterAxisSizingMode : undefined,
-      itemSpacing: ('itemSpacing' in node) ? node.itemSpacing : undefined,
-      counterAxisSpacing: ('counterAxisSpacing' in node) ? node.counterAxisSpacing : undefined,
-      paddingTop: ('paddingTop' in node) ? node.paddingTop : undefined,
-      paddingRight: ('paddingRight' in node) ? node.paddingRight : undefined,
-      paddingBottom: ('paddingBottom' in node) ? node.paddingBottom : undefined,
-      paddingLeft: ('paddingLeft' in node) ? node.paddingLeft : undefined,
-    };
-    safeAssign(out, node, 'strokesIncludedInLayout');
-    safeAssign(out, node, 'layoutAlign');
-    safeAssign(out, node, 'layoutGrow');
-    safeAssign(out, node, 'layoutSizingHorizontal');
-    safeAssign(out, node, 'layoutSizingVertical');
-  }
-
-  function collectStyles(node, out) {
-    // Paints / Strokes / Effects / Grids
-    if ('fills' in node) out.fills = node.fills;
-    if ('strokes' in node) out.strokes = node.strokes;
-    safeAssign(out, node, 'strokeWeight');
-    safeAssign(out, node, 'strokeAlign');
-    safeAssign(out, node, 'strokeCap');
-    safeAssign(out, node, 'strokeJoin');
-    safeAssign(out, node, 'dashPattern');
-    safeAssign(out, node, 'miterLimit');
-    if ('effects' in node) out.effects = node.effects;
-    if ('layoutGrids' in node) out.layoutGrids = node.layoutGrids;
-    // Style refs
-    safeAssign(out, node, 'fillStyleId');
-    safeAssign(out, node, 'strokeStyleId');
-    safeAssign(out, node, 'effectStyleId');
-    safeAssign(out, node, 'gridStyleId');
-    if (node.type === 'TEXT') safeAssign(out, node, 'textStyleId');
-    // Backgrounds on Frames/Components
-    safeAssign(out, node, 'backgrounds');
-    safeAssign(out, node, 'backgroundStyleId');
-  }
-
-  function collectGeometry(node, out) {
-    out.visible = node.visible !== false;
-    safeAssign(out, node, 'locked');
-    safeAssign(out, node, 'opacity');
-    safeAssign(out, node, 'blendMode');
-    safeAssign(out, node, 'isMask');
-    // Size only (omit x,y/transforms/constraints)
-    out.width = node.width; out.height = node.height;
-    safeAssign(out, node, 'rotation');
-    // Corners
-    safeAssign(out, node, 'cornerRadius');
-    safeAssign(out, node, 'rectangleCornerRadii');
-    safeAssign(out, node, 'cornerSmoothing');
-    // Clipping only (omit export settings)
-    safeAssign(out, node, 'clipsContent');
-  }
-
-  function collectVariables(node, out) {
-    safeAssign(out, node, 'boundVariables');
-  }
-
-  async function collectComponentInfo(node, out) {
-    if (node.type === 'INSTANCE') {
+    function safeAssign(target, node, key) {
       try {
-        const mc = await node.getMainComponentAsync();
-        out.instanceOf = mc ? { id: mc.id, name: mc.name, key: ('key' in mc) ? mc.key : undefined } : null;
-      } catch (_) {
-        out.instanceOf = node.mainComponent ? { id: node.mainComponent.id, name: node.mainComponent.name } : null;
-      }
-      safeAssign(out, node, 'componentProperties');
-      safeAssign(out, node, 'componentPropertyReferences');
-      safeAssign(out, node, 'variantProperties');
-      safeAssign(out, node, 'scaleFactor');
-    } else if (node.type === 'COMPONENT') {
-      safeAssign(out, node, 'key');
-      // omit description/documentationLinks and global instances
-      safeAssign(out, node, 'variantProperties');
-    } else if (node.type === 'COMPONENT_SET') {
+        if (key in node) target[key] = node[key];
+      } catch (_) {}
+    }
+
+    function collectAutoLayout(node, out) {
+      if (!('layoutMode' in node)) return;
+      out.autoLayout = {
+        layoutMode: node.layoutMode,
+        layoutWrap: ('layoutWrap' in node) ? node.layoutWrap : undefined,
+        primaryAxisAlignItems: ('primaryAxisAlignItems' in node) ? node.primaryAxisAlignItems : undefined,
+        counterAxisAlignItems: ('counterAxisAlignItems' in node) ? node.counterAxisAlignItems : undefined,
+        primaryAxisSizingMode: ('primaryAxisSizingMode' in node) ? node.primaryAxisSizingMode : undefined,
+        counterAxisSizingMode: ('counterAxisSizingMode' in node) ? node.counterAxisSizingMode : undefined,
+        itemSpacing: ('itemSpacing' in node) ? node.itemSpacing : undefined,
+        counterAxisSpacing: ('counterAxisSpacing' in node) ? node.counterAxisSpacing : undefined,
+        paddingTop: ('paddingTop' in node) ? node.paddingTop : undefined,
+        paddingRight: ('paddingRight' in node) ? node.paddingRight : undefined,
+        paddingBottom: ('paddingBottom' in node) ? node.paddingBottom : undefined,
+        paddingLeft: ('paddingLeft' in node) ? node.paddingLeft : undefined,
+      };
+      safeAssign(out, node, 'strokesIncludedInLayout');
+      safeAssign(out, node, 'layoutAlign');
+      safeAssign(out, node, 'layoutGrow');
+      safeAssign(out, node, 'layoutSizingHorizontal');
+      safeAssign(out, node, 'layoutSizingVertical');
+    }
+
+    function collectStyles(node, out) {
+      // Paints / Strokes / Effects / Grids
+      if ('fills' in node) out.fills = node.fills;
+      if ('strokes' in node) out.strokes = node.strokes;
+      safeAssign(out, node, 'strokeWeight');
+      safeAssign(out, node, 'strokeAlign');
+      safeAssign(out, node, 'strokeCap');
+      safeAssign(out, node, 'strokeJoin');
+      safeAssign(out, node, 'dashPattern');
+      safeAssign(out, node, 'miterLimit');
+      if ('effects' in node) out.effects = node.effects;
+      if ('layoutGrids' in node) out.layoutGrids = node.layoutGrids;
+      // Style refs
+      safeAssign(out, node, 'fillStyleId');
+      safeAssign(out, node, 'strokeStyleId');
+      safeAssign(out, node, 'effectStyleId');
+      safeAssign(out, node, 'gridStyleId');
+      if (node.type === 'TEXT') safeAssign(out, node, 'textStyleId');
+      // Backgrounds on Frames/Components
+      safeAssign(out, node, 'backgrounds');
+      safeAssign(out, node, 'backgroundStyleId');
+    }
+
+    function collectGeometry(node, out) {
+      out.visible = node.visible !== false;
+      safeAssign(out, node, 'locked');
+      safeAssign(out, node, 'opacity');
+      safeAssign(out, node, 'blendMode');
+      safeAssign(out, node, 'isMask');
+      // Size only (omit x,y/transforms/constraints)
+      out.width = node.width; out.height = node.height;
+      safeAssign(out, node, 'rotation');
+      // Corners
+      safeAssign(out, node, 'cornerRadius');
+      safeAssign(out, node, 'rectangleCornerRadii');
+      safeAssign(out, node, 'cornerSmoothing');
+      // Clipping only (omit export settings)
+      safeAssign(out, node, 'clipsContent');
+    }
+
+    function collectVariables(node, out) {
+      safeAssign(out, node, 'boundVariables');
+    }
+
+    async function collectComponentInfo(node, out) {
+      if (node.type === 'INSTANCE') {
+        try {
+          const mc = await node.getMainComponentAsync();
+          out.instanceOf = mc ? { id: mc.id, name: mc.name, key: ('key' in mc) ? mc.key : undefined } : null;
+        } catch (_) {
+          out.instanceOf = node.mainComponent ? { id: node.mainComponent.id, name: node.mainComponent.name } : null;
+        }
+        safeAssign(out, node, 'componentProperties');
+        safeAssign(out, node, 'componentPropertyReferences');
+        safeAssign(out, node, 'variantProperties');
+        safeAssign(out, node, 'scaleFactor');
+      } else if (node.type === 'COMPONENT') {
+        safeAssign(out, node, 'key');
+        // omit description/documentationLinks and global instances
+        safeAssign(out, node, 'variantProperties');
+      } else if (node.type === 'COMPONENT_SET') {
       safeAssign(out, node, 'key');
       // omit description
       safeAssign(out, node, 'componentPropertyDefinitions');
@@ -6270,26 +7007,26 @@ async function gatherFullContext(params) {
     return info;
   }
 
-  const nodesData = [];
-  for (const n of selection) {
-    nodesData.push(await collectNodeDeep(n));
-  }
+    const nodesData = [];
+    for (const n of selection) {
+      nodesData.push(await collectNodeDeep(n));
+    }
 
   // Optional enrichments
-  let comments = undefined;
-  if (includeComments) {
-    try {
-      const all = await figma.root.getCommentsAsync();
-      const selectedIds = new Set(selection.map(n => n.id));
-      comments = all.filter(c => {
-        try {
-          const meta = c.clientMeta || {};
-          const nodeId = meta && (meta.nodeId || meta.node_id || (meta.node && meta.node.id));
-          return nodeId ? selectedIds.has(nodeId) : false;
-        } catch (_) { return false; }
-      }).map(c => ({ id: c.id, message: c.message, clientMeta: c.clientMeta, createdAt: c.createdAt, resolvedAt: c.resolvedAt, user: c.user }));
-    } catch (_) {}
-  }
+    let comments = undefined;
+    if (includeComments) {
+      try {
+        const all = await figma.root.getCommentsAsync();
+        const selectedIds = new Set(selection.map(n => n.id));
+        comments = all.filter(c => {
+          try {
+            const meta = c.clientMeta || {};
+            const nodeId = meta && (meta.nodeId || meta.node_id || (meta.node && meta.node.id));
+            return nodeId ? selectedIds.has(nodeId) : false;
+          } catch (_) { return false; }
+        }).map(c => ({ id: c.id, message: c.message, clientMeta: c.clientMeta, createdAt: c.createdAt, resolvedAt: c.resolvedAt, user: c.user }));
+      } catch (_) {}
+    }
 
   function sanitize(value) {
     if (value === figma.mixed) return "MIXED";
@@ -6308,47 +7045,84 @@ async function gatherFullContext(params) {
     return value;
   }
 
-  const result = {
-    success: true,
-    document: { pageId: page.id, pageName: page.name },
-    selectionCount: selection.length,
-    selectedNodeIds: selection.map(n => n.id),
-    gatheredAt: Date.now(),
-    selectionSignature: selectionSignature,
-    nodes: nodesData,
-    comments
-  };
-  // update cache
-  fullContextCache.lastSignature = selectionSignature;
-  fullContextCache.includeComments = includeComments;
-  fullContextCache.data = result;
-  fullContextCache.ts = Date.now();
+    const result = {
+      document: { pageId: page.id, pageName: page.name },
+      selectionCount: selection.length,
+      selectedNodeIds: selection.map(n => n.id),
+      gatheredAt: Date.now(),
+      selectionSignature: selectionSignature,
+      nodes: nodesData,
+      comments
+    };
+    // update cache
+    fullContextCache.lastSignature = selectionSignature;
+    fullContextCache.includeComments = includeComments;
+    fullContextCache.data = result;
+    fullContextCache.ts = Date.now();
 
-  return sanitize(result);
+    logger.info("✅ gather_full_context succeeded", { selectionCount: selection.length, includeComments, force });
+    return sanitize(result);
+  } catch (error) {
+    try {
+      const payload = JSON.parse(error && error.message ? error.message : String(error));
+      if (payload && payload.code) {
+        logger.error("❌ gather_full_context failed", { code: payload.code, originalError: payload.message, details: payload.details || {} });
+        throw new Error(JSON.stringify(payload));
+      }
+    } catch (_) {}
+    const payload2 = { code: "gather_full_context_failed", message: (error && error.message) || String(error), details: {} };
+    logger.error("❌ gather_full_context failed", { code: payload2.code, originalError: payload2.message, details: payload2.details });
+    throw new Error(JSON.stringify(payload2));
+  }
 }
 
 // Unified selections_context API with modes: 'snapshot' (fast summary) and 'complete' (deep context)
 // -------- TOOL : selections_context --------
 async function selectionsContext(params) {
-  const mode = (params && params.mode) || 'snapshot';
+  const modeRaw = params && params.mode;
+  const mode = modeRaw || 'snapshot';
   const includeComments = !!(params && params.includeComments);
   const force = !!(params && params.force);
 
-  const page = figma.currentPage;
-  const selection = page.selection || [];
-  const selectionSignature = computeSelectionSignature(selection);
+  try {
+    if (mode !== 'snapshot' && mode !== 'complete') {
+      const payload = { code: "invalid_parameter", message: "mode must be 'snapshot' or 'complete'", details: { received: modeRaw } };
+      logger.error("❌ selections_context failed", { code: payload.code, originalError: payload.message, details: payload.details });
+      throw new Error(JSON.stringify(payload));
+    }
 
-  if (mode === 'complete') {
-    return await gatherFullContext({ includeComments, force });
+    const page = figma.currentPage;
+    const selection = page.selection || [];
+    const selectionSignature = computeSelectionSignature(selection);
+
+    if (mode === 'complete') {
+      const res = await gatherFullContext({ includeComments, force });
+      logger.info("✅ selections_context complete succeeded", { selectionCount: selection.length, includeComments, force });
+      return res;
+    }
+
+    // snapshot mode (Tier‑A summary)
+    const selectionSummary = buildSelectionSummary(selection);
+    const result = {
+      document: { pageId: page.id, pageName: page.name },
+      selectionSignature,
+      selectionSummary,
+      gatheredAt: Date.now(),
+    };
+    logger.info("✅ selections_context snapshot succeeded", { selectionCount: selectionSummary.selectionCount });
+    return result;
+  } catch (error) {
+    try {
+      const payload = JSON.parse(error && error.message ? error.message : String(error));
+      if (payload && payload.code) {
+        logger.error("❌ selections_context failed", { code: payload.code, originalError: payload.message, details: payload.details || {} });
+        throw new Error(JSON.stringify(payload));
+      }
+    } catch (_) {}
+    const payload2 = { code: "selections_context_failed", message: (error && error.message) || String(error), details: {} };
+    logger.error("❌ selections_context failed", { code: payload2.code, originalError: payload2.message, details: payload2.details });
+    throw new Error(JSON.stringify(payload2));
   }
-
-  // snapshot mode (Tier‑A summary)
-  const selectionSummary = buildSelectionSummary(selection);
-  return {
-    success: true,
-    document: { pageId: page.id, pageName: page.name },
-    selectionSignature,
-    selectionSummary,
-    gatheredAt: Date.now(),
-  };
 }
+
+

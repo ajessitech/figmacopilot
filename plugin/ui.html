@@ -405,9 +405,40 @@
       .error-banner.show {
         display: block;
       }
+
+      /* New Chat (+) button */
+      .new-chat-btn {
+        position: absolute;
+        top: 10px;
+        right: 12px;
+        width: 28px;
+        height: 28px;
+        border-radius: 6px;
+        border: 1px solid #e5e7eb;
+        background: #ffffff;
+        color: #6b7280;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        cursor: pointer;
+        box-shadow: 0 1px 2px rgba(0,0,0,0.04);
+        transition: background 0.15s ease, color 0.15s ease, transform 0.05s ease;
+        user-select: none;
+        z-index: 10;
+      }
+
+      .new-chat-btn:hover {
+        background: #f9fafb;
+        color: #374151;
+      }
+
+      .new-chat-btn:active {
+        transform: translateY(1px);
+      }
     </style>
   </head>
   <body>
+    <button class="new-chat-btn" id="newChatBtn" title="New chat">+</button>
     <div class="error-banner" id="errorBanner"></div>
 
     <div class="chat-container" id="chatContainer">
@@ -512,6 +543,17 @@
         sendButton.addEventListener('click', handleSend);
         inputField.addEventListener('keydown', handleKeyDown);
         inputField.addEventListener('input', handleInputChange);
+        if (errorBanner) {
+          errorBanner.addEventListener('click', () => {
+            try { cleanupConnection('manual-retry'); } catch (_) {}
+            if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
+            reconnectAttempts = 0;
+            isConnecting = false;
+            hideError();
+            updateConnectingUI('Reconnecting…');
+            connectToServer(state.serverPort);
+          });
+        }
 
         // Auto-connect on load
         updateConnectingUI('Connecting to bridge...');
@@ -525,6 +567,9 @@
         } catch (e) {
           console.warn('Failed to send ui_ready to plugin', e);
         }
+        // New Chat button
+        const newChatBtn = document.getElementById('newChatBtn');
+        if (newChatBtn) newChatBtn.addEventListener('click', handleNewChat);
       });
 
       // UI helpers
@@ -558,6 +603,41 @@
         statusDiv.appendChild(statusText);
         chatContainer.appendChild(statusDiv);
         chatContainer.scrollTop = chatContainer.scrollHeight;
+      }
+
+      function clearChatUI() {
+        // Remove all chat message nodes but keep the welcome message node
+        try {
+          const children = Array.from(chatContainer.children);
+          for (const el of children) {
+            if (el.id !== 'welcomeMessage') {
+              chatContainer.removeChild(el);
+            }
+          }
+          if (welcomeMessage) {
+            welcomeMessage.style.display = 'block';
+          }
+        } catch (_) {}
+        // Reset streaming state
+        currentStreamingContentEl = null;
+        acceptingStream = false;
+        streamedAnyChunks = false;
+        startNewAssistantBlockAfterTool = false;
+        removeStatusIndicator(true);
+      }
+
+      function handleNewChat() {
+        // Reset local caches/state
+        snapshotCache.last = null;
+        snapshotCache.latestSig = null;
+        snapshotCache.lastSnapshot = null;
+        clearChatUI();
+        // Tell the agent to clear its session memory
+        try {
+          if (state.connected && state.socket && state.socket.readyState === WebSocket.OPEN) {
+            state.socket.send(JSON.stringify({ type: 'new_chat' }));
+          }
+        } catch (_) {}
       }
 
       
@@ -973,8 +1053,8 @@
                 parent.postMessage({ pluginMessage: { type: 'tool_call', id: data.id, command: data.command, params: data.params } }, '*');
               } else if (data.type === 'progress_update') {
                 // Route progress updates into the existing muted status line, not separate chat messages
-                const id = data.id || data.message?.id || data.message?.commandId;
-                const msg = data.message?.message || data.message?.status || 'Working…';
+                const id = data.id || (data.message && data.message.id) || (data.message && data.message.commandId);
+                const msg = (data.message && data.message.message) || (data.message && data.message.status) || 'Working…';
                 if (!updateToolStatusLineTextById(id, msg)) {
                   // If we cannot map to a specific tool line, fall back to a transient global indicator
                   showStatusIndicator(msg);
@@ -1037,9 +1117,10 @@
           showError(`Connection error: ${errMessage}`);
         }
         updateConnectingUI(`Reconnecting… (${seconds}s)`);
-        isConnecting = true;
         if (reconnectTimer) clearTimeout(reconnectTimer);
         reconnectTimer = setTimeout(() => {
+          // Ensure guard allows a fresh attempt
+          isConnecting = false;
           connectToServer(state.serverPort);
         }, delay);
       }

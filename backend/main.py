@@ -45,6 +45,7 @@ MESSAGE_TYPE_PROGRESS_UPDATE = "progress_update"
 MESSAGE_TYPE_USER_PROMPT = "user_prompt"
 MESSAGE_TYPE_TOOL_RESPONSE = "tool_response"
 MESSAGE_TYPE_ERROR = "error"
+MESSAGE_TYPE_NEW_CHAT = "new_chat"
 
 class FigmaAgent:
     def __init__(self, bridge_url: str, channel: str, model: str, api_key: str):
@@ -329,6 +330,34 @@ class FigmaAgent:
             - Use the required inline Figma tags for precise references.
             - Keep responses skimmable; avoid unnecessary sections; use bullets sparingly and only when they add clarity.
             - Be explicit with values and constraints; avoid vague guidance.
+            
+            ## 8. TOOL PLAYBOOK — Task-Specific Strategies (supported by our tools)
+            
+            ### A. Design & Layout (create)
+            - Start broad with `get_document_info()` to understand page + top-level frames.
+            - Create containers first with `create_frame()`; then add text with `create_text()`.
+            - Maintain hierarchy using `parentId` when creating children; verify with `get_node_info()`/`get_nodes_info()`.
+            - Apply consistent naming; group related elements inside frames; keep spacing/alignment consistent.
+            
+            ### B. Reading & Auditing
+            - Use `read_my_design()` to summarize the current selection’s structure. If empty selection, ask the user to select nodes.
+            - For deep details on a target, call `get_node_info(node_id)`.
+            
+            ### C. Text Replacement (safe and progressive)
+            1) Map targets: `scan_text_nodes(node_id, use_chunking=true, chunk_size=10~20)` to list text nodes.
+            2) Make a safety copy: `clone_node(node_id)` before large edits.
+            3) Replace in chunks: `set_multiple_text_contents(node_id, text_replacements_json, chunk_size=10)`.
+            4) Verify visually when needed: `export_node_as_image(node_id, format="PNG")` for spot-checks.
+            
+            ### D. Instance Swapping (copy overrides)
+            - Identify source/targets: `get_selection()` and/or `get_node_info()` to confirm instance IDs.
+            - Read overrides from source: `get_instance_overrides(source_instance_id)`.
+            - Apply to targets: `set_instance_overrides(target_node_ids, source_instance_id, swap_component=true|false)`.
+            - Re-verify targets: `read_my_design()` or `get_node_info()` to confirm overrides applied.
+            
+            ### E. Prototyping (audit only)
+            - Use `get_reactions(node_ids)` to audit interactive links on selected frames/components.
+            - Note: Creating visual connector lines is not supported in the current toolset; report findings instead of drawing connectors.
             """
  
 
@@ -522,6 +551,7 @@ class FigmaAgent:
             MESSAGE_TYPE_PROGRESS_UPDATE: self._handle_progress_update,
             MESSAGE_TYPE_USER_PROMPT: self._handle_user_prompt,
             MESSAGE_TYPE_TOOL_RESPONSE: self._handle_tool_response,
+            MESSAGE_TYPE_NEW_CHAT: self._handle_new_chat,
             MESSAGE_TYPE_ERROR: self._handle_bridge_error,
         }
 
@@ -588,6 +618,17 @@ class FigmaAgent:
     async def _handle_unknown(self, message: Dict[str, Any]) -> None:
         msg_type = message.get("type")
         logger.debug(f"Ignoring unknown message type: {msg_type}")
+
+    async def _handle_new_chat(self, _: Dict[str, Any]) -> None:
+        """Clear conversation memory for a fresh session."""
+        try:
+            # Cancel any in-flight operations first
+            await self.cancel_active_operations("new_chat")
+            # Clear session memory
+            await self.session.clear_session()
+            logger.info("🧼 Cleared SQLiteSession for new chat")
+        except Exception as e:
+            logger.error(f"Failed to clear session for new chat: {e}")
 
     
     

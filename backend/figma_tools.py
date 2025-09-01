@@ -74,6 +74,11 @@ class ConstraintsKV(BaseModel):
     horizontal: Literal["MIN", "CENTER", "MAX", "STRETCH", "SCALE"]
     vertical: Literal["MIN", "CENTER", "MAX", "STRETCH", "SCALE"]
 
+class FontName(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+    family: str
+    style: str
+
 # === CORE NODE OPERATIONS ===
 
 @function_tool
@@ -1089,33 +1094,66 @@ async def set_layout_mode(
     layout_mode: str = "NONE",
     layout_wrap: str = "NO_WRAP"
 ) -> str:
-    """
-    Sets the layout mode of a frame (enables auto-layout).
-    
-    Args:
-        node_id: The ID of the frame to modify
-        layout_mode: Layout mode - "NONE", "HORIZONTAL", "VERTICAL", or "GRID"
-        layout_wrap: Layout wrap - "NO_WRAP" or "WRAP"
-    
-    Returns:
-        JSON string with { id, name, layoutMode, layoutWrap }
-    """
+    """{
+      "category": "layout",
+      "mutates_canvas": true,
+      "description": "Set layout mode and optional wrap on a container.",
+      "when_to_use": "Enable or change Auto Layout on a frame/component.",
+      "when_not_to_use": "You need grid rows/columns (use a grid-specific tool).",
+      "parameters": {
+        "node_id": { "type": "string", "required": true, "notes": "Target container node ID" },
+        "layout_mode": { "type": "string", "required": false, "notes": "NONE|HORIZONTAL|VERTICAL|GRID" },
+        "layout_wrap": { "type": "string", "required": false, "notes": "NO_WRAP|WRAP; only for HORIZONTAL/VERTICAL" }
+      },
+      "returns": "{ success, summary, modifiedNodeIds:[nodeId], node:{ id, name, layoutMode, layoutWrap? } }",
+      "hints": [
+        "Use WRAP only with HORIZONTAL/VERTICAL.",
+        "Switching from NONE enables Auto Layout on the node.",
+        "GRID ignores layoutWrap."
+      ],
+      "pitfalls": [
+        "Instances may expose limited mutability for layout fields.",
+        "COMPONENT_SET is not a container; use COMPONENT or FRAME." 
+      ],
+      "errors": [
+        "missing_parameter — Provide node_id.",
+        "node_not_found — Verify node exists or reselect.",
+        "unsupported_node_type — Use FRAME|COMPONENT|INSTANCE.",
+        "locked_node — Unlock target layer before mutation.",
+        "invalid_parameter — Fix invalid layout_mode or layout_wrap.",
+        "plugin_reported_failure — Inspect details.result and retry.",
+        "unknown_plugin_error — Inspect payload; retry if transient.",
+        "communication_error — Bridge unreachable; restart session."
+      ],
+      "side_effects": ["Toggles Auto Layout state and wrap settings on the node."],
+      "limits": [
+        "Does not configure grid rows/columns; separate APIs apply.",
+        "Does not set padding/spacing/alignment; use dedicated tools."
+      ],
+      "preconditions": [
+        "Node exists and is not locked."
+      ],
+      "postchecks": [
+        "node.layoutMode equals requested mode.",
+        "When HORIZONTAL/VERTICAL, node.layoutWrap equals requested value."
+      ],
+      "agent_chaining": ["set_padding", "set_item_spacing", "set_axis_align"],
+      "related_tools": ["set_padding", "set_item_spacing", "set_axis_align", "set_layout_sizing"],
+      "example_params": { "node_id": "12:34", "layout_mode": "VERTICAL", "layout_wrap": "NO_WRAP" }
+    }"""
     try:
-        logger.info(f"📐 Setting layout mode for node {node_id} to {layout_mode}")
-        
-        params = {
-            "nodeId": node_id,
-            "layoutMode": layout_mode,
-            "layoutWrap": layout_wrap
-        }
-        
+        logger.info(f"📐 set_layout_mode: node_id={node_id}, layout_mode={layout_mode}, layout_wrap={layout_wrap}")
+        params = { "nodeId": node_id, "layoutMode": layout_mode, "layoutWrap": layout_wrap }
         result = await send_command("set_layout_mode", params)
         return _to_json_string(result)
-        
+    except ToolExecutionError:
+        raise
     except Exception as e:
-        error_msg = f"Failed to set layout mode: {str(e)}"
-        logger.error(error_msg)
-        return _error_json(error_msg)
+        raise ToolExecutionError({
+            "code": "communication_error",
+            "message": f"Failed to set layout mode: {str(e)}",
+            "details": {"command": "set_layout_mode", "nodeId": node_id}
+        })
 
 @function_tool
 async def set_padding(
@@ -1125,39 +1163,69 @@ async def set_padding(
     padding_bottom: Optional[float] = None,
     padding_left: Optional[float] = None
 ) -> str:
-    """
-    Sets the padding of an auto-layout frame.
-    
-    Args:
-        node_id: The ID of the frame to modify
-        padding_top: Top padding in pixels
-        padding_right: Right padding in pixels
-        padding_bottom: Bottom padding in pixels
-        padding_left: Left padding in pixels
-    
-    Returns:
-        A confirmation message
-    """
+    """{
+      "category": "layout",
+      "mutates_canvas": true,
+      "description": "Set padding on an auto-layout container.",
+      "when_to_use": "Adjust inner spacing of an Auto Layout frame.",
+      "when_not_to_use": "Target is not using Auto Layout.",
+      "parameters": {
+        "node_id": { "type": "string", "required": true },
+        "padding_top": { "type": "number", "required": false },
+        "padding_right": { "type": "number", "required": false },
+        "padding_bottom": { "type": "number", "required": false },
+        "padding_left": { "type": "number", "required": false }
+      },
+      "returns": "{ success, summary, modifiedNodeIds:[nodeId], node:{ id, name, paddingTop, paddingRight, paddingBottom, paddingLeft } }",
+      "hints": [
+        "Provide only the sides you need to change.",
+        "Use set_layout_mode first if Auto Layout is disabled.",
+        "Prefer system spacing values for consistency."
+      ],
+      "pitfalls": [
+        "No-op when all values are omitted.",
+        "Negative padding is invalid."
+      ],
+      "errors": [
+        "missing_parameter — Provide at least one padding value.",
+        "node_not_found — Verify node exists or reselect.",
+        "unsupported_node_type — Use FRAME|COMPONENT|INSTANCE.",
+        "locked_node — Unlock target layer first.",
+        "auto_layout_required — Enable Auto Layout then retry.",
+        "invalid_parameter — Ensure numbers are finite.",
+        "plugin_reported_failure — Inspect details.result.",
+        "unknown_plugin_error — Inspect payload; retry.",
+        "communication_error — Bridge unreachable; restart."
+      ],
+      "side_effects": ["Changes inner spacing; children may reflow."],
+      "limits": ["Applies only to Auto Layout containers."],
+      "preconditions": ["Node uses Auto Layout and is unlocked."],
+      "postchecks": ["Padding properties equal requested values."],
+      "agent_chaining": ["set_item_spacing", "set_axis_align"],
+      "related_tools": ["set_layout_mode", "set_item_spacing", "set_axis_align"],
+      "example_params": { "node_id": "12:34", "padding_top": 24, "padding_left": 24 }
+    }"""
     try:
-        logger.info(f"📐 Setting padding for node {node_id}")
-        
+        logger.info(f"📐 set_padding: node_id={node_id}")
         params = {"nodeId": node_id}
         if padding_top is not None:
-            params["paddingTop"] = padding_top
+            params["paddingTop"] = float(padding_top)
         if padding_right is not None:
-            params["paddingRight"] = padding_right
+            params["paddingRight"] = float(padding_right)
         if padding_bottom is not None:
-            params["paddingBottom"] = padding_bottom
+            params["paddingBottom"] = float(padding_bottom)
         if padding_left is not None:
-            params["paddingLeft"] = padding_left
-        
+            params["paddingLeft"] = float(padding_left)
         result = await send_command("set_padding", params)
         return _to_json_string(result)
-        
+    except ToolExecutionError:
+        raise
     except Exception as e:
-        error_msg = f"Failed to set padding: {str(e)}"
-        logger.error(error_msg)
-        return _error_json(error_msg)
+        raise ToolExecutionError({
+            "code": "communication_error",
+            "message": f"Failed to set padding: {str(e)}",
+            "details": {"command": "set_padding", "nodeId": node_id}
+        })
 
 # === NODE MANIPULATION ===
 
@@ -1498,68 +1566,201 @@ async def clone_node(
 # === TEXT TOOLS ===
 
 @function_tool
-async def set_text_content(node_id: str, text: str, smart_strategy: Optional[str] = None) -> str:
-    """
-    Sets the text content of a text node.
-    
-    Args:
-        node_id: The ID of the text node to modify
-        text: New text content
-    
-    Returns:
-        A confirmation message
-    """
+async def set_text_content(
+    node_id: str,
+    text: str,
+    smart_strategy: Optional[Literal["prevail", "strict", "experimental"]] = None,
+    fallback_font: Optional[FontName] = None,
+    select: Optional[bool] = None,
+) -> str:
+    """{
+      "category": "text",
+      "mutates_canvas": true,
+      "description": "Set the text content of an existing TEXT node.",
+      "when_to_use": "Update copy on an existing text layer.",
+      "when_not_to_use": "You need to style ranges; use set_range_text_style.",
+      "parameters": {
+        "node_id": { "type": "string", "required": true },
+        "text": { "type": "string", "required": true },
+        "smart_strategy": { "type": "string", "required": false, "notes": "One of: prevail | strict | experimental" },
+        "fallback_font": { "type": "object", "required": false, "notes": "{ family: string, style: string }" },
+        "select": { "type": "boolean", "required": false, "notes": "Select the node after update" }
+      },
+      "returns": "{ success: true, summary: string, modifiedNodeIds: string[], nodeId: string, name: string, characters: string, fontName: any }",
+      "hints": [
+        "Use smart_strategy=prevail to keep the dominant mixed font.",
+        "Provide fallback_font to avoid generic fallback when fonts are missing.",
+        "Pair with set_range_text_style for styling after content changes."
+      ],
+      "pitfalls": [
+        "Locked nodes will fail with node_locked.",
+        "Invalid smart_strategy will be rejected as invalid_parameter."
+      ],
+      "errors": [
+        "missing_parameter — Provide node_id and text.",
+        "invalid_parameter — Fix smart_strategy or fallback_font shape.",
+        "node_not_found — Re-select a valid text node.",
+        "invalid_node_type — Target must be a TEXT node.",
+        "node_locked — Unlock node with unlock_layers then retry.",
+        "set_characters_failed — Retry once; then adjust text or fonts.",
+        "set_text_content_failed — Inspect details and retry if transient.",
+        "plugin_reported_failure — Inspect result.details before retrying.",
+        "unknown_plugin_error — Retry once; if persistent, inspect payload.",
+        "communication_error — Bridge not reachable; restart the session."
+      ],
+      "side_effects": [
+        "May focus/select the node when select=true."
+      ],
+      "limits": [
+        "Does not modify text styles; use set_range_text_style for styling.",
+        "No partial range edits (replaces full content)."
+      ],
+      "preconditions": [
+        "A Figma document with the target node is open and editable.",
+        "Fonts used by the node (or fallback) are available."
+      ],
+      "postchecks": [
+        "The returned nodeId exists and characters equal the requested text.",
+        "modifiedNodeIds contains node_id."
+      ],
+      "agent_chaining": [
+        "unlock_layers on node_locked, then retry set_text_content.",
+        "set_range_text_style to adjust typography after content change."
+      ],
+      "related_tools": ["create_text", "set_range_text_style", "get_node_info"],
+      "example_params": { "node_id": "12:34", "text": "Updated headline", "smart_strategy": "prevail", "select": true }
+    }"""
     try:
-        logger.info(f"📝 Setting text content for node {node_id} to '{text}'")
-        
-        params = {
+        logger.info(f"📝 Setting text content for node {node_id}")
+
+        params: Dict[str, Any] = {
             "nodeId": node_id,
-            "text": text
+            "text": text,
         }
         if smart_strategy:
             params["smartStrategy"] = smart_strategy
-        
+        if fallback_font is not None:
+            params["fallbackFont"] = { "family": fallback_font.family, "style": fallback_font.style }
+        if select is not None:
+            params["select"] = bool(select)
+
         result = await send_command("set_text_content", params)
         return _to_json_string(result)
-        
+
+    except ToolExecutionError:
+        logger.error(f"❌ Tool execution failed for set_text_content with params: {{'node_id': '{node_id}'}}")
+        raise
     except Exception as e:
-        error_msg = f"Failed to set text content: {str(e)}"
-        logger.error(error_msg)
-        return _error_json(error_msg)
+        logger.error(f"❌ Communication/system error in set_text_content: {str(e)}")
+        raise ToolExecutionError({
+            "code": "communication_error",
+            "message": f"Failed to set text content due to system error: {str(e)}",
+            "details": {"command": "set_text_content"}
+        })
 
 @function_tool
 async def scan_text_nodes(
     node_id: str,
     use_chunking: Optional[bool] = None,
-    chunk_size: Optional[int] = None
+    chunk_size: Optional[int] = None,
+    include_invisible: Optional[bool] = None,
+    highlight: Optional[bool] = None,
+    max_depth: Optional[int] = None,
+    text_filter: Optional[str] = None,
+    case_sensitive: Optional[bool] = None,
+    include_characters: Optional[bool] = None,
 ) -> str:
     """
-    Scans for text nodes within a given node. Supports chunked or non-chunked scanning.
-    
-    Args:
-        node_id: The ID of the node to scan within
-        use_chunking: When True (default), performs chunked scanning with progress updates
-        chunk_size: Optional chunk size when use_chunking is True (default in plugin: 10)
-    
-    Returns:
-        Information about found text nodes (chunked or non-chunked shape, includes commandId)
+    {
+      "category": "inspect",
+      "mutates_canvas": false,
+      "description": "Scan a subtree and return summaries for all TEXT nodes.",
+      "when_to_use": "You need a list of text layers, their content, and positions.",
+      "when_not_to_use": "You intend to modify text; call set_* tools instead.",
+      "parameters": {
+        "node_id": { "type": "string", "required": true, "notes": "Root node to scan" },
+        "use_chunking": { "type": "boolean", "required": false, "notes": "Default true; chunked traversal with progress." },
+        "chunk_size": { "type": "number", "required": false, "notes": "> 0 when chunking; default 10" },
+        "include_invisible": { "type": "boolean", "required": false, "notes": "Include nodes with visible=false" },
+        "highlight": { "type": "boolean", "required": false, "notes": "Briefly tint nodes during scan (visual only)" },
+        "max_depth": { "type": "number", "required": false, "notes": "Non-negative integer; limit traversal depth" },
+        "text_filter": { "type": "string", "required": false, "notes": "Substring filter on characters" },
+        "case_sensitive": { "type": "boolean", "required": false, "notes": "Applies to text_filter; default false" },
+        "include_characters": { "type": "boolean", "required": false, "notes": "Include characters in results; default true" }
+      },
+      "returns": "{ nodesCount: number, textNodes: TextNodeSummary[], commandId: string }",
+      "hints": [
+        "Use text_filter to narrow large scans quickly.",
+        "Disable highlight for faster scans in large files.",
+        "Limit traversal with max_depth to avoid deep trees."
+      ],
+      "pitfalls": [
+        "Scanning an entire page can be slow without filters.",
+        "Very large nodes may still cause brief UI jank when highlighting.",
+        "Invisible nodes are skipped unless include_invisible=true."
+      ],
+      "errors": [
+        "missing_parameter — Provide node_id.",
+        "invalid_parameter — Fix invalid types/ranges (e.g., chunk_size>0).",
+        "node_not_found — Ensure the node_id exists and is accessible.",
+        "process_text_node_failed — Skip bad nodes; continue scan.",
+        "highlight_failed — Disable highlight to avoid visual errors.",
+        "highlight_reset_failed — Harmless; retry with highlight=false if needed.",
+        "scan_failed — Retry with smaller scope or without filters.",
+        "plugin_reported_failure — Inspect details.result; fix plugin preconditions.",
+        "communication_error — Check bridge/WebSocket; plugin may be unavailable."
+      ],
+      "side_effects": ["Brief optional visual highlight on scanned nodes."],
+      "limits": [
+        "Returns only TEXT nodes; other node types are ignored.",
+        "characters may be omitted when include_characters=false."
+      ],
+      "preconditions": [
+        "The file and target subtree are loaded in the current session.",
+        "Caller has access permissions to the node."
+      ],
+      "postchecks": [
+        "nodesCount matches textNodes.length",
+        "All entries include stable id, name, type, and geometry"
+      ],
+      "agent_chaining": ["set_multiple_text_contents"],
+      "related_tools": ["get_nodes_info", "scan_nodes_by_types", "set_text_content"],
+      "example_params": { "node_id": "12:34", "use_chunking": true, "chunk_size": 20, "text_filter": "TODO" }
+    }
     """
     try:
         logger.info(f"🔍 Scanning text nodes in {node_id}")
-        
-        params = {"nodeId": node_id}
+
+        params: Dict[str, Any] = {"nodeId": node_id}
         if use_chunking is not None:
-            params["useChunking"] = use_chunking
+            params["useChunking"] = bool(use_chunking)
         if chunk_size is not None:
-            params["chunkSize"] = chunk_size
-        
+            params["chunkSize"] = int(chunk_size)
+        if include_invisible is not None:
+            params["includeInvisible"] = bool(include_invisible)
+        if highlight is not None:
+            params["highlight"] = bool(highlight)
+        if max_depth is not None:
+            params["maxDepth"] = int(max_depth)
+        if text_filter is not None:
+            params["textFilter"] = str(text_filter)
+        if case_sensitive is not None:
+            params["caseSensitive"] = bool(case_sensitive)
+        if include_characters is not None:
+            params["includeCharacters"] = bool(include_characters)
+
         result = await send_command("scan_text_nodes", params)
         return _to_json_string(result)
-        
+    except ToolExecutionError as te:
+        logger.error(f"❌ Tool scan_text_nodes failed: {getattr(te, 'message', str(te))}")
+        raise
     except Exception as e:
-        error_msg = f"Failed to scan text nodes: {str(e)}"
-        logger.error(error_msg)
-        return _error_json(error_msg)
+        logger.error(f"❌ Communication/system error in scan_text_nodes: {str(e)}")
+        raise ToolExecutionError({
+            "code": "communication_error",
+            "message": f"Failed to scan text nodes: {str(e)}",
+            "details": {"command": "scan_text_nodes"}
+        })
 
 # === COMPONENT TOOLS ===
 
@@ -1969,6 +2170,217 @@ async def get_styles(
     result = await send_command("get_styles", params)
     return _to_json_string(result)
 
+# === STYLE CREATION ===
+
+@function_tool
+async def create_paint_style(name: str, paints: list[Any], on_conflict: str | None = None) -> str:
+    """{
+      "category": "style",
+      "mutates_canvas": true,
+      "description": "Create a new local Paint style with given paints.",
+      "when_to_use": "You need a reusable color/gradient style.",
+      "when_not_to_use": "You only need a one-off fill on a node.",
+      "parameters": {
+        "name": { "type": "string", "required": true, "notes": "Hierarchical names allowed via slashes (e.g., 'Brand/Primary')." },
+        "paints": { "type": "object", "required": true, "notes": "Array of Paint objects (SOLID/GRADIENT_*)." },
+        "on_conflict": { "type": "string", "required": false, "notes": "error|skip|suffix (default: error)." }
+      },
+      "returns": "{ success, summary, modifiedNodeIds: [], createdStyleId, name, type: 'paint', skipped? }",
+      "hints": [
+        "Use get_styles to confirm and retrieve the created style.",
+        "Prefer descriptive group prefixes like 'Brand/' and 'UI/'.",
+        "Set multiple gradient stops for smooth blends."
+      ],
+      "pitfalls": [
+        "Invalid Paint shape fails creation.",
+        "Duplicate name causes conflict per on_conflict policy.",
+        "Name cannot be empty."
+      ],
+      "errors": [
+        "missing_parameter — Provide a non-empty name.",
+        "invalid_parameter — Ensure paints is a non-empty array.",
+        "unsupported_editor_type — Only available in Figma Design.",
+        "conflict_style_name — Change name or set on_conflict to 'suffix' or 'skip'.",
+        "unknown_plugin_error — Retry or simplify paints.",
+        "communication_error — Bridge unreachable; restart session."
+      ],
+      "side_effects": ["Creates a new local Paint style."],
+      "limits": [
+        "Creates local file styles only; does not publish to libraries.",
+        "Does not validate color contrast or accessibility."
+      ],
+      "preconditions": [
+        "A Figma document is open in Figma Design.",
+        "Plugin has document access."
+      ],
+      "postchecks": [
+        "Style appears in get_styles with matching name.",
+        "createdStyleId is non-empty and stable."
+      ],
+      "agent_chaining": ["apply style via set_fill_color or publish_components"],
+      "related_tools": ["get_styles", "set_fill_color", "publish_components"],
+      "example_params": { "name": "Brand/Primary", "paints": [{ "type": "SOLID", "color": { "r": 0.95, "g": 0.2, "b": 0.2 } }], "on_conflict": "suffix" }
+    }"""
+    params: Dict[str, Any] = {"name": name, "paints": paints}
+    if on_conflict is not None:
+        params["onConflict"] = on_conflict
+    result = await send_command("create_paint_style", params)
+    return _to_json_string(result)
+
+@function_tool
+async def create_text_style(name: str, style: Any, on_conflict: str | None = None) -> str:
+    """{
+      "category": "style",
+      "mutates_canvas": true,
+      "description": "Create a new local Text style with provided text properties.",
+      "when_to_use": "You need a reusable typography style.",
+      "when_not_to_use": "You only need to style a single node's text range.",
+      "parameters": {
+        "name": { "type": "string", "required": true, "notes": "Hierarchical names allowed via slashes." },
+        "style": { "type": "object", "required": true, "notes": "Any TextStyle fields, e.g., fontName, fontSize, letterSpacing, lineHeight." },
+        "on_conflict": { "type": "string", "required": false, "notes": "error|skip|suffix (default: error)." }
+      },
+      "returns": "{ success, summary, modifiedNodeIds: [], createdStyleId, name, type: 'text', skipped? }",
+      "hints": [
+        "If setting fontName, ensure the font is installed and loadable.",
+        "Use get_styles to retrieve the created style's ID.",
+        "Set textCase/Decoration explicitly for consistency."
+      ],
+      "pitfalls": [
+        "Fonts must be available; font load can fail.",
+        "Duplicate name causes conflict per on_conflict policy.",
+        "Omitting required fields results in missing_parameter."
+      ],
+      "errors": [
+        "missing_parameter — Provide name and style.",
+        "invalid_parameter — style must be an object.",
+        "unsupported_editor_type — Only available in Figma Design.",
+        "font_load_failed — Choose an installed font family/style.",
+        "conflict_style_name — Change name or set on_conflict to 'suffix' or 'skip'.",
+        "unknown_plugin_error — Retry with simpler style.",
+        "communication_error — Bridge unreachable; restart session."
+      ],
+      "side_effects": ["Creates a new local Text style."],
+      "limits": [
+        "Does not apply style to any nodes; separate apply step required.",
+        "Creates local file styles only; no library publish."
+      ],
+      "preconditions": [
+        "A Figma document is open in Figma Design.",
+        "Plugin has document access."
+      ],
+      "postchecks": [
+        "Style appears in get_styles with matching name.",
+        "createdStyleId is non-empty and stable."
+      ],
+      "agent_chaining": ["apply via set_range_text_style or publish_components"],
+      "related_tools": ["get_styles", "set_range_text_style", "publish_components"],
+      "example_params": { "name": "Body/Base", "style": { "fontName": { "family": "Inter", "style": "Regular" }, "fontSize": 16 }, "on_conflict": "error" }
+    }"""
+    params: Dict[str, Any] = {"name": name, "style": style}
+    if on_conflict is not None:
+        params["onConflict"] = on_conflict
+    result = await send_command("create_text_style", params)
+    return _to_json_string(result)
+
+@function_tool
+async def create_effect_style(name: str, effects: list[Any], on_conflict: str | None = None) -> str:
+    """{
+      "category": "style",
+      "mutates_canvas": true,
+      "description": "Create a new local Effect style (e.g., shadows, blurs).",
+      "when_to_use": "You need reusable effects across components.",
+      "when_not_to_use": "You only need a one-off effect on a node.",
+      "parameters": {
+        "name": { "type": "string", "required": true, "notes": "Hierarchical names allowed via slashes." },
+        "effects": { "type": "object", "required": true, "notes": "Array of Effect objects." },
+        "on_conflict": { "type": "string", "required": false, "notes": "error|skip|suffix (default: error)." }
+      },
+      "returns": "{ success, summary, modifiedNodeIds: [], createdStyleId, name, type: 'effect', skipped? }",
+      "hints": [
+        "Prefer subtle elevation steps (e.g., Elevation/100, 200).",
+        "Use get_styles to confirm and retrieve IDs.",
+        "Organize by component states or surfaces."
+      ],
+      "pitfalls": [
+        "Invalid Effect shapes fail creation.",
+        "Duplicate name causes conflict per on_conflict policy.",
+        "Empty arrays are invalid."
+      ],
+      "errors": [
+        "missing_parameter — Provide a non-empty name.",
+        "invalid_parameter — Ensure effects is a non-empty array.",
+        "unsupported_editor_type — Only available in Figma Design.",
+        "conflict_style_name — Change name or set on_conflict to 'suffix' or 'skip'.",
+        "unknown_plugin_error — Retry or simplify effects.",
+        "communication_error — Bridge unreachable; restart session."
+      ],
+      "side_effects": ["Creates a new local Effect style."],
+      "limits": [
+        "Local styles only; not published to libraries.",
+        "Does not apply to nodes; create/apply separately."
+      ],
+      "preconditions": ["Figma Design editor.", "Document open."],
+      "postchecks": ["Style present in get_styles.", "createdStyleId non-empty."],
+      "agent_chaining": ["applyStyle or publish_components"],
+      "related_tools": ["get_styles", "publish_components"],
+      "example_params": { "name": "Elevation/100", "effects": [{ "type": "DROP_SHADOW", "color": { "r": 0, "g": 0, "b": 0, "a": 0.2 }, "offset": { "x": 0, "y": 2 }, "radius": 4 }] }
+    }"""
+    params: Dict[str, Any] = {"name": name, "effects": effects}
+    if on_conflict is not None:
+        params["onConflict"] = on_conflict
+    result = await send_command("create_effect_style", params)
+    return _to_json_string(result)
+
+@function_tool
+async def create_grid_style(name: str, layout_grids: list[Any], on_conflict: str | None = None) -> str:
+    """{
+      "category": "style",
+      "mutates_canvas": true,
+      "description": "Create a new local Grid style (layout grids).",
+      "when_to_use": "You need reusable layout grid settings.",
+      "when_not_to_use": "You want grids on a single frame only.",
+      "parameters": {
+        "name": { "type": "string", "required": true, "notes": "Hierarchical names allowed via slashes." },
+        "layout_grids": { "type": "object", "required": true, "notes": "Array of LayoutGrid objects." },
+        "on_conflict": { "type": "string", "required": false, "notes": "error|skip|suffix (default: error)." }
+      },
+      "returns": "{ success, summary, modifiedNodeIds: [], createdStyleId, name, type: 'grid', skipped? }",
+      "hints": [
+        "Match grid to breakpoint systems (e.g., 8pt, 12 columns).",
+        "Use get_styles to confirm and retrieve IDs.",
+        "Organize by platform (Web/Android/iOS)."
+      ],
+      "pitfalls": [
+        "Invalid LayoutGrid shapes fail creation.",
+        "Duplicate name causes conflict per on_conflict policy.",
+        "Empty arrays are invalid."
+      ],
+      "errors": [
+        "missing_parameter — Provide a non-empty name.",
+        "invalid_parameter — Ensure layout_grids is a non-empty array.",
+        "unsupported_editor_type — Only available in Figma Design.",
+        "conflict_style_name — Change name or set on_conflict to 'suffix' or 'skip'.",
+        "unknown_plugin_error — Retry or simplify grids.",
+        "communication_error — Bridge unreachable; restart session."
+      ],
+      "side_effects": ["Creates a new local Grid style."],
+      "limits": [
+        "Local styles only; not published to libraries.",
+        "Does not apply grids to nodes; separate apply step."
+      ],
+      "preconditions": ["Figma Design editor.", "Document open."],
+      "postchecks": ["Style present in get_styles.", "createdStyleId non-empty."],
+      "agent_chaining": ["setLayoutGrids on frames or publish_components"],
+      "related_tools": ["get_styles", "publish_components"],
+      "example_params": { "name": "Web/12 Col", "layout_grids": [{ "pattern": "COLUMNS", "sectionSize": 80, "gutterSize": 24, "count": 12 }], "on_conflict": "suffix" }
+    }"""
+    params: Dict[str, Any] = {"name": name, "layoutGrids": layout_grids}
+    if on_conflict is not None:
+        params["onConflict"] = on_conflict
+    result = await send_command("create_grid_style", params)
+    return _to_json_string(result)
+
 # === CONTEXT GATHERERS ===
 
 @function_tool
@@ -1988,10 +2400,16 @@ async def gather_full_context(include_comments: bool = True, force: bool = False
         params = { "includeComments": bool(include_comments), "force": bool(force) }
         result = await send_command("gather_full_context", params)
         return _to_json_string(result)
+    except ToolExecutionError:
+        # Preserve structured payload for agent self-correction
+        raise
     except Exception as e:
-        error_msg = f"Failed to gather full context: {str(e)}"
-        logger.error(error_msg)
-        return _error_json(error_msg)
+        logger.error(f"❌ Communication/system error in gather_full_context: {str(e)}")
+        raise ToolExecutionError({
+            "code": "communication_error",
+            "message": f"Failed to gather full context: {str(e)}",
+            "details": {"command": "gather_full_context"}
+        })
 
 @function_tool
 async def selections_context(
@@ -1999,33 +2417,74 @@ async def selections_context(
     include_comments: Optional[bool] = None,
     force: Optional[bool] = None,
 ) -> str:
-    """
-    Returns either a fast selection snapshot or a complete deep context depending on mode.
-    
-    Args:
-        mode: 'snapshot' | 'complete'. When 'complete', returns the same shape as gather_full_context.
-        include_comments: Include comments (used in 'complete' mode)
-        force: Bypass plugin-side cache when true
-    
-    Returns:
-        Snapshot: { success, document, selectionSignature, selectionSummary, gatheredAt }
-        Complete: same as gather_full_context
-    """
+    """{
+      "category": "inspect",
+      "mutates_canvas": false,
+      "description": "Return a fast snapshot or deep context for the current selection.",
+      "when_to_use": "Need selection details quickly or full, exhaustive context.",
+      "when_not_to_use": "You need whole-page data (prefer get_document_info).",
+      "parameters": {
+        "mode": { "type": "string", "required": false, "notes": "One of 'snapshot'|'complete'. Default: 'snapshot'." },
+        "include_comments": { "type": "boolean", "required": false, "notes": "Only used in 'complete' mode to include node-related comments." },
+        "force": { "type": "boolean", "required": false, "notes": "Bypass plugin cache in 'complete' mode." }
+      },
+      "returns": "Snapshot: {document, selectionSignature, selectionSummary, gatheredAt} or Complete: {document, selectionCount, selectedNodeIds, gatheredAt, selectionSignature, nodes, comments?}",
+      "hints": [
+        "Use 'snapshot' first for speed; escalate to 'complete' only when needed.",
+        "Set include_comments=true in 'complete' mode to fetch relevant comments.",
+        "Use force=true if cache may be stale (e.g., rapid consecutive calls)."
+      ],
+      "pitfalls": [
+        "Invalid 'mode' value will cause a structured error.",
+        "Empty selection returns zero counts and empty arrays.",
+        "'complete' responses can be large on complex selections."
+      ],
+      "errors": [
+        "invalid_parameter — Switch to 'snapshot' or 'complete' and retry.",
+        "selections_context_failed — Retry once; if persists, fall back to 'snapshot'.",
+        "gather_full_context_failed — Reduce selection size or disable include_comments.",
+        "unknown_plugin_error — Inspect details and consider narrowing the request.",
+        "communication_error — Bridge unreachable; restart plugin session and retry."
+      ],
+      "side_effects": ["None. Read-only."],
+      "limits": [
+        "Only inspects the current selection; does not discover unselected neighbors.",
+        "No mutation; does not modify nodes or styles.",
+        "Schema of 'nodes' in 'complete' mode is best-effort and may evolve."
+      ],
+      "preconditions": [
+        "A Figma document is open and a page is active.",
+        "Plugin bridge is connected."
+      ],
+      "postchecks": [
+        "document.pageId equals the current page ID.",
+        "selectionSignature is stable across repeated identical selections."
+      ],
+      "agent_chaining": ["get_selection", "get_nodes_info", "get_reactions"],
+      "related_tools": ["get_selection", "get_nodes_info", "read_my_design", "get_reactions"],
+      "example_params": {"mode": "snapshot"}
+    }"""
     try:
         logger.info("🧭 Getting selections context")
-        params = {}
+        params: Dict[str, Any] = {}
         if mode is not None:
             params["mode"] = mode
         if include_comments is not None:
-            params["includeComments"] = include_comments
+            params["includeComments"] = bool(include_comments)
         if force is not None:
-            params["force"] = force
+            params["force"] = bool(force)
         result = await send_command("selections_context", params)
         return _to_json_string(result)
+    except ToolExecutionError:
+        # Preserve structured payload for agent self-correction
+        raise
     except Exception as e:
-        error_msg = f"Failed to get selections context: {str(e)}"
-        logger.error(error_msg)
-        return _error_json(error_msg)
+        logger.error(f"❌ Communication/system error in selections_context: {str(e)}")
+        raise ToolExecutionError({
+            "code": "communication_error",
+            "message": f"Failed to get selections context: {str(e)}",
+            "details": {"command": "selections_context"}
+        })
 
 # === ADDITIONAL TOOLS FROM CODE.JS ===
 
@@ -2152,103 +2611,390 @@ async def get_reactions(node_ids: List[str], silent: Optional[bool] = False) -> 
         })
 
 @function_tool
-async def delete_multiple_nodes(node_ids: List[str]) -> str:
-    """
-    Deletes multiple nodes at once.
-    
-    Args:
-        node_ids: List of node IDs to delete
-        
-    Returns:
-        A confirmation message with deletion results
-    """
+async def delete_multiple_nodes(
+    node_ids: List[str],
+    chunk_size: Optional[int] = None,
+    delay_ms_between_chunks: Optional[int] = None,
+    skip_locked: Optional[bool] = None,
+    stop_on_failure: Optional[bool] = None,
+    preview_only: Optional[bool] = None,
+) -> str:
+    """{
+      "category": "utility",
+      "mutates_canvas": true,
+      "description": "Delete multiple nodes in chunks with progress and safeguards.",
+      "when_to_use": "Remove many layers at once.",
+      "when_not_to_use": "When previewing impact only; use preview_only first.",
+      "parameters": {
+        "node_ids": { "type": "string[]", "required": true, "notes": "Figma node IDs to delete" },
+        "chunk_size": { "type": "number", "required": false, "notes": "1–50. Default 5." },
+        "delay_ms_between_chunks": { "type": "number", "required": false, "notes": "Default 1000ms." },
+        "skip_locked": { "type": "boolean", "required": false, "notes": "Default true. Skips locked nodes." },
+        "stop_on_failure": { "type": "boolean", "required": false, "notes": "Stop immediately on first failure." },
+        "preview_only": { "type": "boolean", "required": false, "notes": "Simulate without deleting." }
+      },
+      "returns": "{ success: true, summary, modifiedNodeIds, nodesDeleted, nodesFailed, totalNodes, results[], completedInChunks, stoppedEarly?, preview?, commandId }",
+      "hints": [
+        "Batch using chunk_size to avoid rate limits",
+        "Enable preview_only to validate impact",
+        "Unlock targets or set skip_locked=true"
+      ],
+      "pitfalls": [
+        "Including DOCUMENT/PAGE IDs will fail",
+        "Locked nodes fail when skip_locked=false",
+        "stop_on_failure may stop before any deletions"
+      ],
+      "errors": [
+        "invalid_params — Provide a non-empty string[] for node_ids.",
+        "all_deletions_failed — Inspect results[].code; consider unlocking or refreshing IDs.",
+        "no_nodes_deleted — Verify targets exist and are deletable.",
+        "unexpected_error — Retry; if persists, reduce batch size or check logs."
+      ],
+      "side_effects": [
+        "Removes nodes permanently; undo via Figma history only.",
+        "May change selection implicitly by Figma."
+      ],
+      "limits": [
+        "Cannot delete DOCUMENT or PAGE nodes.",
+        "Per-item failures are reported but do not throw unless all fail.",
+        "Chunked processing; very large batches may take time."
+      ],
+      "preconditions": [
+        "Plugin has edit access to nodes.",
+        "Node IDs belong to the current document."
+      ],
+      "postchecks": [
+        "modifiedNodeIds length equals nodesDeleted.",
+        "Sum of nodesDeleted and nodesFailed equals totalNodes when not stopped early."
+      ],
+      "agent_chaining": ["unlock_layers"],
+      "related_tools": ["delete_node", "scan_nodes_by_types"],
+      "example_params": { "node_ids": ["12:34", "56:78"], "chunk_size": 5, "skip_locked": true }
+    }"""
     try:
-        logger.info(f"🗑️ Deleting {len(node_ids)} nodes")
-        
-        params = {"nodeIds": node_ids}
+        logger.info(
+            f"🗑️ delete_multiple_nodes: count={len(node_ids) if node_ids else 0}, chunk_size={chunk_size}, delay_ms_between_chunks={delay_ms_between_chunks}, skip_locked={skip_locked}, stop_on_failure={stop_on_failure}, preview_only={preview_only}"
+        )
+
+        params: Dict[str, Any] = {"nodeIds": node_ids}
+        if chunk_size is not None:
+            params["chunkSize"] = int(chunk_size)
+        if delay_ms_between_chunks is not None:
+            params["delayMsBetweenChunks"] = int(delay_ms_between_chunks)
+        if skip_locked is not None:
+            params["skipLocked"] = bool(skip_locked)
+        if stop_on_failure is not None:
+            params["stopOnFailure"] = bool(stop_on_failure)
+        if preview_only is not None:
+            params["previewOnly"] = bool(preview_only)
+
         result = await send_command("delete_multiple_nodes", params)
         return _to_json_string(result)
-        
+
+    except ToolExecutionError:
+        # Preserve structured payload for agent self-correction
+        raise
     except Exception as e:
-        error_msg = f"Failed to delete multiple nodes: {str(e)}"
-        logger.error(error_msg)
-        return _error_json(error_msg)
+        logger.error(f"❌ Communication/system error in delete_multiple_nodes: {str(e)}")
+        raise ToolExecutionError({
+            "code": "communication_error",
+            "message": f"Failed to delete multiple nodes: {str(e)}",
+            "details": {
+                "command": "delete_multiple_nodes",
+                "nodeIds": node_ids,
+                "chunkSize": chunk_size,
+                "delayMsBetweenChunks": delay_ms_between_chunks,
+                "skipLocked": skip_locked,
+                "stopOnFailure": stop_on_failure,
+                "previewOnly": preview_only,
+            },
+        })
 
 @function_tool
-async def set_multiple_text_contents(node_id: str, text_replacements: List[TextReplacement]) -> str:
-    """
-    Sets text content for multiple text nodes at once.
-    
-    Args:
-        node_id: The root node ID to scan
-        text_replacements: List of text replacement objects with nodeId and text
-        
-    Returns:
-        A confirmation message with replacement results
-    """
+async def set_multiple_text_contents(
+    node_id: str,
+    text_replacements_json: str,
+    smart_strategy: Optional[Literal["prevail", "strict", "experimental"]] = None,
+    fallback_font: Optional[FontName] = None,
+    select: Optional[bool] = None,
+    chunk_size: Optional[int] = None,
+    delay_ms_between_chunks: Optional[int] = None,
+    highlight: Optional[bool] = None,
+    skip_locked: Optional[bool] = None,
+    stop_on_failure: Optional[bool] = None,
+    ignore_missing: Optional[bool] = None,
+    preview_only: Optional[bool] = None,
+) -> str:
+    """{
+      "category": "text",
+      "mutates_canvas": true,
+      "description": "Batch update multiple text nodes' characters.",
+      "when_to_use": "Perform coordinated label replacements.",
+      "when_not_to_use": "One-off edit; prefer set_text_content.",
+      "parameters": {
+        "node_id": { "type": "string", "required": true, "notes": "Root node for context/progress only." },
+        "text_replacements_json": { "type": "string", "required": true, "notes": "JSON array of { nodeId, text }." },
+        "smart_strategy": { "type": "string", "required": false, "notes": "prevail|strict|experimental" },
+        "fallback_font": { "type": "object", "required": false, "notes": "{ family, style } when font missing." },
+        "select": { "type": "boolean", "required": false, "notes": "Select modified nodes after update." },
+        "chunk_size": { "type": "number", "required": false, "notes": "1–50. Default 5." },
+        "delay_ms_between_chunks": { "type": "number", "required": false, "notes": "Default 1000ms." },
+        "highlight": { "type": "boolean", "required": false, "notes": "Temporarily highlight nodes (default true)." },
+        "skip_locked": { "type": "boolean", "required": false, "notes": "Skip locked nodes instead of mutating (default true)." },
+        "stop_on_failure": { "type": "boolean", "required": false, "notes": "Stop after first failure (default false)." },
+        "ignore_missing": { "type": "boolean", "required": false, "notes": "Treat missing nodes as failures only (no throw)." },
+        "preview_only": { "type": "boolean", "required": false, "notes": "Simulate changes without applying." }
+      },
+      "returns": "{ success: true, summary, modifiedNodeIds, nodeId, replacementsApplied, replacementsFailed, totalReplacements, results[], completedInChunks, stoppedEarly?, preview?, commandId }",
+      "hints": [
+        "Batch large edits using a reasonable chunk_size to keep UI responsive.",
+        "Provide fallback_font when using strict/experimental strategies.",
+        "Use scan_text_nodes to build target lists before calling this tool."
+      ],
+      "pitfalls": [
+        "Mixing locked and unlocked targets may lead to partial success.",
+        "Invalid node types (non-TEXT) are ignored with failure entries.",
+        "Empty text_replacements does nothing unless preview_only is true."
+      ],
+      "errors": [
+        "missing_parameter — Provide node_id and text_replacements.",
+        "invalid_parameter — Fix invalid entries or strategy values.",
+        "locked_nodes — Unlock nodes or call unlock tool, then retry.",
+        "nodes_not_found — Verify node IDs exist or refresh sources.",
+        "invalid_node_types — Target TEXT nodes only.",
+        "all_replacements_failed — Refine targets or resolve reported issues and retry."
+      ],
+      "side_effects": [
+        "Temporarily highlights nodes when highlight=true.",
+        "Optionally changes current selection when select=true."
+      ],
+      "limits": [
+        "Chunked processing; very large batches may take time.",
+        "No automatic font substitution unless fallback provided."
+      ],
+      "preconditions": [
+        "Plugin has access to the file and target nodes.",
+        "Fonts referenced by nodes are available or loadable."
+      ],
+      "postchecks": [
+        "modifiedNodeIds length equals replacementsApplied.",
+        "Each success entry's characters equal translatedText."
+      ],
+      "agent_chaining": [
+        "If locked_nodes, call unlock_layers then retry.",
+        "If nodes_not_found, call scan_text_nodes to rebuild targets."
+      ],
+      "related_tools": ["set_text_content", "scan_text_nodes", "get_nodes_info"],
+      "example_params": { "node_id": "12:1", "text_replacements_json": "[{ \"nodeId\": \"56:1\", \"text\": \"Continue\" }]", "smart_strategy": "prevail", "chunk_size": 10 }
+    }"""
     try:
-        logger.info(f"📝 Setting multiple text contents for {len(text_replacements)} nodes")
-        
-        # Convert Pydantic models to dicts for the plugin
-        text_list = [tr.dict() for tr in text_replacements]
-        params = {
-            "nodeId": node_id,
-            "text": text_list
-        }
+        # Parse replacements JSON into list of { nodeId, text }
+        try:
+            parsed = json.loads(text_replacements_json)
+        except Exception as e:
+            raise ToolExecutionError({
+                "code": "invalid_parameter",
+                "message": f"text_replacements_json is not valid JSON: {str(e)}",
+                "details": {}
+            })
+        if not isinstance(parsed, list):
+            raise ToolExecutionError({
+                "code": "invalid_parameter",
+                "message": "text_replacements_json must be a JSON array",
+                "details": {"receivedType": type(parsed).__name__}
+            })
+        text_list: List[Dict[str, Any]] = []
+        for i, item in enumerate(parsed):
+            if not isinstance(item, dict):
+                raise ToolExecutionError({
+                    "code": "invalid_parameter",
+                    "message": "Each replacement must be an object",
+                    "details": {"index": i}
+                })
+            nid = item.get("nodeId")
+            txt = item.get("text")
+            if not isinstance(nid, str) or not nid:
+                raise ToolExecutionError({
+                    "code": "invalid_parameter",
+                    "message": "nodeId must be a non-empty string",
+                    "details": {"index": i}
+                })
+            if txt is None:
+                raise ToolExecutionError({
+                    "code": "invalid_parameter",
+                    "message": "text is required for each replacement",
+                    "details": {"index": i}
+                })
+            text_list.append({"nodeId": nid, "text": str(txt)})
+
+        logger.info(f"📝 set_multiple_text_contents → {len(text_list)} targets")
+
+        params: Dict[str, Any] = {"nodeId": node_id, "text": text_list}
+
+        if smart_strategy is not None:
+            params["smartStrategy"] = smart_strategy
+        if fallback_font is not None:
+            params["fallbackFont"] = fallback_font.dict()
+        if select is not None:
+            params["select"] = bool(select)
+        if chunk_size is not None:
+            params["chunkSize"] = int(chunk_size)
+        if delay_ms_between_chunks is not None:
+            params["delayMsBetweenChunks"] = int(delay_ms_between_chunks)
+        if highlight is not None:
+            params["highlight"] = bool(highlight)
+        if skip_locked is not None:
+            params["skipLocked"] = bool(skip_locked)
+        if stop_on_failure is not None:
+            params["stopOnFailure"] = bool(stop_on_failure)
+        if ignore_missing is not None:
+            params["ignoreMissing"] = bool(ignore_missing)
+        if preview_only is not None:
+            params["previewOnly"] = bool(preview_only)
+
         result = await send_command("set_multiple_text_contents", params)
         return _to_json_string(result)
-        
+    except ToolExecutionError:
+        # Preserve structured payload for agent self-correction
+        raise
     except Exception as e:
-        error_msg = f"Failed to set multiple text contents: {str(e)}"
-        logger.error(error_msg)
-        return _error_json(error_msg)
+        logger.error(f"❌ Communication/system error in set_multiple_text_contents: {str(e)}")
+        raise ToolExecutionError({
+            "code": "communication_error",
+            "message": f"Failed to set multiple text contents: {str(e)}",
+            "details": {"command": "set_multiple_text_contents"}
+        })
 
 
 @function_tool
 async def scan_nodes_by_types(node_id: str, types: List[str]) -> str:
-    """
-    Scans for nodes of specific types within a given node.
-    
-    Args:
-        node_id: The ID of the node to scan within
-        types: List of node types to find (e.g., ['COMPONENT', 'FRAME'])
-        
-    Returns:
-        Information about found nodes
-    """
+    """{
+      "category": "inspect",
+      "mutates_canvas": false,
+      "description": "Scan a node's subtree for all nodes matching the provided types.",
+      "when_to_use": "You need all nodes of certain kinds under a frame/component.",
+      "when_not_to_use": "You already have explicit node IDs.",
+      "parameters": {
+        "node_id": { "type": "string", "required": true, "notes": "Root node to start the scan from." },
+        "types": { "type": "string[]", "required": true, "notes": "E.g. ['TEXT','FRAME','COMPONENT','INSTANCE']" }
+      },
+      "returns": "{ nodesCount, matchingNodes:[{ id,name,type,bbox:{x,y,width,height} }], searchedTypes, commandId }",
+      "hints": [
+        "Scope scans to a high-level frame to keep them fast.",
+        "Pipe IDs to get_nodes_info for richer details."
+      ],
+      "pitfalls": [
+        "types must be a non-empty array of strings.",
+        "Hidden nodes are skipped by the implementation."
+      ],
+      "errors": [
+        "missing_parameter — Provide node_id.",
+        "invalid_parameter — Ensure types is a non-empty string array.",
+        "node_not_found — Resolve the node or pass a different ID.",
+        "plugin_reported_failure — Inspect result.details for context.",
+        "unknown_plugin_error — Retry or narrow the scope.",
+        "communication_error — Bridge/transport issue; retry the call."
+      ],
+      "side_effects": [
+        "None. Read-only."
+      ],
+      "limits": [
+        "Searches the entire subtree under node_id.",
+        "Does not include hidden nodes."
+      ],
+      "preconditions": [
+        "node_id exists in the document.",
+        "types contains at least one valid Figma node type."
+      ],
+      "postchecks": [
+        "nodesCount equals matchingNodes.length.",
+        "Every matchingNodes[i].type is in searchedTypes."
+      ],
+      "agent_chaining": [
+        "get_nodes_info on matchingNodes for full details"
+      ],
+      "related_tools": ["get_nodes_info", "scan_text_nodes", "get_reactions"],
+      "example_params": { "node_id": "12:1", "types": ["TEXT", "FRAME"] }
+    }"""
+    logger.info(f"🔎 scan_nodes_by_types: node_id={node_id}")
+    # Dispatch to plugin with snake_case -> camelCase mapping
     try:
-        logger.info(f"🔍 Scanning for node types {types} in {node_id}")
-        
-        params = {
-            "nodeId": node_id,
-            "types": types
-        }
+        params = {"nodeId": node_id, "types": types}
         result = await send_command("scan_nodes_by_types", params)
         return _to_json_string(result)
-        
+    except ToolExecutionError as te:
+        # Pass through structured tool errors untouched
+        raise te
     except Exception as e:
-        error_msg = f"Failed to scan nodes by types: {str(e)}"
-        logger.error(error_msg)
-        return _error_json(error_msg)
+        # Normalize non-tool failures to ToolExecutionError
+        logger.error(f"❌ Communication/system error in scan_nodes_by_types: {str(e)}")
+        raise ToolExecutionError({
+            "code": "communication_error",
+            "message": f"Failed to scan nodes by types: {str(e)}",
+            "details": {"node_id": node_id}
+        }, command="scan_nodes_by_types", params={"nodeId": node_id, "types": types})
 
 
 
 @function_tool
 async def get_comments() -> str:
-    """
-    Reads document comments (thread items).
-    
-    Returns:
-        JSON string with { success: true, comments: [{ id, message, clientMeta, createdAt, resolvedAt, user }] }
-    """
+    """{
+      "category": "inspect",
+      "mutates_canvas": false,
+      "description": "Read document comments (thread items).",
+      "when_to_use": "Surface feedback alongside selection analysis.",
+      "when_not_to_use": "You need canvas annotations; use dedicated tools.",
+      "parameters": {},
+      "returns": "Comment[] with { id, message, clientMeta, createdAt, resolvedAt, user }",
+      "hints": [
+        "Filter by clientMeta.nodeId to relate to specific nodes.",
+        "Combine with selections_context(includeComments=true) for context.",
+        "Empty array is normal when no comments exist."
+      ],
+      "pitfalls": [
+        "Assuming comments are scoped to the current selection.",
+        "Confusing comments with canvas annotations (different feature).",
+        "Treating createdAt/resolvedAt as sorted; order is not guaranteed."
+      ],
+      "errors": [
+        "unsupported_editor_type — Switch to Figma Design and retry.",
+        "comments_feature_unavailable — Re-run inside Figma; ensure Comments API is available.",
+        "figma_api_error — Retry; ensure the file is open and plugin has access.",
+        "unknown_plugin_error — Retry with minimal context; inspect details to self-correct."
+      ],
+      "side_effects": ["None. Read-only."],
+      "limits": [
+        "Returns document-level comments; selection filtering is not applied here.",
+        "user and clientMeta shapes are provided by Figma and may vary."
+      ],
+      "preconditions": [
+        "Plugin session is active and connected via the bridge.",
+        "Figma Comments API is available in the current environment."
+      ],
+      "postchecks": [
+        "Every returned item includes string id and message.",
+        "Return is an array (possibly empty)."
+      ],
+      "agent_chaining": [
+        "selections_context",
+        "read_my_design"
+      ],
+      "related_tools": ["selections_context", "read_my_design"],
+      "example_params": {}
+    }"""
     try:
         logger.info("💬 Getting comments")
-        result = await send_command("get_comments")
+        result = await send_command("get_comments", {})
         return _to_json_string(result)
+    except ToolExecutionError as te:
+        # Forward structured errors unchanged
+        logger.error(f"❌ Tool get_comments failed: {getattr(te, 'message', str(te))}")
+        raise
     except Exception as e:
-        error_msg = f"Failed to get comments: {str(e)}"
-        logger.error(error_msg)
-        return _error_json(error_msg)
+        # Normalize communication/system level errors to structured payload
+        payload = {"code": "communication_error", "message": f"Failed to get comments: {str(e)}", "details": {"command": "get_comments"}}
+        logger.error(payload["message"])
+        raise ToolExecutionError(payload, command="get_comments", params={})
 
 @function_tool
 async def set_gradient_fill(node_id: str, gradient_json: str) -> str:
@@ -2331,59 +3077,171 @@ async def set_gradient_fill(node_id: str, gradient_json: str) -> str:
 
 @function_tool
 async def get_instance_overrides(instance_node_id: Optional[str] = None) -> str:
-    """
-    Gets component instance overrides.
-    
-    Args:
-        instance_node_id: The ID of the instance node (optional, uses selection if not provided)
-        
-    Returns:
-        Instance override information
-    """
+    """{
+      "category": "inspect",
+      "mutates_canvas": false,
+      "description": "Read overrides on a component instance and report its main component.",
+      "when_to_use": "You need source overrides to replicate onto other instances.",
+      "when_not_to_use": "You want to apply overrides (use set_instance_overrides).",
+      "parameters": {
+        "instance_node_id": { "type": "string", "required": false, "notes": "Target instance ID. Falls back to first selected instance if omitted." }
+      },
+      "returns": "{ sourceInstanceId, sourceInstanceName, mainComponentId, overridesCount, overrides[] }",
+      "hints": [
+        "Pass instance_node_id to avoid dependency on current selection.",
+        "Overrides includes direct overrides only; inherited overrides are excluded.",
+        "Chain with set_instance_overrides to copy these overrides to other instances."
+      ],
+      "pitfalls": [
+        "Non-instance selection will fail with invalid_node_type.",
+        "Empty selection without instance_node_id will fail with selection_empty.",
+        "Remote main components can be read-only; this call is read-only."
+      ],
+      "errors": [
+        "node_not_found — Provide a valid instance id or reselect.",
+        "invalid_node_type — Select a component instance, not a frame or group.",
+        "selection_empty — Pass instance_node_id or select an instance.",
+        "no_instances_in_selection — Select at least one instance.",
+        "main_component_not_found — Ensure the instance has a valid main component.",
+        "unknown_plugin_error — Retry or inspect details; consider reselecting.",
+        "communication_error — Bridge not reachable; restart the session."
+      ],
+      "side_effects": ["None. Read-only."],
+      "limits": [
+        "Returns direct overrides only; inherited overrides are not included.",
+        "Does not resolve cross-file component relationships beyond ids."
+      ],
+      "preconditions": [
+        "Plugin session is active and connected via the bridge.",
+        "Target instance exists in the current document."
+      ],
+      "postchecks": [
+        "overridesCount equals overrides.length"
+      ],
+      "agent_chaining": [
+        "set_instance_overrides"
+      ],
+      "related_tools": ["create_component_instance", "get_local_components"],
+      "example_params": { }
+    }"""
     try:
         logger.info(f"🧩 Getting instance overrides for: {instance_node_id or 'selection'}")
-        
-        params = {}
+        params: Dict[str, Any] = {}
         if instance_node_id:
             params["instanceNodeId"] = instance_node_id
-            
         result = await send_command("get_instance_overrides", params)
         return _to_json_string(result)
-        
+    except ToolExecutionError as te:
+        logger.error(f"❌ Tool get_instance_overrides failed: {getattr(te, 'message', str(te))}")
+        raise
     except Exception as e:
-        error_msg = f"Failed to get instance overrides: {str(e)}"
-        logger.error(error_msg)
-        return _error_json(error_msg)
+        logger.error(f"❌ Communication/system error in get_instance_overrides: {str(e)}")
+        raise ToolExecutionError({
+            "code": "communication_error",
+            "message": f"Failed to get instance overrides: {str(e)}",
+            "details": {"command": "get_instance_overrides", "instanceNodeId": instance_node_id}
+        })
 
 @function_tool
 async def set_instance_overrides(
     target_node_ids: List[str],
-    source_instance_id: str
+    source_instance_id: str,
+    swap_component: bool = True,
+    include_fields: Optional[List[str]] = None,
+    exclude_fields: Optional[List[str]] = None,
+    preview_only: bool = False,
+    stop_on_first_error: bool = False,
 ) -> str:
-    """
-    Sets instance overrides from a source instance to target instances.
-    
-    Args:
-        target_node_ids: List of target instance node IDs
-        source_instance_id: Source instance ID to copy overrides from
-        
-    Returns:
-        A confirmation message with override results
-    """
+    """{
+      "category": "style",
+      "mutates_canvas": true,
+      "description": "Copy overrides from a source instance to target instances, optionally swapping main component first.",
+      "when_to_use": "You need to keep variant/property parity across multiple instances.",
+      "when_not_to_use": "You only need to read overrides (use get_instance_overrides).",
+      "parameters": {
+        "target_node_ids": { "type": "string[]", "required": true, "notes": "Target instance node IDs." },
+        "source_instance_id": { "type": "string", "required": true, "notes": "Instance to copy overrides from." },
+        "swap_component": { "type": "boolean", "required": false, "notes": "Swap target main component to match source before applying overrides (default true)." },
+        "include_fields": { "type": "string[]", "required": false, "notes": "Subset of override fields to apply (e.g., componentProperties, characters)." },
+        "exclude_fields": { "type": "string[]", "required": false, "notes": "Fields to skip even if overridden." },
+        "preview_only": { "type": "boolean", "required": false, "notes": "Dry-run without mutating; returns a summary." },
+        "stop_on_first_error": { "type": "boolean", "required": false, "notes": "Abort on first error encountered if true." }
+      },
+      "returns": "{ success: true, summary, modifiedNodeIds: string[], sourceInstanceId, mainComponentId, targetInstanceIds: string[], totalOverridesApplied: number, results[], preview? }",
+      "hints": [
+        "Use preview_only=true to plan changes safely before applying.",
+        "Scope changes with include_fields/exclude_fields to avoid unintended edits.",
+        "Text overrides load fonts; provide fallbacks elsewhere if needed."
+      ],
+      "pitfalls": [
+        "Targets must be instances; frames/groups will fail.",
+        "If components differ, swap_component should remain true to align structure.",
+        "Unloaded fonts can block text 'characters' updates."
+      ],
+      "errors": [
+        "missing_parameter — Provide both target_node_ids and source_instance_id.",
+        "invalid_parameter — Ensure target_node_ids is an array of strings.",
+        "no_valid_instances — Re-select valid target instances and retry.",
+        "source_instance_invalid — Provide a valid source instance id.",
+        "swap_failed — Retry or disable swap_component if lineage is incompatible.",
+        "font_load_failed — Retry with available fonts or skip characters field.",
+        "override_field_error — Retry without the problematic field using exclude_fields.",
+        "instance_process_failed — Retry per-instance or reduce batch size.",
+        "no_overrides_applied — Nothing to change; verify include/exclude filters.",
+        "unknown_plugin_error — Retry or inspect details to self-correct.",
+        "communication_error — Bridge not reachable; restart the session."
+      ],
+      "side_effects": [
+        "Swaps main component when swap_component=true.",
+        "Directly mutates target instances and their descendant nodes."
+      ],
+      "limits": [
+        "Applies only direct overridden fields; inherited overrides are ignored.",
+        "Structural mismatches may skip some overrides despite swapping."
+      ],
+      "preconditions": [
+        "All targets exist and are of type INSTANCE.",
+        "Source instance exists and is reachable in the current document."
+      ],
+      "postchecks": [
+        "modifiedNodeIds.length > 0 when preview_only=false",
+        "totalOverridesApplied > 0 on success"
+      ],
+      "agent_chaining": [
+        "get_instance_overrides",
+        "create_component_instance"
+      ],
+      "related_tools": ["get_instance_overrides", "create_component_instance", "get_local_components"],
+      "example_params": { "target_node_ids": ["12:34", "56:78"], "source_instance_id": "9:10", "swap_component": true }
+    }"""
     try:
         logger.info(f"🧩 Setting instance overrides for {len(target_node_ids)} instances")
-        
-        params = {
+        params: Dict[str, Any] = {
             "targetNodeIds": target_node_ids,
-            "sourceInstanceId": source_instance_id
+            "sourceInstanceId": source_instance_id,
+            "swapComponent": bool(swap_component),
         }
+        if include_fields:
+            params["includeFields"] = include_fields
+        if exclude_fields:
+            params["excludeFields"] = exclude_fields
+        if preview_only:
+            params["previewOnly"] = True
+        if stop_on_first_error:
+            params["stopOnFirstError"] = True
+
         result = await send_command("set_instance_overrides", params)
         return _to_json_string(result)
-        
+    except ToolExecutionError as te:
+        logger.error(f"❌ Tool set_instance_overrides failed: {getattr(te, 'message', str(te))}")
+        raise
     except Exception as e:
-        error_msg = f"Failed to set instance overrides: {str(e)}"
-        logger.error(error_msg)
-        return _error_json(error_msg)
+        logger.error(f"❌ Communication/system error in set_instance_overrides: {str(e)}")
+        raise ToolExecutionError({
+            "code": "communication_error",
+            "message": f"Failed to set instance overrides: {str(e)}",
+            "details": {"command": "set_instance_overrides", "targetNodeIds": target_node_ids, "sourceInstanceId": source_instance_id}
+        })
 
 @function_tool
 async def set_axis_align(
@@ -2391,33 +3249,64 @@ async def set_axis_align(
     primary_axis_align_items: Optional[str] = None,
     counter_axis_align_items: Optional[str] = None
 ) -> str:
-    """
-    Sets axis alignment for auto-layout frames.
-    
-    Args:
-        node_id: The ID of the frame to modify
-        primary_axis_align_items: Primary axis alignment - "MIN", "MAX", "CENTER", "SPACE_BETWEEN"
-        counter_axis_align_items: Counter axis alignment - "MIN", "MAX", "CENTER", "BASELINE"
-        
-    Returns:
-        A confirmation message
-    """
+    """{
+      "category": "layout",
+      "mutates_canvas": true,
+      "description": "Set primary and/or counter axis alignment on Auto Layout containers.",
+      "when_to_use": "Align children within an Auto Layout frame.",
+      "when_not_to_use": "Node is not Auto Layout or you need distribution tools.",
+      "parameters": {
+        "node_id": { "type": "string", "required": true },
+        "primary_axis_align_items": { "type": "string", "required": false, "notes": "MIN|MAX|CENTER|SPACE_BETWEEN" },
+        "counter_axis_align_items": { "type": "string", "required": false, "notes": "MIN|MAX|CENTER|BASELINE (HORIZONTAL only)" }
+      },
+      "returns": "{ success, summary, modifiedNodeIds:[nodeId], node:{ id, name, layoutMode, primaryAxisAlignItems, counterAxisAlignItems } }",
+      "hints": [
+        "SPACE_BETWEEN affects spacing along the primary axis.",
+        "BASELINE aligns text baselines (horizontal layout only).",
+        "Call set_layout_mode first when needed."
+      ],
+      "pitfalls": [
+        "BASELINE on non-horizontal layout is invalid.",
+        "Passing neither parameter is a no-op."
+      ],
+      "errors": [
+        "missing_parameter — Provide at least one alignment value.",
+        "node_not_found — Verify node exists or reselect.",
+        "unsupported_node_type — Use FRAME|COMPONENT|INSTANCE.",
+        "locked_node — Unlock target layer first.",
+        "auto_layout_required — Enable Auto Layout then retry.",
+        "invalid_parameter — Fix invalid enum values.",
+        "baseline_requires_horizontal_layout — Switch to HORIZONTAL or change value.",
+        "plugin_reported_failure — Inspect details.result.",
+        "unknown_plugin_error — Inspect payload; retry.",
+        "communication_error — Bridge unreachable; restart."
+      ],
+      "side_effects": ["Child positions may shift due to new alignment."],
+      "limits": ["Applies only to Auto Layout containers."],
+      "preconditions": ["Node uses Auto Layout and is unlocked."],
+      "postchecks": ["Alignment properties equal requested values."],
+      "agent_chaining": ["set_item_spacing", "set_padding"],
+      "related_tools": ["set_layout_mode", "set_item_spacing", "set_padding"],
+      "example_params": { "node_id": "12:34", "primary_axis_align_items": "SPACE_BETWEEN", "counter_axis_align_items": "CENTER" }
+    }"""
     try:
-        logger.info(f"📐 Setting axis alignment for node {node_id}")
-        
+        logger.info(f"📐 set_axis_align: node_id={node_id}")
         params = {"nodeId": node_id}
-        if primary_axis_align_items:
+        if primary_axis_align_items is not None:
             params["primaryAxisAlignItems"] = primary_axis_align_items
-        if counter_axis_align_items:
+        if counter_axis_align_items is not None:
             params["counterAxisAlignItems"] = counter_axis_align_items
-            
         result = await send_command("set_axis_align", params)
         return _to_json_string(result)
-        
+    except ToolExecutionError:
+        raise
     except Exception as e:
-        error_msg = f"Failed to set axis alignment: {str(e)}"
-        logger.error(error_msg)
-        return _error_json(error_msg)
+        raise ToolExecutionError({
+            "code": "communication_error",
+            "message": f"Failed to set axis alignment: {str(e)}",
+            "details": {"command": "set_axis_align", "nodeId": node_id}
+        })
 
 @function_tool
 async def set_layout_sizing(
@@ -2425,33 +3314,65 @@ async def set_layout_sizing(
     layout_sizing_horizontal: Optional[str] = None,
     layout_sizing_vertical: Optional[str] = None
 ) -> str:
-    """
-    Sets layout sizing for auto-layout frames.
-    
-    Args:
-        node_id: The ID of the frame to modify
-        layout_sizing_horizontal: Horizontal sizing - "FIXED", "HUG", "FILL"
-        layout_sizing_vertical: Vertical sizing - "FIXED", "HUG", "FILL"
-        
-    Returns:
-        A confirmation message
-    """
+    """{
+      "category": "layout",
+      "mutates_canvas": true,
+      "description": "Set layout sizing (FIXED|HUG|FILL) on a node.",
+      "when_to_use": "Control how a node resizes inside Auto Layout.",
+      "when_not_to_use": "You need absolute resize; use resize_node instead.",
+      "parameters": {
+        "node_id": { "type": "string", "required": true },
+        "layout_sizing_horizontal": { "type": "string", "required": false, "notes": "FIXED|HUG|FILL" },
+        "layout_sizing_vertical": { "type": "string", "required": false, "notes": "FIXED|HUG|FILL" }
+      },
+      "returns": "{ success, summary, modifiedNodeIds:[nodeId], node:{ id, name, layoutMode?, layoutSizingHorizontal?, layoutSizingVertical? } }",
+      "hints": [
+        "HUG is valid for frames and text nodes.",
+        "FILL requires an auto-layout parent.",
+        "On non-text nodes, Auto Layout must be enabled."
+      ],
+      "pitfalls": [
+        "Setting neither axis is a no-op.",
+        "Instances may prevent some sizing changes."
+      ],
+      "errors": [
+        "missing_parameter — Provide at least one sizing axis.",
+        "node_not_found — Verify node exists or reselect.",
+        "unsupported_node_type — Use FRAME|COMPONENT|INSTANCE|TEXT.",
+        "locked_node — Unlock target layer first.",
+        "auto_layout_required — Enable Auto Layout for non-text nodes.",
+        "invalid_parameter — Fix invalid enum values.",
+        "unsupported_sizing_target — HUG only on frames/text.",
+        "fill_requires_autolayout_parent — Set parent to Auto Layout or change value.",
+        "plugin_reported_failure — Inspect details.result.",
+        "unknown_plugin_error — Inspect payload; retry.",
+        "communication_error — Bridge unreachable; restart."
+      ],
+      "side_effects": ["May cause reflow as node adopts new sizing behavior."],
+      "limits": ["FILL requires auto-layout parent; HUG limited to frames/text."],
+      "preconditions": ["Node exists; for non-text nodes, Auto Layout is enabled."],
+      "postchecks": ["Sizing properties equal requested values."],
+      "agent_chaining": ["set_layout_mode", "set_item_spacing"],
+      "related_tools": ["set_layout_mode", "resize_node", "set_item_spacing"],
+      "example_params": { "node_id": "12:34", "layout_sizing_horizontal": "FILL", "layout_sizing_vertical": "HUG" }
+    }"""
     try:
-        logger.info(f"📐 Setting layout sizing for node {node_id}")
-        
+        logger.info(f"📐 set_layout_sizing: node_id={node_id}")
         params = {"nodeId": node_id}
-        if layout_sizing_horizontal:
+        if layout_sizing_horizontal is not None:
             params["layoutSizingHorizontal"] = layout_sizing_horizontal
-        if layout_sizing_vertical:
+        if layout_sizing_vertical is not None:
             params["layoutSizingVertical"] = layout_sizing_vertical
-            
         result = await send_command("set_layout_sizing", params)
         return _to_json_string(result)
-        
+    except ToolExecutionError:
+        raise
     except Exception as e:
-        error_msg = f"Failed to set layout sizing: {str(e)}"
-        logger.error(error_msg)
-        return _error_json(error_msg)
+        raise ToolExecutionError({
+            "code": "communication_error",
+            "message": f"Failed to set layout sizing: {str(e)}",
+            "details": {"command": "set_layout_sizing", "nodeId": node_id}
+        })
 
 @function_tool
 async def set_item_spacing(
@@ -2459,33 +3380,64 @@ async def set_item_spacing(
     item_spacing: Optional[float] = None,
     counter_axis_spacing: Optional[float] = None
 ) -> str:
-    """
-    Sets item spacing for auto-layout frames.
-    
-    Args:
-        node_id: The ID of the frame to modify
-        item_spacing: Spacing between items in pixels
-        counter_axis_spacing: Counter axis spacing in pixels (for wrap layouts)
-        
-    Returns:
-        A confirmation message
-    """
+    """{
+      "category": "layout",
+      "mutates_canvas": true,
+      "description": "Set item spacing and optional counter axis spacing (for WRAP).",
+      "when_to_use": "Adjust spacing between children in Auto Layout.",
+      "when_not_to_use": "You need distribution across arbitrary nodes.",
+      "parameters": {
+        "node_id": { "type": "string", "required": true },
+        "item_spacing": { "type": "number", "required": false },
+        "counter_axis_spacing": { "type": "number", "required": false, "notes": "Requires layoutWrap=WRAP" }
+      },
+      "returns": "{ success, summary, modifiedNodeIds:[nodeId], node:{ id, name, layoutMode, layoutWrap, itemSpacing, counterAxisSpacing? } }",
+      "hints": [
+        "Use with set_layout_mode to enable WRAP if needed.",
+        "Set item_spacing alone for non-wrapped layouts.",
+        "Keep values consistent with your spacing scale."
+      ],
+      "pitfalls": [
+        "counter_axis_spacing without WRAP will fail.",
+        "Large spacing may push children out of view."
+      ],
+      "errors": [
+        "missing_parameter — Provide at least one spacing value.",
+        "node_not_found — Verify node exists or reselect.",
+        "unsupported_node_type — Use FRAME|COMPONENT|INSTANCE.",
+        "locked_node — Unlock target layer first.",
+        "auto_layout_required — Enable Auto Layout then retry.",
+        "invalid_parameter — Ensure numbers are finite.",
+        "wrap_required_for_counter_axis_spacing — Enable WRAP or omit counter axis.",
+        "plugin_reported_failure — Inspect details.result.",
+        "unknown_plugin_error — Inspect payload; retry.",
+        "communication_error — Bridge unreachable; restart."
+      ],
+      "side_effects": ["Children reflow to reflect new spacing."],
+      "limits": ["counter_axis_spacing applies only when layoutWrap=WRAP."],
+      "preconditions": ["Node uses Auto Layout and is unlocked."],
+      "postchecks": ["itemSpacing and counterAxisSpacing match requested values."],
+      "agent_chaining": ["set_layout_mode", "set_axis_align"],
+      "related_tools": ["set_layout_mode", "set_padding", "set_axis_align"],
+      "example_params": { "node_id": "12:34", "item_spacing": 12 }
+    }"""
     try:
-        logger.info(f"📐 Setting item spacing for node {node_id}")
-        
+        logger.info(f"📐 set_item_spacing: node_id={node_id}")
         params = {"nodeId": node_id}
         if item_spacing is not None:
-            params["itemSpacing"] = item_spacing
+            params["itemSpacing"] = float(item_spacing)
         if counter_axis_spacing is not None:
-            params["counterAxisSpacing"] = counter_axis_spacing
-            
+            params["counterAxisSpacing"] = float(counter_axis_spacing)
         result = await send_command("set_item_spacing", params)
         return _to_json_string(result)
-        
+    except ToolExecutionError:
+        raise
     except Exception as e:
-        error_msg = f"Failed to set item spacing: {str(e)}"
-        logger.error(error_msg)
-        return _error_json(error_msg)
+        raise ToolExecutionError({
+            "code": "communication_error",
+            "message": f"Failed to set item spacing: {str(e)}",
+            "details": {"command": "set_item_spacing", "nodeId": node_id}
+        })
 
 
 # === VIEWPORT TOOLS ===
@@ -2493,165 +3445,499 @@ async def set_item_spacing(
 @function_tool
 async def zoom(zoom_level: float, center_x: Optional[float] = None, center_y: Optional[float] = None) -> str:
     """
-    Sets the editor viewport zoom (and optionally recenters the viewport).
-
-    Args:
-        zoom_level: The zoom level to set (e.g., 1.0 = 100%)
-        center_x: Optional X coordinate to set viewport center before zoom
-        center_y: Optional Y coordinate to set viewport center before zoom
-
-    Returns:
-        JSON string with { success, zoom, center }
+    {
+      "category": "utility",
+      "mutates_canvas": true,
+      "description": "Set the viewport zoom and optionally recenter the canvas.",
+      "when_to_use": "Adjust magnification or recenter quickly.",
+      "when_not_to_use": "When you need to modify nodes or selection.",
+      "parameters": {
+        "zoom_level": { "type": "number", "required": true, "notes": "> 0 (e.g., 1.0 = 100%)" },
+        "center_x": { "type": "number", "required": false, "notes": "Provide with center_y to recenter." },
+        "center_y": { "type": "number", "required": false, "notes": "Provide with center_x to recenter." }
+      },
+      "returns": "{ success, summary, modifiedNodeIds: [], zoom, center }",
+      "hints": [
+        "Provide both center_x and center_y to recenter.",
+        "Use decimals like 0.75 or 1.5 for fine control.",
+        "Large pages may require smaller zoom values first."
+      ],
+      "pitfalls": [
+        "Passing only one of center_x or center_y.",
+        "Using non-finite or <= 0 zoom_level.",
+        "Center may be clamped by Figma viewport constraints."
+      ],
+      "errors": [
+        "missing_required_parameter — Include required fields (e.g., zoom_level).",
+        "invalid_zoom_level_range — Use a positive finite zoom_level.",
+        "invalid_coordinates — center_x/center_y must be finite numbers.",
+        "figma_api_error — Retry; if persistent, reduce zoom or omit center."
+      ],
+      "side_effects": [
+        "Viewport zoom/center changes for the active user; nodes are untouched."
+      ],
+      "limits": [
+        "No animation; the change is immediate.",
+        "Exact zoom may be bounded by Figma internals."
+      ],
+      "preconditions": [
+        "An open document and active page exist.",
+        "zoom_level > 0."
+      ],
+      "postchecks": [
+        "Viewport zoom equals returned 'zoom'.",
+        "Viewport center equals returned 'center'."
+      ],
+      "agent_chaining": [
+        "scroll_and_zoom_into_view"
+      ],
+      "related_tools": [
+        "center", "scroll_and_zoom_into_view", "get_selection"
+      ],
+      "example_params": { "zoom_level": 1.25, "center_x": 640, "center_y": 360 }
+    }
     """
     try:
         logger.info(f"🔎 Setting viewport zoom to {zoom_level} with center=({center_x}, {center_y})")
-        params: Dict[str, Any] = {"zoomLevel": zoom_level}
+        params: Dict[str, Any] = {"zoomLevel": float(zoom_level)}
         if center_x is not None and center_y is not None:
-            params["center"] = {"x": center_x, "y": center_y}
+            params["center"] = {"x": float(center_x), "y": float(center_y)}
         result = await send_command("zoom", params)
         return _to_json_string(result)
+    except ToolExecutionError:
+        # Preserve structured plugin errors
+        raise
     except Exception as e:
-        error_msg = f"Failed to set zoom: {str(e)}"
-        logger.error(error_msg)
-        return _error_json(error_msg)
+        logger.error(f"❌ Communication/system error in zoom: {str(e)}")
+        raise ToolExecutionError({
+            "code": "communication_error",
+            "message": f"Failed to set zoom: {str(e)}",
+            "details": {"command": "zoom", "params": {"zoomLevel": zoom_level, "center_x": center_x, "center_y": center_y}}
+        })
 
 @function_tool
 async def center(x: float, y: float) -> str:
     """
-    Centers the editor viewport at the specified coordinates.
-
-    Args:
-        x: X coordinate
-        y: Y coordinate
-
-    Returns:
-        JSON string with { success, center }
+    {
+      "category": "utility",
+      "mutates_canvas": true,
+      "description": "Center the viewport at specific canvas coordinates.",
+      "when_to_use": "Jump the view to a known point.",
+      "when_not_to_use": "To make nodes visible based on bounds (use scroll_and_zoom_into_view).",
+      "parameters": {
+        "x": { "type": "number", "required": true, "notes": "Canvas X coordinate." },
+        "y": { "type": "number", "required": true, "notes": "Canvas Y coordinate." }
+      },
+      "returns": "{ success, summary, modifiedNodeIds: [], center }",
+      "hints": [
+        "Coordinates are absolute in the canvas space.",
+        "Chain with zoom for precise framing."
+      ],
+      "pitfalls": [
+        "Using non-finite values for x or y.",
+        "Expecting it to fit nodes automatically (use scroll_and_zoom_into_view)."
+      ],
+      "errors": [
+        "missing_required_parameter — Provide both x and y.",
+        "invalid_coordinates — x and y must be finite numbers.",
+        "figma_api_error — Retry or adjust inputs."
+      ],
+      "side_effects": [
+        "Viewport center changes for the active user."
+      ],
+      "limits": [
+        "No animation.",
+        "Does not change zoom."
+      ],
+      "preconditions": [
+        "An open document and active page exist."
+      ],
+      "postchecks": [
+        "Viewport center equals returned 'center'."
+      ],
+      "agent_chaining": [
+        "zoom"
+      ],
+      "related_tools": [
+        "zoom", "scroll_and_zoom_into_view"
+      ],
+      "example_params": { "x": 400, "y": 300 }
+    }
     """
     try:
         logger.info(f"🎯 Centering viewport at ({x}, {y})")
-        params = {"x": x, "y": y}
+        params = {"x": float(x), "y": float(y)}
         result = await send_command("center", params)
         return _to_json_string(result)
+    except ToolExecutionError:
+        raise
     except Exception as e:
-        error_msg = f"Failed to center viewport: {str(e)}"
-        logger.error(error_msg)
-        return _error_json(error_msg)
+        logger.error(f"❌ Communication/system error in center: {str(e)}")
+        raise ToolExecutionError({
+            "code": "communication_error",
+            "message": f"Failed to center viewport: {str(e)}",
+            "details": {"command": "center", "params": {"x": x, "y": y}}
+        })
 
 @function_tool
 async def scroll_and_zoom_into_view(node_ids: List[str]) -> str:
     """
-    Scrolls and zooms the viewport to fit the specified nodes.
-
-    Args:
-        node_ids: List of node IDs to bring into view
-
-    Returns:
-        JSON string with { success, message }
+    {
+      "category": "utility",
+      "mutates_canvas": true,
+      "description": "Scroll and zoom the viewport to fit the given nodes.",
+      "when_to_use": "Ensure specific nodes are visible and framed.",
+      "when_not_to_use": "If you only need to set absolute center or zoom.",
+      "parameters": {
+        "node_ids": { "type": "string[]", "required": true, "notes": "One or more node IDs." }
+      },
+      "returns": "{ success, summary, modifiedNodeIds: [], resolvedNodeIds, unresolvedNodeIds, zoom, center }",
+      "hints": [
+        "Pass unique IDs; duplicates are ignored.",
+        "Use get_nodes_info if some IDs are unresolved."
+      ],
+      "pitfalls": [
+        "Providing empty or invalid IDs.",
+        "Expecting locked/deleted nodes to be found."
+      ],
+      "errors": [
+        "invalid_node_ids — Provide a non-empty array of strings.",
+        "missing_required_parameter — Include node_ids.",
+        "nodes_not_found — Verify IDs or query current selection.",
+        "figma_api_error — Retry; if persistent, refresh node references."
+      ],
+      "side_effects": [
+        "Viewport zoom/center changes for the active user."
+      ],
+      "limits": [
+        "No control over padding or animation.",
+        "Relies on Figma API's fit-to-nodes behavior."
+      ],
+      "preconditions": [
+        "An open document and active page exist."
+      ],
+      "postchecks": [
+        "Viewport center and zoom reflect the returned values."
+      ],
+      "agent_chaining": [
+        "get_nodes_info"
+      ],
+      "related_tools": [
+        "zoom", "center", "get_nodes_info"
+      ],
+      "example_params": { "node_ids": ["1:2", "100:200"] }
+    }
     """
     try:
         logger.info(f"🧭 Scrolling and zooming into {len(node_ids)} node(s)")
-        params = {"nodeIds": node_ids}
+        params = {"nodeIds": list(node_ids)}
         result = await send_command("scroll_and_zoom_into_view", params)
         return _to_json_string(result)
+    except ToolExecutionError:
+        raise
     except Exception as e:
-        error_msg = f"Failed to scroll and zoom into view: {str(e)}"
-        logger.error(error_msg)
-        return _error_json(error_msg)
+        logger.error(f"❌ Communication/system error in scroll_and_zoom_into_view: {str(e)}")
+        raise ToolExecutionError({
+            "code": "communication_error",
+            "message": f"Failed to scroll and zoom into view: {str(e)}",
+            "details": {"command": "scroll_and_zoom_into_view", "params": {"nodeIds": node_ids}}
+        })
 
 # === GROUPING / PARENTING TOOLS ===
 
 @function_tool
-async def group(node_ids: List[str], parent_id: Optional[str] = None, name: Optional[str] = None) -> str:
-    """
-    Groups the specified nodes under a parent (or current page) and returns the new group info.
-
-    Args:
-        node_ids: IDs of nodes to group
-        parent_id: Optional parent node ID (defaults to current page)
-        name: Optional name for the created group
-
-    Returns:
-        JSON string with { success, groupId, name, children }
-    """
+async def group(node_ids: List[str], parent_id: Optional[str] = None, name: Optional[str] = None, index: Optional[int] = None) -> str:
+    """{
+      "category": "layout",
+      "mutates_canvas": true,
+      "description": "Group nodes under a parent (optionally at an index) and set an optional name.",
+      "when_to_use": "You want grouping semantics without auto-layout.",
+      "when_not_to_use": "When you need layout behavior; use create_frame.",
+      "parameters": {
+        "node_ids": { "type": "string[]", "required": true, "notes": "Non-empty list of node ids." },
+        "parent_id": { "type": "string", "required": false, "notes": "Defaults to current page when omitted." },
+        "name": { "type": "string", "required": false, "notes": "Name to assign to the new group." },
+        "index": { "type": "number", "required": false, "notes": "Insert position inside parent (0..childCount)." }
+      },
+      "returns": "{ success: true, summary, modifiedNodeIds, groupId, name, parentId, index, children }",
+      "hints": [
+        "Ensure nodes live on the same page as the parent.",
+        "Unlock nodes before grouping.",
+        "Use index to control stacking order."
+      ],
+      "pitfalls": [
+        "Index beyond parent children count.",
+        "Nodes inside instances cannot be grouped.",
+        "Mixing nodes from different pages."
+      ],
+      "errors": [
+        "missing_parameter — Provide node_ids (non-empty).",
+        "invalid_parameter — Ensure types match and index ≥ 0.",
+        "node_not_found — Re-select or refresh ids and retry.",
+        "parent_not_found — Provide a valid parent_id or omit to use current page.",
+        "invalid_parent — Choose a parent that accepts children.",
+        "locked_nodes — Unlock nodes and retry.",
+        "mixed_pages — Move nodes to the parent's page first.",
+        "index_out_of_bounds — Choose index within range.",
+        "cannot_reparent_scene_root — Pick reparentable nodes.",
+        "parenting_cycle — Choose a different parent to avoid cycles.",
+        "inside_instance — Detach instance or move nodes first.",
+        "group_failed — Inspect details.originalError and correct inputs.",
+        "plugin_reported_failure — Inspect details.result and retry after correction.",
+        "communication_error — Bridge/websocket issue; retry after reconnect."
+      ],
+      "side_effects": [
+        "Creates a GROUP node and moves children into it."
+      ],
+      "limits": [
+        "No auto-layout; purely grouping semantics.",
+        "No cross-page grouping.",
+        "Nodes must be reparentable (not inside instances)."
+      ],
+      "preconditions": [
+        "Nodes exist and are unlocked.",
+        "Parent (or current page) accepts children."
+      ],
+      "postchecks": [
+        "Result.groupId resolves to a GROUP node.",
+        "Result.modifiedNodeIds includes groupId and all provided node_ids."
+      ],
+      "agent_chaining": [
+        "unlock_layers if locked_nodes, then retry",
+        "scroll_and_zoom_into_view",
+        "get_node_info"
+      ],
+      "related_tools": ["reparent", "insert_child", "create_frame"],
+      "example_params": { "node_ids": ["1:2", "3:4"], "name": "Group", "index": 0 }
+    }"""
     try:
-        logger.info(f"🧺 Grouping {len(node_ids)} node(s) under parent={parent_id or 'currentPage'} name={name or ''}")
-        params: Dict[str, Any] = {"nodeIds": node_ids}
-        if parent_id:
-            params["parentId"] = parent_id
-        if name:
-            params["name"] = name
+        logger.info(f"🧺 Grouping {len(node_ids)} node(s) under parent={parent_id or 'currentPage'} name={name or ''} index={index}")
+        params: Dict[str, Any] = {"nodeIds": list(node_ids)}
+        if parent_id is not None:
+            params["parentId"] = str(parent_id)
+        if name is not None:
+            params["name"] = str(name)
+        if index is not None:
+            params["index"] = int(index)
         result = await send_command("group", params)
         return _to_json_string(result)
+    except ToolExecutionError:
+        raise
     except Exception as e:
-        error_msg = f"Failed to group nodes: {str(e)}"
-        logger.error(error_msg)
-        return _error_json(error_msg)
+        logger.error(f"❌ Communication/system error in group: {str(e)}")
+        raise ToolExecutionError({
+            "code": "communication_error",
+            "message": f"Failed to group nodes: {str(e)}",
+            "details": {"command": "group", "params": {"nodeIds": node_ids, "parentId": parent_id, "index": index}}
+        })
 
 @function_tool
 async def ungroup(node_id: str) -> str:
-    """
-    Ungroups the specified group node, reinserting its children into the parent.
-
-    Args:
-        node_id: The group node ID to ungroup
-
-    Returns:
-        JSON string with { success, message, childrenIds }
-    """
+    """{
+      "category": "layout",
+      "mutates_canvas": true,
+      "description": "Ungroup a GROUP node by moving its children to the parent and removing the group.",
+      "when_to_use": "You want to dissolve a group while keeping layer order.",
+      "when_not_to_use": "When preserving grouping semantics matters.",
+      "parameters": {
+        "node_id": { "type": "string", "required": true, "notes": "GROUP node id to ungroup." }
+      },
+      "returns": "{ success: true, summary, modifiedNodeIds, childrenIds, parentId, removedGroupId }",
+      "hints": [
+        "Selection is not changed by this operation.",
+        "Insert order matches the group's position."
+      ],
+      "pitfalls": [
+        "Target node must be of type GROUP.",
+        "Locked children may block insertion in some cases."
+      ],
+      "errors": [
+        "missing_parameter — Provide node_id.",
+        "node_not_found — Verify the group exists.",
+        "invalid_node_type — Provide a GROUP node id.",
+        "invalid_parent — Parent does not support child insertion.",
+        "ungroup_failed — Inspect details and retry.",
+        "plugin_reported_failure — Inspect details.result and retry.",
+        "communication_error — Bridge/websocket issue."
+      ],
+      "side_effects": [
+        "Removes the GROUP node and re-inserts its children."
+      ],
+      "limits": [
+        "Does not adjust layout or constraints.",
+        "Single-group operation only."
+      ],
+      "preconditions": [
+        "node_id resolves to a GROUP node.",
+        "Group has a valid parent that accepts children."
+      ],
+      "postchecks": [
+        "removedGroupId no longer resolves; childrenIds resolve under the original parent.",
+        "modifiedNodeIds includes removedGroupId and all childrenIds."
+      ],
+      "agent_chaining": [
+        "get_node_info"
+      ],
+      "related_tools": ["group", "reparent"],
+      "example_params": { "node_id": "12:34" }
+    }"""
     try:
         logger.info(f"🧺➖ Ungrouping node {node_id}")
         params = {"nodeId": node_id}
         result = await send_command("ungroup", params)
         return _to_json_string(result)
+    except ToolExecutionError:
+        raise
     except Exception as e:
-        error_msg = f"Failed to ungroup: {str(e)}"
-        logger.error(error_msg)
-        return _error_json(error_msg)
+        logger.error(f"❌ Communication/system error in ungroup: {str(e)}")
+        raise ToolExecutionError({
+            "code": "communication_error",
+            "message": f"Failed to ungroup: {str(e)}",
+            "details": {"command": "ungroup", "params": {"nodeId": node_id}}
+        })
 
 @function_tool
-async def reparent(node_ids: List[str], new_parent_id: str) -> str:
-    """
-    Moves the specified nodes under a new parent.
-
-    Args:
-        node_ids: IDs of nodes to move
-        new_parent_id: Destination parent ID
-
-    Returns:
-        JSON string with { success, message }
-    """
+async def reparent(node_ids: List[str], new_parent_id: str, index: Optional[int] = None) -> str:
+    """{
+      "category": "layout",
+      "mutates_canvas": true,
+      "description": "Move nodes under a new parent; optionally insert at index.",
+      "when_to_use": "You want to change the hierarchy without altering geometry.",
+      "when_not_to_use": "When creating a new container (use create_frame or group).",
+      "parameters": {
+        "node_ids": { "type": "string[]", "required": true, "notes": "Non-empty list of node ids." },
+        "new_parent_id": { "type": "string", "required": true, "notes": "Destination parent id." },
+        "index": { "type": "number", "required": false, "notes": "Insert position for the first moved node." }
+      },
+      "returns": "{ success: true, summary, modifiedNodeIds, parentId, insertIndex?, movedNodeIds, unresolvedNodeIds? }",
+      "hints": [
+        "Unlock nodes before moving.",
+        "All nodes must be on the parent's page."
+      ],
+      "pitfalls": [
+        "Cannot reparent document/page roots.",
+        "Self-parenting or parenting cycles are disallowed."
+      ],
+      "errors": [
+        "missing_parameter — Provide node_ids (non-empty) and new_parent_id.",
+        "invalid_parameter — Ensure types match and index ≥ 0.",
+        "no_valid_nodes — None of the node_ids resolved.",
+        "invalid_parent — Choose a parent that accepts children.",
+        "locked_parent — Unlock the parent first.",
+        "locked_nodes — Unlock nodes and retry.",
+        "mixed_pages — Move nodes to the parent's page first.",
+        "index_out_of_bounds — Choose index within range.",
+        "reparent_failed — Some nodes could not be moved; see details.",
+        "plugin_reported_failure — Inspect details.result and retry.",
+        "communication_error — Bridge/websocket issue."
+      ],
+      "side_effects": [
+        "Changes z-order depending on insert method."
+      ],
+      "limits": [
+        "Does not adjust layout/constraints.",
+        "No cross-page reparenting."
+      ],
+      "preconditions": [
+        "New parent accepts children.",
+        "Nodes exist and are unlocked."
+      ],
+      "postchecks": [
+        "movedNodeIds resolve under the new parent.",
+        "modifiedNodeIds equals movedNodeIds."
+      ],
+      "agent_chaining": [
+        "unlock_layers if locked_nodes, then retry",
+        "insert_child to fine-tune order"
+      ],
+      "related_tools": ["group", "insert_child"],
+      "example_params": { "node_ids": ["1:2","3:4"], "new_parent_id": "5:6", "index": 0 }
+    }"""
     try:
-        logger.info(f"🔁 Reparenting {len(node_ids)} node(s) to {new_parent_id}")
-        params = {"nodeIds": node_ids, "newParentId": new_parent_id}
+        logger.info(f"🔁 Reparenting {len(node_ids)} node(s) to {new_parent_id} index={index}")
+        params: Dict[str, Any] = {"nodeIds": list(node_ids), "newParentId": str(new_parent_id)}
+        if index is not None:
+            params["index"] = int(index)
         result = await send_command("reparent", params)
         return _to_json_string(result)
+    except ToolExecutionError:
+        raise
     except Exception as e:
-        error_msg = f"Failed to reparent nodes: {str(e)}"
-        logger.error(error_msg)
-        return _error_json(error_msg)
+        logger.error(f"❌ Communication/system error in reparent: {str(e)}")
+        raise ToolExecutionError({
+            "code": "communication_error",
+            "message": f"Failed to reparent nodes: {str(e)}",
+            "details": {"command": "reparent", "params": {"nodeIds": node_ids, "newParentId": new_parent_id, "index": index}}
+        })
 
 @function_tool
 async def insert_child(parent_id: str, child_id: str, index: int) -> str:
-    """
-    Inserts a child node into a parent at the specified index.
-
-    Args:
-        parent_id: Parent node ID
-        child_id: Child node ID
-        index: Index within parent's children
-
-    Returns:
-        JSON string with { success, message }
-    """
+    """{
+      "category": "layout",
+      "mutates_canvas": true,
+      "description": "Insert a child node into a parent at a specific index.",
+      "when_to_use": "You want to control z-order precisely under a parent.",
+      "when_not_to_use": "When order doesn't matter; use reparent (append).",
+      "parameters": {
+        "parent_id": { "type": "string", "required": true, "notes": "Destination parent id." },
+        "child_id": { "type": "string", "required": true, "notes": "Node to insert." },
+        "index": { "type": "number", "required": true, "notes": "0..parent.children.length" }
+      },
+      "returns": "{ success: true, summary, modifiedNodeIds, parentId, childId, index }",
+      "hints": [
+        "Use get_node_info to confirm final order.",
+        "Unlock nodes beforehand."
+      ],
+      "pitfalls": [
+        "Index out of bounds will fail.",
+        "Parent must accept children."
+      ],
+      "errors": [
+        "missing_parameter — Provide parent_id, child_id, index.",
+        "invalid_parameter — Ensure index ≥ 0.",
+        "invalid_parent — Choose a parent that accepts children.",
+        "node_not_found — Verify child exists.",
+        "locked_nodes — Unlock the child first.",
+        "index_out_of_bounds — Choose index within range.",
+        "insert_failed — Inspect details and retry.",
+        "plugin_reported_failure — Tool returned success=false.",
+        "communication_error — Bridge/websocket issue."
+      ],
+      "side_effects": [
+        "Changes stacking order under parent."
+      ],
+      "limits": [
+        "Single-node operation.",
+        "No cross-page movement."
+      ],
+      "preconditions": [
+        "Parent and child resolve and are unlocked.",
+        "Index within bounds."
+      ],
+      "postchecks": [
+        "modifiedNodeIds includes child_id.",
+        "child now at the requested index."
+      ],
+      "agent_chaining": [
+        "get_node_info"
+      ],
+      "related_tools": ["reparent", "group"],
+      "example_params": { "parent_id": "12:34", "child_id": "56:78", "index": 0 }
+    }"""
     try:
         logger.info(f"🧩 Inserting child {child_id} into parent {parent_id} at index {index}")
-        params = {"parentId": parent_id, "childId": child_id, "index": index}
+        params = {"parentId": parent_id, "childId": child_id, "index": int(index)}
         result = await send_command("insert_child", params)
         return _to_json_string(result)
+    except ToolExecutionError:
+        raise
     except Exception as e:
-        error_msg = f"Failed to insert child: {str(e)}"
-        logger.error(error_msg)
-        return _error_json(error_msg)
+        logger.error(f"❌ Communication/system error in insert_child: {str(e)}")
+        raise ToolExecutionError({
+            "code": "communication_error",
+            "message": f"Failed to insert child: {str(e)}",
+            "details": {"command": "insert_child", "params": {"parentId": parent_id, "childId": child_id, "index": index}}
+        })
 
 # === TEXT / FONT TOOLS ===
 

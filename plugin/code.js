@@ -665,53 +665,83 @@ function registerDefaultCommands() {
 // ======================================================
 async function handleCommand(command, params) {
   registerDefaultCommands();
+
+  // Resolve the action/handler to execute
+  let action = null;
   const handler = commandRegistry.get(command);
   if (handler) {
-    return await handler(params || {});
-  }
-  switch (command) {
-    case "create_rectangle":
-      return await createRectangle(params);
-    case "delete_node":
-      return await deleteNode(params);
-    case "get_styles":
-      return await getStyles(params);
-    // case "get_team_components":
-    //   return await getTeamComponents();
+    action = () => handler(params || {});
+  } else {
+    switch (command) {
+      case "create_rectangle":
+        action = () => createRectangle(params);
+        break;
+      case "delete_node":
+        action = () => deleteNode(params);
+        break;
+      case "get_styles":
+        action = () => getStyles(params);
+        break;
+      // case "get_team_components":
+      //   action = () => getTeamComponents();
 
-    case "set_text_content":
-      return await setTextContent(params);
-    case "clone_node":
-      return await cloneNode(params);
-    case "set_layout_mode":
-      return await setLayoutMode(params);
-    case "set_padding":
-      return await setPadding(params);
-    case "set_axis_align":
-      return await setAxisAlign(params);
-    case "set_layout_sizing":
-      return await setLayoutSizing(params);
-    case "set_item_spacing":
-      return await setItemSpacing(params);
-    
-    
-    case "create_image":
-        return await createImage(params);
-    case "get_image_by_hash":
-        return await getImageByHash(params);
-    
-    case "selections_context":
-      return await selectionsContext(params);
-    case "gather_full_context":
-      // Back-compat: map to selections_context complete mode
-      return await selectionsContext({
-        mode: 'complete',
-        includeComments: params && params.includeComments !== false,
-        force: params && params.force === true,
-      });
-    default:
-      throw new Error(`Unknown command: ${command}`);
+      case "set_text_content":
+        action = () => setTextContent(params);
+        break;
+      case "clone_node":
+        action = () => cloneNode(params);
+        break;
+      case "set_layout_mode":
+        action = () => setLayoutMode(params);
+        break;
+      case "set_padding":
+        action = () => setPadding(params);
+        break;
+      case "set_axis_align":
+        action = () => setAxisAlign(params);
+        break;
+      case "set_layout_sizing":
+        action = () => setLayoutSizing(params);
+        break;
+      case "set_item_spacing":
+        action = () => setItemSpacing(params);
+        break;
+      
+      
+      case "create_image":
+        action = () => createImage(params);
+        break;
+      case "get_image_by_hash":
+        action = () => getImageByHash(params);
+        break;
+      
+      case "selections_context":
+        action = () => selectionsContext(params);
+        break;
+      case "gather_full_context":
+        // Back-compat: map to selections_context complete mode
+        action = () => selectionsContext({
+          mode: 'complete',
+          includeComments: params && params.includeComments !== false,
+          force: params && params.force === true,
+        });
+        break;
+      default:
+        throw new Error(`Unknown command: ${command}`);
+    }
   }
+
+  // Compute a human-friendly step label for logging/undo grouping
+  const stepLabel = (params && (params.stepLabel || params.label || params.name || params.toolName)) || command;
+
+  // Avoid redundant reveal for viewport-only commands
+  const viewportOnly = new Set(["zoom", "center", "scroll_and_zoom_into_view"]);
+  const autoReveal = !(params && params.autoReveal === false) && !viewportOnly.has(command);
+
+  // Wrap the execution in an undo group for atomic step semantics and UX reveal
+  return await withUndoGroup(stepLabel, async () => {
+    return await action();
+  }, { autoReveal });
 }
 
 // ======================================================
@@ -726,6 +756,60 @@ const logger = {
     try { console.error(`❌ ${message}`, context ? context : ""); } catch (_) {}
   },
 };
+
+// ======================================================
+// Undo Group Wrapper: withUndoGroup(label, actions, options)
+// - Ensures step-level logging
+// - Optionally reveals first affected node for UX via scrollAndZoomIntoView
+// - Does NOT call figma.commitUndo() automatically (split only when intentional)
+// ======================================================
+async function withUndoGroup(label, actions, options) {
+  const opts = options || {};
+  const reveal = opts.autoReveal !== false;
+  const log = (globalThis.logger && typeof globalThis.logger.info === 'function') ? globalThis.logger : logger;
+  log.info(`▶️ Step start`, { label });
+  try {
+    const result = await actions();
+
+    // Determine first affected node id, if any
+    let firstAffectedId = null;
+    if (result && typeof result === 'object') {
+      if (Array.isArray(result.modifiedNodeIds) && result.modifiedNodeIds.length > 0) {
+        firstAffectedId = result.modifiedNodeIds[0];
+      } else if (result.node && result.node.id) {
+        firstAffectedId = result.node.id;
+      } else if (result.nodeId) {
+        firstAffectedId = result.nodeId;
+      } else if (result.createdNodeId) {
+        firstAffectedId = result.createdNodeId;
+      } else if (Array.isArray(result.resolvedNodeIds) && result.resolvedNodeIds.length > 0) {
+        firstAffectedId = result.resolvedNodeIds[0];
+      }
+    }
+
+    if (reveal && firstAffectedId) {
+      try {
+        const node = await figma.getNodeByIdAsync(firstAffectedId);
+        if (node) {
+          // Best-effort: switch page if target is on a different page
+          let p = node.parent;
+          while (p && p.type !== 'PAGE') p = p.parent;
+          if (p && p.id && figma.currentPage && p.id !== figma.currentPage.id) {
+            try { figma.currentPage = p; } catch (_) {}
+          }
+          try { figma.currentPage.selection = [node]; } catch (_) {}
+          try { figma.viewport.scrollAndZoomIntoView([node]); } catch (_) {}
+        }
+      } catch (_) {}
+    }
+
+    log.info(`✅ Step success`, { label });
+    return result;
+  } catch (error) {
+    log.error(`❌ Step failed`, { label, error: (error && error.message) || String(error) });
+    throw error;
+  }
+}
 
 // ======================================================
 // Section: Core Document & Selection

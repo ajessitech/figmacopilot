@@ -4,41 +4,13 @@
 
 This encyclopedia outlines the complete four-phase cognitive and operational workflow the Designer Agent uses to process any design request, transforming ambiguous feedback into a well-reasoned, high-quality, and fully implemented design solution within Figma.
 
+---
 
-#### **Phase‑2 Implementation Checklist (Trackable TODOs)**
-
-- [ ] Define `PlanV1` JSON schema (goal, strategy, ia, components, layout, interactions, execution_steps, principles)
-- [ ] Implement `generate_design_plan(prompt, snapshot, stickyGuidance) -> PlanV1` (backend)
-- [ ] Validate LLM output strictly against `PlanV1`; on failure, retry once with error hints
-- [ ] Persist latest plan in session memory keyed by `selectionSignature`
-- [ ] Emit `progress_update` events: `plan_started`, `plan_validated`, `plan_persisted`, `plan_completed`
-- [ ] Stream plan to UI as `agent_response` with `{ phase: 2, kind: "plan" }` metadata
-- [ ] Render a collapsible Plan view in plugin UI (sections mirror `PlanV1`)
-- [ ] Add UI actions: "Copy plan", "Export plan as comment", "Execute plan…"
-- [ ] Guardrails: Disallow tool‑execution during Phase‑2 (planning is read‑only)
-- [ ] Logging: Add emoji logs at each milestone (started/validated/persisted/completed)
-
-##### **Definition of Done (Phase‑2)**
-
-- [ ] Entering a prompt yields a well‑structured plan (valid `PlanV1`) without modifying the canvas
-- [ ] Plan is cached (30s TTL) by `selectionSignature` and re‑used if identical
-- [ ] UI clearly shows plan sections and an "Execute plan" button
-- [ ] Progress updates are visible in bridge/agent logs and UI dev console
-
-##### **Manual Test Plan (Phase‑2)**
-
-- [ ] Open plugin and select a frame with at least one STICKY note nearby
-- [ ] Type: "Refactor this into a scannable insights dashboard" and Send
-- [ ] Observe UI shows "Gathering context…" then a structured plan appears
-- [ ] Verify no visual changes occurred on the canvas
-- [ ] Click "Copy plan" and paste to confirm formatting; confirm sections match schema
-
-
-### **Phase 1 (MVP): UI‑driven, Text‑only Snapshot**
+### **Snapshot mode (MVP): UI‑driven, text‑only**
 
 **Purpose:** Deliver fast, reliable, designer‑useful analysis without images by sending a lightweight yet rich selection snapshot from the UI/Plugin to the backend and streaming the answer immediately. No status message phases are used.
 
-#### **Operating Principles (Phase‑1 Mode)**
+#### **Operating Principles (Snapshot Mode)**
 - **Primary context:** UI Snapshot (Selection JSON + Summary). Use additional tools sparingly, only when snapshot clearly lacks essentials.
 - **No images:** Omit all image exports and visual comparisons (enforced by tool gating).
 - **Designer‑native:** Speak in components/variants, auto‑layout, constraints, tokens, flows.
@@ -51,52 +23,54 @@ This encyclopedia outlines the complete four-phase cognitive and operational wor
 - **Tier B (optional):** Use `gather_full_context` (already implemented) when task demands or to assess/observe/reflect. STICKY content is intentionally not included in Tier‑B to keep guidance and full node trees decoupled.
 
 
+ ---
  
-#### **Phase‑1 Runbook (end‑to‑end)**
-1. UI: On Send → request a Phase‑1 snapshot from the plugin, await it briefly (show “Gathering context…”), then send `{ type: 'user_prompt', prompt, snapshot }` to the bridge.
-2. Plugin: On demand, build Tier‑A snapshot (identity, geometry, constraints, Auto Layout, simplified visuals, text meta/truncation, sample children) and return it with a `selectionSignature` and `stickyGuidance`.
-3. UI caching: Keep a 30s TTL cache keyed by `selectionSignature`. If unchanged and fresh, reuse the cached snapshot and skip the plugin call.
-4. Backend: Build concise synopsis and attach bounded/pruned `SELECTION_REFERENCE` with explicit delimiters and an “UNTRUSTED DATA” disclaimer; stream the answer.
-5. Optional resilience: If `snapshot` is missing, backend may call minimal tools (`get_selection`, `get_document_info`) and proceed, stating gaps.
+ 
+ 
+### **Global Foundations for Planning, Execution, and Review (Essentials to be functional)**
+
+These foundations make planning, execution, and review work end-to-end. They define shared data contracts, events, and a thin adapter layer across Plugin ↔ Bridge ↔ Backend. Use the tools in `docs/tools-encyclopedia.md` as the canonical primitives.
+
+#### **Shared Data Contracts (JSON/TS) — required**
+
+- [ ] `SnapshotV1` (Snapshot output, reused): `{ selectionSignature, nodesSummary[], stickyGuidance[], uiContext }`
+- [ ] `PlanV1`: `{ goal, strategy, ia, components, layout, interactions, execution_steps[], principles }`
+- [ ] `ExecutionStepV1`: `{ id, intent, targetIds[], tool, params, expectations }`
+- [ ] `ExecutionLedgerEntryV1`: `{ stepId, input, toolResult, assessment, corrected?: boolean, error?: { code, message } }`
+- [ ] `ReviewV1`: `{ comparison: { initial, goal, final, verdict }, heuristics[], walkthrough }`
+- [ ] `ProgressEvent`: `{ stage: "plan"|"execute"|"review", kind, status, data? }`
+
+#### **Event & Streaming Contract — required**
+
+- [ ] UI → Backend: `user_prompt`, `execute_plan`, `request_review`
+- [ ] Backend → UI: `progress_update` (plan/execution/review milestones), `agent_response` (stream/chunk, final)
+- [ ] Bridge passes messages transparently; add source `meta` and `selectionSignature`
+
+#### **Essential Tool Adapters (Plugin) — minimal surface**
+
+- [ ] Observation: `getSelection`, `getNodeSummary`, `getNodesSummary`, `getBoundingBox`, `getReactions`
+- [ ] Navigation/UX: `selectAndReveal`, `scrollAndZoomIntoView`, `showNotification`
+- [ ] Safety & Perf: `withUndoGroup`, `setSkipInvisibleInstanceChildren`, selection subtree guard
+- [ ] Layout: `configureAutoLayout`, `configureChildInAutoLayout`, `alignNodes`, `reorderLayer`, `setConstraints`
+- [ ] Node Ops: `createNode` (Frame/Text/Rectangle), `duplicateNode`, `removeNodes`, `appendChild`, `insertChild`, `setNodeProperties`, `applyStyling`
+- [ ] Components: `createComponent`, `createInstance`, `setComponentProperties`, `swapInstanceComponent`
+- [ ] Prototyping: `createPrototypeInteraction` (uses `setReactionsAsync`), `getReactions`
+- [ ] Text: `loadFont`, `setTextCharacters`, `applyTextStyleRange`, `getStyledTextSegments`
+- [ ] Utilities: `archiveSelectionToPage`, `saveVersionCheckpoint`, `computeSelectionSignature`
+
+> Implementation note: All multi‑step writes must run inside `withUndoGroup(label)`. Text edits must call `loadFont` for all distinct fonts on the target ranges. Under `"documentAccess": "dynamic-page"`, use async node/style APIs and immutable setters (e.g., `setReactionsAsync`).
+
+#### **Global Implementation TODOs (enablement)**
+
+- [ ] Define and version the contracts above in a shared module used by backend and UI/bridge
+- [ ] Implement message router (bridge) that enriches events with `selectionSignature` and forwards streams
+- [ ] Implement selection subtree guard in plugin adapters (reject ops outside subtree or on locked nodes)
+- [ ] Add emoji‑based progress logging at milestones and errors
+- [ ] Provide a minimal UI: tabs for Plan / Execute / Review with live progress area
 
 ---
 
-#### **Phase‑3 Implementation Checklist (Trackable TODOs)**
-
-- [ ] Implement `execute_plan(plan: PlanV1)` orchestrator (backend)
-- [ ] Map execution steps to tool calls (create/modify/apply_style/reorder/prototype)
-- [ ] After each "Act", call `get_node_info`/`get_nodes_info` to Assess target(s)
-- [ ] Implement single corrective attempt per step when assessment fails
-- [ ] Emit `progress_update` per step: `step_started`, `tool_called`, `step_succeeded`/`step_failed`
-- [ ] Maintain an execution ledger with step input, tool results, assessment outcome
-- [ ] Add safety rails: restrict edits to selection subtree; ignore locked/protected nodes
-- [ ] Optional: Archive original selection by duplicating into `…/Archive` page before first edit
-- [ ] UI: Show live progress (current step / total), pause/stop controls, and a ledger view
-- [ ] Error handling: When a tool fails, explain cause and amended plan; continue or stop per policy
-
-##### **Definition of Done (Phase‑3)**
-
-- [ ] Running "Execute plan" performs visible canvas changes aligned with plan steps
-- [ ] Each step is logged with status and any corrective action taken
-- [ ] Execution can be paused and safely resumed within the same session
-- [ ] No edits escape the intended selection subtree; locked nodes are respected
-
-##### **Manual Test Plan (Phase‑3)**
-
-- [ ] Click "Execute plan" on a simple plan (e.g., add padding, create cards)
-- [ ] Watch progress: step count advances; logs show `tool_call` and `step_succeeded`
-- [ ] Manually verify properties (e.g., padding updated to 24px) via Inspector
-- [ ] Intentionally cause a failure (lock a node); confirm step fails gracefully and execution continues/halts per setting
-- [ ] Open the ledger to audit tool inputs/outputs for two steps
-
-
-Use `docs/figma-plugin-api-official-urls-index.md` for property names and types.
-
-#TODO - enable multimodal by adding image export for visual context in context gathering tools. SKipped for now. focus on phase 2.
-
-
-
-### **Phase 2: Strategic Plan Formulation (`formulate_plan`)**
+### **Strategic Plan Formulation (`formulate_plan`)**
 
 **Purpose:** To transform the raw context and the user's request into a detailed, principled, and actionable plan. This simulates a senior designer's thought process, ensuring the solution is not just a literal execution but a well-reasoned improvement.
 
@@ -130,7 +104,7 @@ Use `docs/figma-plugin-api-official-urls-index.md` for property names and types.
     *   Define the prototype triggers and actions.
     *   Specify animations (`Smart Animate`, `Move In`, `Dissolve`) to enhance usability and provide feedback, ensuring they align with the platform's conventions.
 
-7.  **Execution Plan:** Create a step-by-step list of actions to be performed in Phase 3.
+7.  **Execution Plan:** Create a step-by-step list of actions to be performed during execution.
     *   *Example:* "1. Archive old screen. 2. Create new `InsightCard` component. 3. Build component variants for each insight type. 4. Assemble new screen using instances of `InsightCard`. 5. Wire prototype."
 
 8.  **Embedded Best Practices:** These principles guide all planning decisions.
@@ -139,11 +113,42 @@ Use `docs/figma-plugin-api-official-urls-index.md` for property names and types.
     *   **Clarity:** Prioritize clear communication over aesthetic flourish.
     *   **Efficiency:** Create designs that are scalable and easy for developers to build.
 
+
+#### **Planning Implementation Checklist (Trackable TODOs)**
+
+- [ ] Finalize `PlanV1` schema and validators (strict validation with helpful error messages)
+- [ ] Backend: `generate_design_plan(prompt, snapshot, stickyGuidance) -> PlanV1` using OpenAI client 1.99.9
+- [ ] Retry once on schema‑invalid outputs with structured error hints; otherwise fail fast
+- [ ] Cache latest valid plan in session keyed by `selectionSignature` (TTL 30s)
+- [ ] Emit progress events: `plan_started` → `plan_validated` → `plan_persisted` → `plan_completed`
+- [ ] Stream `agent_response` chunks with `{ stage: "plan", kind: "plan" }` to UI; show incremental sections
+- [ ] UI: Render collapsible Plan view mirroring `PlanV1`; actions: Copy / Export as comment / Execute…
+- [ ] Bridge: ensure message passthrough with `selectionSignature` and prompt echo
+- [ ] Guardrails: Disable tool execution during planning; read‑only snapshot access only
+- [ ] Emoji logs at milestones and on validation failures
+
+##### **Definition of Done (Planning)**
+
+- [ ] Entering a prompt yields a well‑structured plan (valid `PlanV1`) without modifying the canvas
+- [ ] Plan is cached (30s TTL) by `selectionSignature` and re‑used if identical
+- [ ] UI clearly shows plan sections and an "Execute plan" button
+- [ ] Progress updates are visible in bridge/agent logs and UI dev console
+
+##### **Manual Test Plan (Planning)**
+
+- [ ] Open plugin and select a frame with at least one STICKY note nearby
+- [ ] Type: "Refactor this into a scannable insights dashboard" and Send
+- [ ] Observe UI shows "Gathering context…" then a structured plan appears
+- [ ] Verify no visual changes occurred on the canvas
+- [ ] Click "Copy plan" and paste to confirm formatting; confirm sections match schema
+ - [ ] Observe emoji progress logs at milestones in bridge/backend consoles
+
 ---
 
-### **Phase 3: Iterative Execution & Assessment (`execute_and_assess`)**
 
-**Purpose:** To systematically execute the plan from Phase 2, using a continuous loop of acting, observing the result, and correcting course as needed.
+### **Iterative Execution & Assessment (`execute_and_assess`)**
+
+**Purpose:** To systematically execute the plan from the planning stage, using a continuous loop of acting, observing the result, and correcting course as needed.
 
 #### **Core Agent Toolset (Figma Actions):**
 
@@ -178,9 +183,64 @@ This is a continuous cycle for each step in the execution plan.
 3.  **Correct:** If the assessment reveals a mismatch between the plan and the result, the agent formulates a corrective action.
     *   *Example:* "Assessment shows the 24px padding makes the text too close to another element. The visual balance is off. **Corrective Action:** I will create a new sub-step in my plan to adjust the spacing property of the parent frame from 16px to 24px to compensate." The agent then initiates a new "Act-Assess-Correct" cycle for this new sub-step.
 
+#### **Essential Execution Tool Mapping (Plan → Adapters)**
+
+- **create_frame** → `createNode('FRAME')` + `configureAutoLayout`
+- **create_component** → `createComponent`
+- **create_instance** → `createInstance`
+- **select** → `setSelection` + `selectAndReveal`
+- **modify_property** → `setNodeProperties` / `configureAutoLayout` / `configureChildInAutoLayout`
+- **apply_style** → `applyStyle` / `applyStyling`
+- **reorder_layer** → `reorderLayer`
+- **prototype_link** → `createPrototypeInteraction` (uses `setReactionsAsync`)
+- **duplicate/delete/group** → `duplicateNode` / `removeNodes` / `group`
+- **text edits** → `loadFont` → `setTextCharacters` / `applyTextStyleRange`
+
+> Always wrap a step’s mutations in `withUndoGroup(step.label)`. Call `scrollAndZoomIntoView` on first affected node per step for UX.
+
+#### **Execution Implementation Checklist (Trackable TODOs)**
+
+- [ ] Implement `execute_plan(plan: PlanV1)` orchestrator (backend)
+- [ ] Map execution steps to adapters above (create/modify/style/reorder/prototype)
+- [ ] After each Act, assess via `getNodeSummary`/`getNodesSummary` vs. expectations
+- [ ] Wrap each step in `withUndoGroup`; commit only when step succeeds; split intentionally with `figma.commitUndo()` when needed
+- [ ] Before text edits, collect fonts via `getStyledTextSegments` and `loadFont` for each
+- [ ] Optional perf: `setSkipInvisibleInstanceChildren(true)` during find/traverse; restore afterward
+- [ ] Dynamic‑page gating: use async getters/setters (`getNodeByIdAsync`, `setReactionsAsync`) where required
+- [ ] Implement single corrective attempt per step when assessment fails
+- [ ] Emit `progress_update` per step: `step_started`, `tool_called`, `step_succeeded`/`step_failed`
+- [ ] Maintain an execution ledger with step input, tool results, assessment outcome
+- [ ] Add safety rails: restrict edits to selection subtree; ignore locked/protected nodes
+- [ ] Optional: Archive original selection by duplicating into `…/Archive` page before first edit
+- [ ] UI: Show live progress (current step / total), pause/stop controls, and a ledger view
+- [ ] Error handling: When a tool fails, explain cause and amended plan; continue or stop per policy
+
+##### **Definition of Done (Execution)**
+
+- [ ] Running "Execute plan" performs visible canvas changes aligned with plan steps
+- [ ] Each step is logged with status and any corrective action taken
+- [ ] Execution can be paused and safely resumed within the same session
+- [ ] No edits escape the intended selection subtree; locked nodes are respected
+ - [ ] Undo history shows one step per execution step unless intentionally split
+
+##### **Manual Test Plan (Execution)**
+
+- [ ] Click "Execute plan" on a simple plan (e.g., add padding, create cards)
+- [ ] Watch progress: step count advances; logs show `tool_call` and `step_succeeded`
+- [ ] Manually verify properties (e.g., padding updated to 24px) via Inspector
+- [ ] Intentionally cause a failure (lock a node); confirm step fails gracefully and execution continues/halts per setting
+- [ ] Open the ledger to audit tool inputs/outputs for two steps
+
+
+Use `docs/figma-plugin-api-official-urls-index.md` for property names and types.
+
+#TODO - enable multimodal by adding image export for visual context in context gathering tools. Skipped for now. Focus on planning.
+
 ---
 
-### **Phase 4: Final Review & Quality Assurance (`perform_review`)**
+
+
+### **Final Review & Quality Assurance (`perform_review`)**
 
 **Purpose:** To conduct a final, holistic evaluation of the completed design against the original goals, established UX principles, and the perspective of the end-user.
 
@@ -215,7 +275,7 @@ This is a continuous cycle for each step in the execution plan.
 
 
 
-#### **Phase‑4 Implementation Checklist (Trackable TODOs)**
+#### **Final Review Implementation Checklist (Trackable TODOs)**
 
 - [ ] Capture `before` and `after` contexts (`gather_full_context`) for the affected frames
 - [ ] Generate a structured comparison (Initial State, Goal, Final State, Verdict)
@@ -224,47 +284,19 @@ This is a continuous cycle for each step in the execution plan.
 - [ ] Stream review as `agent_response` with `{ phase: 4, kind: "review" }`
 - [ ] UI: Add Review tab with sections (Comparison, Heuristics, Walkthrough)
 - [ ] Optional: Post summary as Figma comment on the primary frame
+ - [ ] Define `ReviewV1` schema and validate prior to streaming
+ - [ ] Provide quick link action to open DS documentation via `openExternal`
 
-##### **Definition of Done (Phase‑4)**
+##### **Definition of Done (Final Review)**
 
-- [ ] Review clearly relates back to the stated goal from Phase‑2
+- [ ] Review clearly relates back to the stated goal from planning
 - [ ] At least one concrete improvement or affirmation is documented per major section
 - [ ] The Review tab renders without JSON or formatting errors
 
-##### **Manual Test Plan (Phase‑4)**
+##### **Manual Test Plan (Final Review)**
 
 - [ ] After execution, select the modified frame and request "Final review"
 - [ ] Confirm comparison references the correct frames and lists key changes
 - [ ] Check at least three heuristic questions are answered with specifics
 - [ ] Read the persona narrative for coherence and relevance
 
-
----
-
-### **Appendix A: Delivery Infrastructure & Chat Sessions Roadmap**
-
-These items support the phases above by improving session lifecycle, reliability, and observability. See `docs/features-future.md` for background.
-
-#### **Milestone A — `channelId` vs `chatId` separation**
-
-- [ ] Generate crypto‑random `channelId` per run; do not reuse across chats
-- [ ] Introduce durable `chatId`; persist memory by `chatId` (SQLite/Postgres)
-- [ ] Add "New Chat" UI to allocate `{ chatId, channelId }` and clear transcript
-
-#### **Milestone B — Chat history APIs & UI**
-
-- [ ] Add server `messages` table and CRUD endpoints
-- [ ] Implement Chat List UI (titles, updatedAt, resume)
-- [ ] Rehydrate transcript on resume; create fresh `channelId` bound to existing `chatId`
-
-#### **Milestone C — Agent auto‑discovery/handshake**
-
-- [ ] Implement Registry API (Approach 2) or Orchestrator (Approach 1)
-- [ ] On plugin start/resume, request/claim agent join; verify protocol version
-
-#### **Milestone D — Hardening & Observability**
-
-- [ ] Join tokens, rate‑limits, minimal user identity
-- [ ] Per‑chat logs, token/latency metrics, tool‑outcome analytics
-- [ ] Lifecycle cleanup for stale channels/registry entries
-   

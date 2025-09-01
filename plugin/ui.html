@@ -441,6 +441,7 @@
               <path stroke-linecap="round" stroke-linejoin="round" d="M4.5 12h15m0 0l-6.75-6.75M19.5 12l-6.75 6.75"></path>
             </svg>
           </button>
+          
           <span class="char-counter" id="charCounter"></span>
         </div>
       </div>
@@ -452,18 +453,18 @@
         connected: false,
         socket: null,
         serverPort: 3055,
-        pendingRequests: new Map(),
         channel: null,
       };
 
-      // Phase-1 snapshot cache
+      // Selections context cache
       const snapshotCache = {
         document: null, // { pageId, pageName }
         last: null,      // { selectionSignature, selectionSummary, document, ts }
         latestSig: null,
-        lastSnapshot: null // { snapshot, ts }
+        lastSnapshot: null // { snapshot, mode, ts }
       };
-      const SNAPSHOT_TTL_MS = 30000;
+      const SNAPSHOT_TTL_MS = 60000;
+      const DEFAULT_SELECTIONS_MODE = 'complete'; // 'snapshot' | 'complete'
 
       // Reconnect/heartbeat config
       const HEARTBEAT_INTERVAL = 30000; // 30s
@@ -482,6 +483,8 @@
       // Streaming state
       let currentStreamingContentEl = null;
       let acceptingStream = false;
+      let streamedAnyChunks = false;
+      let startNewAssistantBlockAfterTool = false;
       let uiStartTs = Date.now();
 
       // Status messages
@@ -516,7 +519,7 @@
         // Close socket on UI unload to avoid stale sessions
         window.addEventListener('beforeunload', () => cleanupConnection('unload'));
 
-        // Notify plugin that UI is ready to receive initial snapshot
+        // Notify plugin UI is ready (document info only; no selection traffic)
         try {
           parent.postMessage({ pluginMessage: { type: 'ui_ready' } }, '*');
         } catch (e) {
@@ -557,19 +560,7 @@
         chatContainer.scrollTop = chatContainer.scrollHeight;
       }
 
-      function updateStatusText(text) {
-        const statusIndicator = document.getElementById('statusIndicator');
-        if (!statusIndicator) return;
-        const statusText = statusIndicator.querySelector('.status-text');
-        if (!statusText) return;
-        statusText.style.opacity = '0';
-        statusText.style.transition = 'opacity 0.15s ease-out';
-        setTimeout(() => {
-          statusText.textContent = text;
-          statusText.style.opacity = '1';
-          statusText.style.transition = 'opacity 0.2s ease-in';
-        }, 150);
-      }
+      
 
       function removeStatusIndicator(immediate = false) {
         const el = document.getElementById('statusIndicator');
@@ -581,6 +572,151 @@
         el.style.opacity = '0';
         el.style.transition = 'opacity 0.2s ease-out';
         setTimeout(() => el.remove(), 200);
+      }
+
+      // Tool status lines handling
+      const toolStatusLines = new Map(); // id -> { el, spinnerEl, textEl, iconEl, command, type }
+      let contextGroup = null; // { line: {...}, pendingIds: Set<string>, failed: boolean, open: boolean }
+
+      const TOOL_COPY_OVERRIDES = {
+        'gather_context': 'Gathering context…',
+        'get_selection_context': 'Gathering context…',
+        'get_selection_snapshot': 'Capturing selection snapshot…',
+        'scan_text_nodes': 'Scanning text…',
+        'scan_nodes': 'Scanning layers…',
+        'scan_styles': 'Scanning styles…',
+        'measure_layout': 'Measuring layout…',
+        'update_colors': 'Updating colors…',
+        'apply_color_updates': 'Updating colors…'
+      };
+
+      const CONTEXT_TOOL_HINTS = ['context', 'scan', 'snapshot', 'selection', 'inspect'];
+
+      function isContextTool(command) {
+        const c = (command || '').toLowerCase();
+        if (TOOL_COPY_OVERRIDES[c] && TOOL_COPY_OVERRIDES[c].toLowerCase().includes('context')) return true;
+        return CONTEXT_TOOL_HINTS.some((hint) => c.includes(hint));
+      }
+
+      function humanizeToolAction(command) {
+        if (!command) return 'Running tool…';
+        const c = (command || '').toLowerCase();
+        if (TOOL_COPY_OVERRIDES[c]) return TOOL_COPY_OVERRIDES[c];
+        const words = c.replace(/[_-]+/g, ' ').split(' ').filter(Boolean);
+        if (words.length === 0) return 'Running tool…';
+        const verb = words[0];
+        const rest = words.slice(1).join(' ');
+        const ingMap = {
+          'get': 'Getting',
+          'fetch': 'Fetching',
+          'scan': 'Scanning',
+          'gather': 'Gathering',
+          'update': 'Updating',
+          'apply': 'Applying',
+          'set': 'Setting',
+          'rename': 'Renaming',
+          'measure': 'Measuring',
+          'analyze': 'Analyzing',
+          'inspect': 'Inspecting',
+          'create': 'Creating',
+          'delete': 'Deleting',
+          'find': 'Finding',
+          'compute': 'Computing',
+          'generate': 'Generating',
+          'export': 'Exporting',
+          'replace': 'Replacing'
+        };
+        if (ingMap[verb]) {
+          return `${ingMap[verb]} ${rest || ''}`.trim() + '…';
+        }
+        return `Running ${words.join(' ')}…`;
+      }
+
+      function createToolStatusLine(text) {
+        const statusDiv = document.createElement('div');
+        statusDiv.className = 'status-indicator';
+        const spinner = document.createElement('div');
+        spinner.className = 'spinner';
+        const statusText = document.createElement('div');
+        statusText.className = 'status-text';
+        statusText.textContent = text;
+        statusDiv.appendChild(spinner);
+        statusDiv.appendChild(statusText);
+        chatContainer.appendChild(statusDiv);
+        chatContainer.scrollTop = chatContainer.scrollHeight;
+        return { el: statusDiv, spinnerEl: spinner, textEl: statusText, iconEl: null };
+      }
+
+      function completeToolStatusLine(line, ok) {
+        if (!line || !line.el) return;
+        try {
+          if (line.spinnerEl && line.spinnerEl.parentNode) line.spinnerEl.remove();
+          if (!line.iconEl) {
+            const icon = document.createElement('div');
+            icon.className = 'status-icon';
+            icon.textContent = ok ? '✅' : '❌';
+            line.el.insertBefore(icon, line.textEl);
+            line.iconEl = icon;
+          } else {
+            line.iconEl.textContent = ok ? '✅' : '❌';
+          }
+        } catch (_) {}
+      }
+
+      function updateToolStatusLineTextById(id, text) {
+        if (!id || !text) return;
+        const entry = toolStatusLines.get(id);
+        if (entry && entry.textEl) {
+          entry.textEl.textContent = text;
+          chatContainer.scrollTop = chatContainer.scrollHeight;
+          return true;
+        }
+        if (contextGroup && contextGroup.open && contextGroup.pendingIds.has(id)) {
+          if (contextGroup.line && contextGroup.line.textEl) {
+            contextGroup.line.textEl.textContent = text;
+            chatContainer.scrollTop = chatContainer.scrollHeight;
+            return true;
+          }
+        }
+        return false;
+      }
+
+      function sanitizeAgentTextChunk(text) {
+        if (!text) return text;
+        try {
+          // Remove common raw JSON payloads for tools/params
+          const jsonLike = /\{[^{}]*\b(node_id|parent_id|params|types|width|height|x|y|r|g|b|a|radius|text|font_size|font_weight|layout_mode|name|smart_strategy|id)\b[^{}]*\}/g;
+          let cleaned = text.replace(jsonLike, '').replace(/\s+/g, ' ');
+          // Drop tool status chatter lines from model output
+          const lines = cleaned.split(/\n+/).filter((ln) => {
+            const l = ln.trim();
+            if (!l) return false;
+            if (/tool_called|step_succeeded|step_failed/i.test(l)) return false;
+            if (/^([✅❌🛠️])/u.test(l)) return false;
+            return true;
+          });
+          return lines.join('\n');
+        } catch (_) {
+          return text;
+        }
+      }
+
+      function ensureContextGroup() {
+        if (contextGroup && contextGroup.open) return contextGroup;
+        const line = createToolStatusLine('Gathering context…');
+        contextGroup = { line, pendingIds: new Set(), failed: false, open: true, createdAt: Date.now() };
+        return contextGroup;
+      }
+
+      function resolveContextTool(id, success) {
+        if (!contextGroup || !contextGroup.open) return;
+        contextGroup.pendingIds.delete(id);
+        if (!success) contextGroup.failed = true;
+        if (contextGroup.pendingIds.size === 0) {
+          completeToolStatusLine(contextGroup.line, !contextGroup.failed);
+          contextGroup.open = false;
+          setTimeout(() => { contextGroup = null; }, 10000);
+        }
       }
 
       function showError(message) {
@@ -657,79 +793,57 @@
         // Begin accepting a new stream for this prompt
         acceptingStream = true;
         currentStreamingContentEl = null;
+        streamedAnyChunks = false;
+        startNewAssistantBlockAfterTool = false;
 
-        // Attempt a very short warmup if no snapshot yet (first-run race)
-        const now = Date.now();
-        if ((!snapshotCache.last || (now - snapshotCache.last.ts) > SNAPSHOT_TTL_MS) && (now - uiStartTs) < 2000) {
-          try {
-            let resolved = false;
-            const waitForSummary = new Promise((resolve) => {
-              const listener = (event) => {
-                const msg = event.data && event.data.pluginMessage;
-                if (msg && (msg.type === 'selection_summary' || msg.type === 'document_info')) {
-                  resolved = true;
-                  window.removeEventListener('message', listener);
-                  resolve(true);
-                }
-              };
-              window.addEventListener('message', listener);
-            });
-            parent.postMessage({ pluginMessage: { type: 'request_selection_summary' } }, '*');
-            await Promise.race([
-              waitForSummary,
-              new Promise((r) => setTimeout(r, 200))
-            ]);
-          } catch (e) {
-            // ignore warmup errors
-          }
-        }
+        // No warmup selection traffic; selections are requested only when user sends
 
-        // Build or reuse snapshot (30s TTL) keyed by selectionSignature
-        async function requestSnapshotFromPlugin() {
+        // Build or reuse selections_context (30s TTL) keyed by selectionSignature
+        async function requestSelectionsContextFromPlugin(mode = DEFAULT_SELECTIONS_MODE) {
           return new Promise((resolve, reject) => {
             const timeout = setTimeout(() => {
               window.removeEventListener('message', listener);
-              reject(new Error('snapshot_timeout'));
-            }, 1500);
+              reject(new Error('selections_context_timeout'));
+            }, 6000);
             const listener = (event) => {
               const msg = event.data && event.data.pluginMessage;
               if (!msg) return;
-              if (msg.type === 'phase1_snapshot') {
+              if (msg.type === 'selections_context') {
                 clearTimeout(timeout);
                 window.removeEventListener('message', listener);
-                // Cache snapshot and indexes
-                snapshotCache.lastSnapshot = { snapshot: msg.snapshot, ts: Date.now() };
-                snapshotCache.latestSig = (msg.snapshot && msg.snapshot.selectionSignature) || snapshotCache.latestSig;
-                snapshotCache.document = (msg.snapshot && msg.snapshot.document) || snapshotCache.document;
+                const result = msg.result;
+                snapshotCache.lastSnapshot = { snapshot: result, mode, ts: Date.now() };
+                snapshotCache.latestSig = (result && result.selectionSignature) || snapshotCache.latestSig;
+                snapshotCache.document = (result && result.document) || snapshotCache.document;
                 snapshotCache.last = {
-                  selectionSignature: msg.snapshot.selectionSignature,
-                  selectionSummary: msg.snapshot.selectionSummary,
-                  document: msg.snapshot.document || snapshotCache.document || null,
+                  selectionSignature: result.selectionSignature,
+                  selectionSummary: result.selectionSummary,
+                  document: result.document || snapshotCache.document || null,
                   ts: Date.now()
                 };
                 removeStatusIndicator(true);
-                resolve(msg.snapshot);
-              } else if (msg.type === 'phase1_snapshot_error') {
+                resolve(result);
+              } else if (msg.type === 'selections_context_error') {
                 clearTimeout(timeout);
                 window.removeEventListener('message', listener);
                 removeStatusIndicator(true);
-                reject(new Error(msg.error || 'snapshot_error'));
+                reject(new Error(msg.error || 'selections_context_error'));
               }
             };
             window.addEventListener('message', listener);
-            parent.postMessage({ pluginMessage: { type: 'build_phase1_snapshot' } }, '*');
+            parent.postMessage({ pluginMessage: { type: 'request_selections_context', mode } }, '*');
           });
         }
 
         let snapshot = undefined;
         const latestSig = snapshotCache.latestSig || (snapshotCache.last && snapshotCache.last.selectionSignature) || null;
-        const haveExact = snapshotCache.lastSnapshot && snapshotCache.lastSnapshot.snapshot && (snapshotCache.lastSnapshot.snapshot.selectionSignature === latestSig) && ((Date.now() - snapshotCache.lastSnapshot.ts) <= SNAPSHOT_TTL_MS);
+        const haveExact = snapshotCache.lastSnapshot && snapshotCache.lastSnapshot.snapshot && (snapshotCache.lastSnapshot.snapshot.selectionSignature === latestSig) && (snapshotCache.lastSnapshot.mode === DEFAULT_SELECTIONS_MODE) && ((Date.now() - snapshotCache.lastSnapshot.ts) <= SNAPSHOT_TTL_MS);
         if (haveExact) {
           snapshot = snapshotCache.lastSnapshot.snapshot;
         } else {
           showStatusIndicator('Gathering context…');
           try {
-            snapshot = await requestSnapshotFromPlugin();
+            snapshot = await requestSelectionsContextFromPlugin(DEFAULT_SELECTIONS_MODE);
           } catch (e) {
             // Proceed without snapshot on failure
           } finally {
@@ -744,6 +858,7 @@
         // Show thinking status until streaming begins
         showStatusIndicator(getStatusMessage('thinking'));
       }
+
 
       // Bridge/WebSocket
       function generateChannelId() {
@@ -788,7 +903,13 @@
                   acceptingStream = false;
                   currentStreamingContentEl = null;
                 } else if (typeof data.message === 'string') {
-                  addMessage('assistant', data.message);
+                  // Swallow model/tool status chatter injected as system lines
+                  const msg = (data.message || '').trim();
+                  if (/tool_called|step_succeeded|step_failed/i.test(msg) || /^([✅❌🛠️])/u.test(msg)) {
+                    return;
+                  }
+                  // Otherwise show as assistant line
+                  addMessage('assistant', msg);
                 }
               } else if (data.type === 'agent_response_chunk') {
                 if (!acceptingStream) {
@@ -796,22 +917,35 @@
                   return;
                 }
                 removeStatusIndicator(true);
+                if (startNewAssistantBlockAfterTool) {
+                  // Ensure following content appears after any tool status lines
+                  currentStreamingContentEl = null;
+                  startNewAssistantBlockAfterTool = false;
+                }
                 if (!currentStreamingContentEl) {
                   currentStreamingContentEl = addMessage('assistant', '');
                 }
-                currentStreamingContentEl.textContent += data.chunk || '';
+                const sanitized = sanitizeAgentTextChunk(data.chunk || '');
+                if (sanitized) {
+                  currentStreamingContentEl.textContent += sanitized;
+                  streamedAnyChunks = true;
+                }
                 chatContainer.scrollTop = chatContainer.scrollHeight;
               } else if (data.type === 'agent_response') {
                 if (!acceptingStream) {
                   // Ignore stray responses not tied to the current prompt
                   return;
                 }
-                const text = data.prompt || '';
+                const text = sanitizeAgentTextChunk(data.prompt || '');
                 if (data.is_final) {
-                  if (currentStreamingContentEl) {
+                  // If we streamed chunks already, don't overwrite; otherwise render final text
+                  if (!streamedAnyChunks) {
+                    if (!currentStreamingContentEl) {
+                      currentStreamingContentEl = addMessage('assistant', '');
+                    }
                     currentStreamingContentEl.textContent = text;
-                    currentStreamingContentEl = null;
                   }
+                  currentStreamingContentEl = null;
                   acceptingStream = false;
                   removeStatusIndicator(true);
                 } else {
@@ -824,8 +958,27 @@
                 }
                 const ts = new Date().toISOString();
                 console.log(`[${ts}] tool_call`, data);
-                addMessage('assistant', `Executing: ${data.command} (ID: ${data.id})`);
+                const friendlyText = humanizeToolAction(data.command);
+                if (isContextTool(data.command)) {
+                  const group = ensureContextGroup();
+                  group.pendingIds.add(data.id);
+                } else {
+                  const statusLine = createToolStatusLine(friendlyText);
+                  toolStatusLines.set(data.id, { ...statusLine, command: data.command, type: 'single' });
+                }
+                // Ensure subsequent streamed text appears after this status line block
+                if (acceptingStream) {
+                  startNewAssistantBlockAfterTool = true;
+                }
                 parent.postMessage({ pluginMessage: { type: 'tool_call', id: data.id, command: data.command, params: data.params } }, '*');
+              } else if (data.type === 'progress_update') {
+                // Route progress updates into the existing muted status line, not separate chat messages
+                const id = data.id || data.message?.id || data.message?.commandId;
+                const msg = data.message?.message || data.message?.status || 'Working…';
+                if (!updateToolStatusLineTextById(id, msg)) {
+                  // If we cannot map to a specific tool line, fall back to a transient global indicator
+                  showStatusIndicator(msg);
+                }
               } else if (data.type === 'error') {
                 showError(data.message || 'Bridge error');
                 if (!state.connected) {
@@ -950,16 +1103,21 @@
             break;
           }
           case 'selection_summary': {
-            const doc = message.document || snapshotCache.document || null;
-            snapshotCache.last = {
-              selectionSignature: message.selectionSignature,
-              selectionSummary: message.selectionSummary,
-              document: doc,
-              ts: Date.now()
-            };
-            snapshotCache.latestSig = message.selectionSignature;
+            // Keep latest selection signature so cache invalidates on selection change
+            try {
+              if (message.selectionSignature) {
+                snapshotCache.latestSig = message.selectionSignature;
+                snapshotCache.last = {
+                  selectionSignature: message.selectionSignature,
+                  selectionSummary: message.selectionSummary || null,
+                  document: message.document || snapshotCache.document || null,
+                  ts: Date.now()
+                };
+              }
+            } catch (_) {}
             break;
           }
+          
           case 'connection-status': {
             if (message.connected) {
               hideError();
@@ -996,22 +1154,34 @@
             const ts = new Date().toISOString();
             console.log(`[${ts}] tool_response`, message);
             if (state.connected && state.socket) {
-              const toolResponse = { type: 'tool_response', id: message.id, result: message.result, error: message.error };
-              state.socket.send(JSON.stringify(toolResponse));
-              if (message.error) {
-                showError(`Tool failed: ${message.error}`);
+              const isFailure = message && message.result && typeof message.result === 'object' && message.result.success === false;
+              const toolResponse = { type: 'tool_response', id: message.id };
+              if (message.error || isFailure) {
+                toolResponse.error = message.error || (message.result && message.result.message) || 'Tool reported failure';
               } else {
-                addMessage('assistant', `Tool completed (ID: ${message.id})`);
+                toolResponse.result = message.result;
+              }
+              state.socket.send(JSON.stringify(toolResponse));
+              const failed = Boolean(message.error) || Boolean(isFailure);
+              if (contextGroup && contextGroup.open && contextGroup.pendingIds.has(message.id)) {
+                resolveContextTool(message.id, !failed);
+              } else {
+                const entry = toolStatusLines.get(message.id);
+                if (entry) {
+                  completeToolStatusLine(entry, !failed);
+                  setTimeout(() => { toolStatusLines.delete(message.id); }, 10000);
+                }
               }
             }
             break;
           }
           case 'command_progress': {
-            // Map progress to status indicator
-            const text = message.message || 'Operation in progress';
-            showStatusIndicator(text);
+            // Update the existing tool status line instead of creating a separate spinner
+            const text = message.message || message.status || 'Working…';
+            const id = message.commandId || message.id;
+            const updated = updateToolStatusLineTextById(id, text);
             sendProgressUpdateToServer(message);
-            if (message.status === 'completed') {
+            if (!updated && message.status === 'completed') {
               setTimeout(() => removeStatusIndicator(), 600);
             }
             break;

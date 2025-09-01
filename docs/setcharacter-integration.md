@@ -13,11 +13,11 @@ Currently, a significant capabilities gap exists between the frontend utility an
 - **`backend/figma_tools.py`:** The `set_text_content` tool (line 614) is defined with only `node_id` and `text` parameters. It is completely unaware of the "smart strategies" available on the frontend.
 - **Agent (LLM):** The agent has no knowledge of this capability and cannot request it.
 
-This plan will bridge this gap in three phases.
+This plan will bridge this gap in three stages.
 
 ## 3. Implementation Plan
 
-### Phase 1: Backend - Exposing the Capability
+### Stage 1: Backend - Exposing the Capability
 
 We will start by updating the agent's tool definition in `backend/figma_tools.py` to make it aware of the new functionality.
 
@@ -90,7 +90,7 @@ async def set_text_content(
     # ...
 ```
 
-### Phase 2: Frontend - Plumbing the Parameters
+### Stage 2: Frontend - Plumbing the Parameters
 
 Next, we will modify the plugin command handler to accept and use the new `smartStrategy` parameter.
 
@@ -129,7 +129,7 @@ async function setTextContent(params) {
 }
 ```
 
-### Phase 3: Agent - Teaching the Skill
+### Stage 3: Agent - Teaching the Skill
 
 Finally, we need to instruct the agent on *when* and *why* to use this new capability. Simply exposing the tool is not enough; we must guide its reasoning.
 

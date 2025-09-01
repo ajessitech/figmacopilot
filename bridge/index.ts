@@ -714,6 +714,43 @@ export function assertSetStrokeColorParams(input: unknown): asserts input is Set
   SetStrokeColorParamsSchema.parse(input);
 }
 
+// Typed façade and schema for set_corner_radius
+export interface SetCornerRadiusParams {
+  nodeId: string;
+  radius: number;
+  corners?: [boolean, boolean, boolean, boolean];
+}
+export interface SetCornerRadiusResult {
+  success: true;
+  summary: string;
+  modifiedNodeIds: string[];
+  id: string;
+  name: string;
+  cornerRadius?: number;
+  topLeftRadius?: number;
+  topRightRadius?: number;
+  bottomRightRadius?: number;
+  bottomLeftRadius?: number;
+}
+export const SetCornerRadiusParamsSchema = z
+  .object({
+    nodeId: z.string(),
+    radius: z.number().min(0),
+    corners: z.tuple([z.boolean(), z.boolean(), z.boolean(), z.boolean()]).optional()
+  })
+  .strict();
+export function isSetCornerRadiusParams(input: unknown): input is SetCornerRadiusParams {
+  try {
+    SetCornerRadiusParamsSchema.parse(input);
+    return true;
+  } catch {
+    return false;
+  }
+}
+export function assertSetCornerRadiusParams(input: unknown): asserts input is SetCornerRadiusParams {
+  SetCornerRadiusParamsSchema.parse(input);
+}
+
 // Typed façade and schema for set_gradient_fill
 export interface GradientStop { position: number; color: RGBA }
 export type GradientType = "GRADIENT_LINEAR" | "GRADIENT_RADIAL" | "GRADIENT_ANGULAR" | "GRADIENT_DIAMOND";
@@ -840,36 +877,6 @@ export function isDeleteNodeParams(input: unknown): input is DeleteNodeParams {
 }
 export function assertDeleteNodeParams(input: unknown): asserts input is DeleteNodeParams {
   DeleteNodeParamsSchema.parse(input);
-}
-
-// Typed façade and schema for set_corner_radius
-export interface SetCornerRadiusParams { 
-  nodeId: string; 
-  radius: number; 
-  corners?: [boolean, boolean, boolean, boolean]; // [topLeft, topRight, bottomRight, bottomLeft]
-}
-export interface SetCornerRadiusResult { 
-  success: true; 
-  summary: string; 
-  modifiedNodeIds: string[];
-  id: string;
-  name: string;
-  cornerRadius?: number;
-  topLeftRadius?: number;
-  topRightRadius?: number;
-  bottomRightRadius?: number;
-  bottomLeftRadius?: number;
-}
-export const SetCornerRadiusParamsSchema = z.object({ 
-  nodeId: z.string(), 
-  radius: z.number().min(0), 
-  corners: z.tuple([z.boolean(), z.boolean(), z.boolean(), z.boolean()]).optional() 
-}).strict();
-export function isSetCornerRadiusParams(input: unknown): input is SetCornerRadiusParams {
-  try { SetCornerRadiusParamsSchema.parse(input); return true; } catch { return false; }
-}
-export function assertSetCornerRadiusParams(input: unknown): asserts input is SetCornerRadiusParams {
-  SetCornerRadiusParamsSchema.parse(input);
 }
 
 const PORT = 3055;
@@ -1085,6 +1092,13 @@ function validateMessage(data: any): data is Message {
           SetStrokeColorParamsSchema.parse(data.params);
         } catch (e) {
           log("warn", "Invalid params for set_stroke_color", { error: (e as Error).message });
+          return false;
+        }
+      } else if (data.command === "set_corner_radius") {
+        try {
+          SetCornerRadiusParamsSchema.parse(data.params);
+        } catch (e) {
+          log("warn", "Invalid params for set_corner_radius", { error: (e as Error).message });
           return false;
         }
       } else if (data.command === "set_gradient_fill") {

@@ -993,79 +993,92 @@ async def set_stroke_color(
         })
 
 @function_tool
-async def set_corner_radius(node_id: str, radius: float, corners: Optional[List[bool]] = None) -> str:
-    """{
+async def set_corner_radius(
+    node_id: str, 
+    radius: int, 
+    corners: Optional[List[bool]] = None
+) -> str:
+    """
+    {
       "category": "style",
       "mutates_canvas": true,
-      "description": "Sets corner radius for a supported node type, with optional per-corner control.",
-      "when_to_use": "Apply rounded corners per design tokens or specific corner styling.",
-      "when_not_to_use": "Node doesn't support corner radius or complex corner smoothing needed.",
+      "description": "Sets uniform or individual corner radii for a supported node type.",
+      "when_to_use": "Apply rounded corners to frames, rectangles, or components.",
+      "when_not_to_use": "Node types that don't support corner radius (e.g., text, lines).",
       "parameters": {
-        "node_id": { "type": "string", "required": true, "notes": "ID of the target node" },
-        "radius": { "type": "number", "required": true, "notes": "Corner radius in pixels, must be non-negative" },
-        "corners": { "type": "boolean[]", "required": false, "notes": "[topLeft, topRight, bottomRight, bottomLeft] - which corners to apply radius to" }
+        "node_id": { "type": "string", "required": true, "notes": "ID of the node to modify" },
+        "radius": { "type": "number", "required": true, "notes": "Corner radius in pixels (min: 0)" },
+        "corners": { "type": "boolean[]", "required": false, "notes": "[topLeft, topRight, bottomRight, bottomLeft] - set individual corners if provided" }
       },
-      "returns": "Success payload with modifiedNodeIds and corner radius details",
+      "returns": "JSON with {success, summary, modifiedNodeIds, id, name, cornerRadius?, topLeftRadius?, topRightRadius?, bottomRightRadius?, bottomLeftRadius?}",
       "hints": [
-        "Use design token values (4, 8, 12, 16) for consistency",
-        "Check auto-layout clipping if content overflows rounded corners",
-        "Individual corner support varies by node type"
+        "Use token values (e.g., 4/8/12) for consistency.",
+        "Check auto-layout clipping if content overflows rounded corners.",
+        "Radius larger than min(width,height)/2 may flatten shape."
       ],
       "pitfalls": [
-        "Unsupported node types will error with unsupported_node_type",
-        "Radius larger than min(width,height)/2 may flatten the shape",
-        "Setting different per-corner radii makes cornerRadius return mixed"
+        "Setting different per-corner radii makes cornerRadius return 'mixed'.",
+        "Not all node types support individual corner radii.",
+        "Corners array must have exactly 4 boolean values if provided."
       ],
       "errors": [
-        "missing_node_id — Provide a valid node ID string",
-        "missing_radius — Provide a numeric radius value",
-        "invalid_radius — Use non-negative numbers only",
-        "invalid_corners — Use array of 4 boolean values if provided",
-        "node_not_found — Check node exists and is accessible",
-        "unsupported_node_type — Use on Rectangle, Frame, or similar nodes",
-        "locked_node — Unlock the node before modifying",
-        "unknown_plugin_error — Check plugin connection and retry"
+        "missing_node_id — Provide the nodeId parameter",
+        "missing_radius — Provide the radius parameter",
+        "node_not_found — Verify nodeId exists or use get_selection",
+        "unsupported_node_type — Use only on frames, rectangles, or components"
       ],
-      "side_effects": ["Modifies node.cornerRadius and/or individual corner radius properties"],
+      "side_effects": ["Mutates corner radii on the node (uniform or per-corner)."],
       "limits": [
-        "Only works with Rectangle, Frame, and similar geometric nodes",
-        "Individual corner support depends on node type capabilities",
-        "Cannot set corner smoothing (use separate tool if needed)"
+        "Per-corner radii only applied when node supports per-corner properties.",
+        "Cannot set negative radius values.",
+        "Extremely large radii may produce unexpected results."
       ],
       "preconditions": [
-        "Target node exists and supports corner radius property",
-        "Node is not locked and can be modified"
+        "Node must exist and support corner radius property.",
+        "Radius must be a non-negative number."
       ],
       "postchecks": [
-        "modifiedNodeIds contains the target node ID",
-        "node.cornerRadius reflects the applied radius (or mixed for individual corners)"
+        "Modified node has updated corner radius values.",
+        "Return payload includes all applicable radius properties."
       ],
-      "agent_chaining": ["set_fill_color", "set_stroke_color"],
-      "related_tools": ["set_fill_color", "set_stroke_color", "create_rectangle"],
+      "agent_chaining": ["Combine with create_rectangle and set_fill_color for cards/buttons."],
+      "related_tools": ["create_rectangle", "set_fill_color", "set_stroke_color"],
       "example_params": { "node_id": "12:34", "radius": 8, "corners": [true, true, false, false] }
-    }"""
+    }
+    """
     try:
-        logger.info(f"📐 set_corner_radius: node_id={node_id}, radius={radius}, corners={corners}")
-
-        params: Dict[str, Any] = {
+        logger.info(f"📐 Setting corner radius for node {node_id} to {radius}px")
+        
+        params = {
             "nodeId": node_id,
             "radius": radius
         }
         
+        # Add corners parameter if provided
         if corners is not None:
+            if not isinstance(corners, list) or len(corners) != 4:
+                raise ToolExecutionError({
+                    "code": "invalid_corners_array",
+                    "message": "Corners array must contain exactly 4 boolean values",
+                    "details": {"corners": corners}
+                })
             params["corners"] = corners
         
         result = await send_command("set_corner_radius", params)
         return _to_json_string(result)
         
     except ToolExecutionError:
+        # Re-raise tool execution errors so the Agent SDK can handle them properly
+        logger.error(f"❌ Tool execution failed for set_corner_radius with params: {params}")
         raise
     except Exception as e:
-        logger.error(f"❌ Communication/system error in set_corner_radius: {str(e)}")
+        # Handle communication/system errors
+        error_msg = f"Failed to set corner radius due to system error: {str(e)}"
+        logger.error(error_msg)
         raise ToolExecutionError({
             "code": "communication_error",
-            "message": f"Failed to set corner radius: {str(e)}",
-            "details": {"command": "set_corner_radius", "nodeId": node_id, "radius": radius}
+            "message": error_msg,
+            "details": {"command": "set_corner_radius", "nodeId": node_id}
         })
 
 # === LAYOUT TOOLS ===

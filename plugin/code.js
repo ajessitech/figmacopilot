@@ -645,7 +645,6 @@ async function handleCommand(command, params) {
     // case "get_team_components":
     //   return await getTeamComponents();
 
-
     case "set_text_content":
       return await setTextContent(params);
     case "clone_node":
@@ -3727,102 +3726,93 @@ function customBase64Encode(bytes) {
 async function setCornerRadius(params) {
   const { nodeId, radius, corners } = params || {};
 
-  try {
-    // Parameter validation
-    if (!nodeId || typeof nodeId !== "string") {
-      logger.error("❌ set_corner_radius failed", { code: "missing_node_id", originalError: "Missing or invalid nodeId parameter", details: { nodeId } });
-      throw new Error(JSON.stringify({ code: "missing_node_id", message: "Missing or invalid nodeId parameter", details: { nodeId } }));
-    }
-
-    if (radius === undefined || radius === null) {
-      logger.error("❌ set_corner_radius failed", { code: "missing_radius", originalError: "Missing radius parameter", details: { radius } });
-      throw new Error(JSON.stringify({ code: "missing_radius", message: "Missing radius parameter", details: { radius } }));
-    }
-
-    const numRadius = toNumber(radius, NaN);
-    if (!Number.isFinite(numRadius) || numRadius < 0) {
-      logger.error("❌ set_corner_radius failed", { code: "invalid_radius", originalError: "radius must be a non-negative number", details: { radius } });
-      throw new Error(JSON.stringify({ code: "invalid_radius", message: "radius must be a non-negative number", details: { radius } }));
-    }
-
-    // Validate corners parameter if provided
-    if (corners !== undefined) {
-      if (!Array.isArray(corners) || corners.length !== 4) {
-        logger.error("❌ set_corner_radius failed", { code: "invalid_corners", originalError: "corners must be an array of 4 boolean values", details: { corners } });
-        throw new Error(JSON.stringify({ code: "invalid_corners", message: "corners must be an array of 4 boolean values [topLeft, topRight, bottomRight, bottomLeft]", details: { corners } }));
-      }
-      if (!corners.every(c => typeof c === "boolean")) {
-        logger.error("❌ set_corner_radius failed", { code: "invalid_corners", originalError: "all corner values must be boolean", details: { corners } });
-        throw new Error(JSON.stringify({ code: "invalid_corners", message: "all corner values must be boolean", details: { corners } }));
-      }
-    }
-
-    // Get node
-    const node = await figma.getNodeByIdAsync(nodeId);
-    if (!node) {
-      logger.error("❌ set_corner_radius failed", { code: "node_not_found", originalError: `Node not found with ID: ${nodeId}`, details: { nodeId } });
-      throw new Error(JSON.stringify({ code: "node_not_found", message: `Node not found with ID: ${nodeId}`, details: { nodeId } }));
-    }
-
-    // Check if node supports corner radius
-    if (!("cornerRadius" in node)) {
-      logger.error("❌ set_corner_radius failed", { code: "unsupported_node_type", originalError: `Node type ${node.type} does not support corner radius`, details: { nodeId, nodeType: node.type } });
-      throw new Error(JSON.stringify({ code: "unsupported_node_type", message: `Node type ${node.type} does not support corner radius`, details: { nodeId, nodeType: node.type } }));
-    }
-
-    // Check if node is locked
-    if (node.locked) {
-      logger.error("❌ set_corner_radius failed", { code: "locked_node", originalError: `Node is locked: ${nodeId}`, details: { nodeId } });
-      throw new Error(JSON.stringify({ code: "locked_node", message: `Cannot modify locked node: ${nodeId}`, details: { nodeId } }));
-    }
-
-    const modifiedNodeIds = [nodeId];
-
-    // Apply corner radius
-    if (corners && Array.isArray(corners) && corners.length === 4) {
-      if ("topLeftRadius" in node) {
-        // Node supports individual corner radii
-        if (corners[0]) node.topLeftRadius = numRadius;
-        if (corners[1]) node.topRightRadius = numRadius;
-        if (corners[2]) node.bottomRightRadius = numRadius;
-        if (corners[3]) node.bottomLeftRadius = numRadius;
-        
-        logger.info(`✅ set_corner_radius: Applied selective corner radius ${numRadius}px to corners [${corners.join(', ')}] on node ${nodeId}`);
-      } else {
-        // Node only supports uniform corner radius
-        node.cornerRadius = numRadius;
-        logger.info(`✅ set_corner_radius: Applied uniform corner radius ${numRadius}px to node ${nodeId} (individual corners not supported)`);
-      }
-    } else {
-      // Set uniform corner radius
-      node.cornerRadius = numRadius;
-      logger.info(`✅ set_corner_radius: Applied uniform corner radius ${numRadius}px to node ${nodeId}`);
-    }
-
-    return {
-      success: true,
-      summary: `Set corner radius to ${numRadius}px on ${node.name}`,
-      modifiedNodeIds,
-      id: node.id,
-      name: node.name,
-      cornerRadius: "cornerRadius" in node ? node.cornerRadius : undefined,
-      topLeftRadius: "topLeftRadius" in node ? node.topLeftRadius : undefined,
-      topRightRadius: "topRightRadius" in node ? node.topRightRadius : undefined,
-      bottomRightRadius: "bottomRightRadius" in node ? node.bottomRightRadius : undefined,
-      bottomLeftRadius: "bottomLeftRadius" in node ? node.bottomLeftRadius : undefined,
+  if (!nodeId) {
+    const error = {
+      code: "missing_node_id",
+      message: "Missing nodeId parameter",
+      details: {}
     };
-
-  } catch (error) {
-    // If it's already a structured error, re-throw
-    if (error.message && error.message.startsWith("{")) {
-      throw error;
-    }
-    
-    // Handle unexpected errors
-    const originalError = (error && error.message) || String(error);
-    logger.error("❌ set_corner_radius failed", { code: "unknown_plugin_error", originalError, details: { nodeId, radius, corners } });
-    throw new Error(JSON.stringify({ code: "unknown_plugin_error", message: `Failed to set corner radius: ${originalError}`, details: { nodeId, radius, corners } }));
+    logger.error("❌ set_corner_radius failed", { code: error.code, originalError: error.message });
+    throw new Error(JSON.stringify(error));
   }
+
+  if (radius === undefined) {
+    const error = {
+      code: "missing_radius",
+      message: "Missing radius parameter",
+      details: {}
+    };
+    logger.error("❌ set_corner_radius failed", { code: error.code, originalError: error.message });
+    throw new Error(JSON.stringify(error));
+  }
+
+  const node = await figma.getNodeByIdAsync(nodeId);
+  if (!node) {
+    const error = {
+      code: "node_not_found",
+      message: `Node not found with ID: ${nodeId}`,
+      details: { nodeId }
+    };
+    logger.error("❌ set_corner_radius failed", { code: error.code, originalError: error.message, details: error.details });
+    throw new Error(JSON.stringify(error));
+  }
+
+  // Check if node supports corner radius
+  if (!("cornerRadius" in node)) {
+    const error = {
+      code: "unsupported_node_type",
+      message: `Node does not support corner radius: ${nodeId}`,
+      details: { nodeId, nodeType: node.type }
+    };
+    logger.error("❌ set_corner_radius failed", { code: error.code, originalError: error.message, details: error.details });
+    throw new Error(JSON.stringify(error));
+  }
+
+  // Store original values for summary
+  const originalRadius = node.cornerRadius;
+  const originalCorners = {
+    topLeft: "topLeftRadius" in node ? node.topLeftRadius : undefined,
+    topRight: "topRightRadius" in node ? node.topRightRadius : undefined,
+    bottomRight: "bottomRightRadius" in node ? node.bottomRightRadius : undefined,
+    bottomLeft: "bottomLeftRadius" in node ? node.bottomLeftRadius : undefined
+  };
+
+  // If corners array is provided, set individual corner radii
+  if (corners && Array.isArray(corners) && corners.length === 4) {
+    if ("topLeftRadius" in node) {
+      // Node supports individual corner radii
+      if (corners[0]) node.topLeftRadius = radius;
+      if (corners[1]) node.topRightRadius = radius;
+      if (corners[2]) node.bottomRightRadius = radius;
+      if (corners[3]) node.bottomLeftRadius = radius;
+    } else {
+      // Node only supports uniform corner radius
+      node.cornerRadius = radius;
+    }
+  } else {
+    // Set uniform corner radius
+    node.cornerRadius = radius;
+  }
+
+  const result = {
+    success: true,
+    summary: corners 
+      ? `Set corner radius to ${radius}px for selected corners on "${node.name}"`
+      : `Set uniform corner radius to ${radius}px on "${node.name}"`,
+    modifiedNodeIds: [node.id],
+    id: node.id,
+    name: node.name,
+    cornerRadius: "cornerRadius" in node ? node.cornerRadius : undefined,
+    topLeftRadius: "topLeftRadius" in node ? node.topLeftRadius : undefined,
+    topRightRadius: "topRightRadius" in node ? node.topRightRadius : undefined,
+    bottomRightRadius:
+      "bottomRightRadius" in node ? node.bottomRightRadius : undefined,
+    bottomLeftRadius:
+      "bottomLeftRadius" in node ? node.bottomLeftRadius : undefined,
+  };
+
+  logger.info(`✅ set_corner_radius succeeded: ${result.summary}`);
+  return result;
 }
 
 // -------- TOOL : set_text_content --------

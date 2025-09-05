@@ -1,775 +1,451 @@
 import { serve, ServerWebSocket } from "bun";
+import { appendFileSync, mkdirSync } from "fs";
+import path from "path";
+import { fileURLToPath } from "url";
 import { z } from "zod";
 
-// Shared schema fragments
-const RGBASchema = z
-  .object({ r: z.number().min(0).max(1), g: z.number().min(0).max(1), b: z.number().min(0).max(1), a: z.number().min(0).max(1).optional() })
-  .strict();
+// Bridge WebSocket server
+// - Routes messages between the Figma plugin and an external agent
+// - Validates incoming tool calls with zod schemas
+// - Persists chat transcripts to logs.txt (JSONL)
+// Sections: Types & Schemas, Config, Utilities, Handlers, Server bootstrap
 
-// Gradient paint fragments
-const GradientStopSchema = z.object({ position: z.number().min(0).max(1), color: RGBASchema }).strict();
-const GradientTransformSchema = z.tuple([
-  z.tuple([z.number(), z.number(), z.number()]),
-  z.tuple([z.number(), z.number(), z.number()])
-]);
-const GradientTypeSchema = z.enum(["GRADIENT_LINEAR", "GRADIENT_RADIAL", "GRADIENT_ANGULAR", "GRADIENT_DIAMOND"]);
 
-// Viewport tool schemas and typed façades
-export interface ZoomParams { zoomLevel: number; center?: { x: number; y: number } }
-export interface ZoomResult { success: true; summary: string; modifiedNodeIds: string[]; zoom: number; center: { x: number; y: number } }
-export const ZoomParamsSchema = z
-  .object({
-    zoomLevel: z.number().positive(),
-    center: z.object({ x: z.number(), y: z.number() }).strict().optional(),
-  })
-  .strict();
-export function isZoomParams(input: unknown): input is ZoomParams { try { ZoomParamsSchema.parse(input); return true; } catch { return false; } }
-export function assertZoomParams(input: unknown): asserts input is ZoomParams { ZoomParamsSchema.parse(input); }
-
-export interface CenterParams { x: number; y: number }
-export interface CenterResult { success: true; summary: string; modifiedNodeIds: string[]; center: { x: number; y: number } }
-export const CenterParamsSchema = z.object({ x: z.number(), y: z.number() }).strict();
-export function isCenterParams(input: unknown): input is CenterParams { try { CenterParamsSchema.parse(input); return true; } catch { return false; } }
-export function assertCenterParams(input: unknown): asserts input is CenterParams { CenterParamsSchema.parse(input); }
-
-export interface ScrollAndZoomIntoViewParams { nodeIds: string[] }
+export interface ScrollAndZoomIntoViewParams { node_ids: string[] }
 export interface ScrollAndZoomIntoViewResult {
   success: true;
   summary: string;
-  modifiedNodeIds: string[];
-  resolvedNodeIds: string[];
-  unresolvedNodeIds: string[];
+  resolved_node_ids: string[];
+  unresolved_node_ids: string[];
   zoom: number;
   center: { x: number; y: number };
 }
-export const ScrollAndZoomIntoViewParamsSchema = z.object({ nodeIds: z.array(z.string()).nonempty() }).strict();
+export const ScrollAndZoomIntoViewParamsSchema = z.object({ node_ids: z.array(z.string()).nonempty() }).strict();
 export function isScrollAndZoomIntoViewParams(input: unknown): input is ScrollAndZoomIntoViewParams { try { ScrollAndZoomIntoViewParamsSchema.parse(input); return true; } catch { return false; } }
 export function assertScrollAndZoomIntoViewParams(input: unknown): asserts input is ScrollAndZoomIntoViewParams { ScrollAndZoomIntoViewParamsSchema.parse(input); }
 
-// Typed façade and schema for get_document_info
-export type GetDocumentInfoParams = Record<string, never>;
-export interface GetDocumentInfoResult {
-  name: string;
-  id: string;
-  type: string;
-  children: Array<{ id: string; name: string; type: string }>;
-  currentPage: { id: string; name: string; childCount: number };
-  pages: Array<{ id: string; name: string; childCount: number }>;
-}
-export const GetDocumentInfoParamsSchema = z.object({}).strict();
+// === Types & Schemas ===
+// Organized categories:
+// 1) Scoping & Orientation
+// 2) Observation & Inspection
+// 3) Mutation & Creation
+// 4) Meta & Utility
+// Typed façade and schema for get_canvas_snapshot (read-only)
 
-export function isGetDocumentInfoParams(input: unknown): input is GetDocumentInfoParams {
-  try {
-    GetDocumentInfoParamsSchema.parse(input);
-    return true;
-  } catch {
-    return false;
-  }
-}
 
-export function assertGetDocumentInfoParams(input: unknown): asserts input is GetDocumentInfoParams {
-  GetDocumentInfoParamsSchema.parse(input);
-}
-
-// Typed façade and schema for get_selection
-export type GetSelectionParams = Record<string, never>;
-export interface GetSelectionResult {
-  selectionCount: number;
-  selection: Array<{ id: string; name: string; type: string; visible: boolean }>;
-}
-export const GetSelectionParamsSchema = z.object({}).strict();
-
-// get_comments (read-only)
-export interface GetCommentsParams {}
-export interface FigmaComment { id: string; message: string; clientMeta: unknown; createdAt: string; resolvedAt?: string | null; user: unknown }
-export type GetCommentsResult = FigmaComment[];
-export const GetCommentsParamsSchema = z.object({}).strict();
-export function isGetCommentsParams(input: unknown): input is GetCommentsParams { try { GetCommentsParamsSchema.parse(input); return true; } catch { return false; } }
-
-export function isGetSelectionParams(input: unknown): input is GetSelectionParams {
-  try {
-    GetSelectionParamsSchema.parse(input);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-export function assertGetSelectionParams(input: unknown): asserts input is GetSelectionParams {
-  GetSelectionParamsSchema.parse(input);
-}
-
-// Typed façade and schema for selections_context (read-only)
-export type SelectionsContextMode = "snapshot" | "complete";
-export interface SelectionsContextParams { mode?: SelectionsContextMode; includeComments?: boolean; force?: boolean }
-export const SelectionsContextParamsSchema = z
-  .object({
-    mode: z.enum(["snapshot", "complete"]).optional(),
-    includeComments: z.boolean().optional(),
-    force: z.boolean().optional(),
-  })
-  .strict();
-export function isSelectionsContextParams(input: unknown): input is SelectionsContextParams { try { SelectionsContextParamsSchema.parse(input); return true; } catch { return false; } }
-export function assertSelectionsContextParams(input: unknown): asserts input is SelectionsContextParams { SelectionsContextParamsSchema.parse(input); }
-
-export interface SelectionSummaryHints { hasInstances: boolean; hasVariants: boolean; hasAutoLayout: boolean; stickyNoteCount: number; totalTextChars: number }
-export interface SelectionSummary { selectionCount: number; typesCount: Record<string, number>; hints: SelectionSummaryHints; nodes: any[] }
-export interface SelectionsContextSnapshotResult {
-  document: { pageId: string; pageName: string };
-  selectionSignature: string;
-  selectionSummary: SelectionSummary;
-  gatheredAt: number;
-}
-export interface SelectionsContextCompleteResult {
-  document: { pageId: string; pageName: string };
-  selectionCount: number;
-  selectedNodeIds: string[];
-  gatheredAt: number;
-  selectionSignature: string;
-  nodes: any[];
-  comments?: any[];
-}
-export type SelectionsContextResult = SelectionsContextSnapshotResult | SelectionsContextCompleteResult;
-
-// Typed façade and schema for export_node_as_image
-export interface ExportNodeAsImageParams {
-  nodeId: string;
-  format?: "PNG" | "JPG" | "SVG" | "SVG_STRING" | "PDF" | "JSON_REST_V1";
-  scale?: number;
-  width?: number;
-  height?: number;
-  contentsOnly?: boolean;
-  useAbsoluteBounds?: boolean;
-  suffix?: string;
-  colorProfile?: "DOCUMENT" | "SRGB" | "DISPLAY_P3_V4";
-  svgOutlineText?: boolean;
-  svgIdAttribute?: boolean;
-  svgSimplifyStroke?: boolean;
-}
-
-export interface ExportNodeAsImageResult {
-  nodeId: string;
-  format: string;
-  mimeType: string;
-  imageData?: string; // base64 for image formats
-  data?: any; // for SVG_STRING and JSON_REST_V1
-  settings: Record<string, any>;
-}
-
-export const ExportNodeAsImageParamsSchema = z.object({
-  nodeId: z.string().min(1, "nodeId cannot be empty"),
-  format: z.enum(["PNG", "JPG", "SVG", "SVG_STRING", "PDF", "JSON_REST_V1"]).optional(),
-  scale: z.number().positive().optional(),
-  width: z.number().positive().optional(),
-  height: z.number().positive().optional(),
-  contentsOnly: z.boolean().optional(),
-  useAbsoluteBounds: z.boolean().optional(),
-  suffix: z.string().optional(),
-  colorProfile: z.enum(["DOCUMENT", "SRGB", "DISPLAY_P3_V4"]).optional(),
-  svgOutlineText: z.boolean().optional(),
-  svgIdAttribute: z.boolean().optional(),
-  svgSimplifyStroke: z.boolean().optional(),
-}).strict().refine(
-  (data: ExportNodeAsImageParams) => {
-    // Only one constraint type allowed at a time
-    const constraints = [data.scale, data.width, data.height].filter(x => x !== undefined);
-    return constraints.length <= 1;
-  },
-  {
-    message: "Only one of scale, width, or height can be specified",
-    path: ["constraint"]
-  }
-);
-
-export function isExportNodeAsImageParams(input: unknown): input is ExportNodeAsImageParams {
-  try {
-    ExportNodeAsImageParamsSchema.parse(input);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-export function assertExportNodeAsImageParams(input: unknown): asserts input is ExportNodeAsImageParams {
-  ExportNodeAsImageParamsSchema.parse(input);
-}
-
-// Typed façade and schema for get_local_components
-export interface GetLocalComponentsParams {
-  includeComponentSets?: boolean;
-  nameContains?: string;
-  onlyPublishable?: boolean;
-}
-export interface GetLocalComponentSummary { id: string; name: string; key: string | null; type: "COMPONENT" | "COMPONENT_SET" }
-export interface GetLocalComponentsResult { count: number; components: GetLocalComponentSummary[] }
-export const GetLocalComponentsParamsSchema = z.object({
-  includeComponentSets: z.boolean().optional(),
-  nameContains: z.string().min(1).optional(),
-  onlyPublishable: z.boolean().optional(),
-}).strict();
-export function isGetLocalComponentsParams(input: unknown): input is GetLocalComponentsParams {
-  try {
-    GetLocalComponentsParamsSchema.parse(input);
-    return true;
-  } catch {
-    return false;
-  }
-}
-export function assertGetLocalComponentsParams(input: unknown): asserts input is GetLocalComponentsParams {
-  GetLocalComponentsParamsSchema.parse(input);
-}
-
-// Typed façade and schema for list_available_fonts
-export interface ListAvailableFont { family: string; style: string; postScriptName?: string }
-export interface ListAvailableFontsParams {
-  family?: string | string[];
-  style?: string | string[];
-  query?: string;
-  limit?: number;
-  includePostScriptName?: boolean;
-}
-export type ListAvailableFontsResult = Array<ListAvailableFont>;
-export const ListAvailableFontsParamsSchema = z
-  .object({
-    family: z.union([z.string(), z.array(z.string()).nonempty()]).optional(),
-    style: z.union([z.string(), z.array(z.string()).nonempty()]).optional(),
-    query: z.string().min(1).optional(),
-    limit: z.number().int().min(1).optional(),
-    includePostScriptName: z.boolean().optional(),
-  })
-  .strict();
-export function isListAvailableFontsParams(input: unknown): input is ListAvailableFontsParams {
-  try {
-    ListAvailableFontsParamsSchema.parse(input);
-    return true;
-  } catch {
-    return false;
-  }
-}
-export function assertListAvailableFontsParams(input: unknown): asserts input is ListAvailableFontsParams {
-  ListAvailableFontsParamsSchema.parse(input);
-}
-
-// Typed façade and schema for get_styles
-export type StyleKind = "paint" | "text" | "effect" | "grid";
-export interface PaintStyleSummary { id: string; name: string; key: string | null; paints: any[] }
-export interface TextStyleSummary { id: string; name: string; key: string | null; fontSize: number; fontName: any }
-export interface EffectStyleSummary { id: string; name: string; key: string | null }
-export interface GridStyleSummary { id: string; name: string; key: string | null }
-export interface GetStylesResult {
-  colors: PaintStyleSummary[];
-  texts: TextStyleSummary[];
-  effects: EffectStyleSummary[];
-  grids: GridStyleSummary[];
-}
-export interface GetStylesParams {
-  kinds?: StyleKind[];
-  name?: string;
-  caseSensitive?: boolean;
-  includeAllPaints?: boolean;
-  sortBy?: "name";
-  sortDirection?: "asc" | "desc";
-}
-export const GetStylesParamsSchema = z.object({
-  kinds: z.array(z.enum(["paint","text","effect","grid"]).readonly()).nonempty().optional(),
-  name: z.string().min(1).optional(),
-  caseSensitive: z.boolean().optional(),
-  includeAllPaints: z.boolean().optional(),
-  sortBy: z.literal("name").optional(),
-  sortDirection: z.enum(["asc","desc"]).optional(),
-}).strict();
-export function isGetStylesParams(input: unknown): input is GetStylesParams {
-  try {
-    GetStylesParamsSchema.parse(input);
-    return true;
-  } catch {
-    return false;
-  }
-}
-export function assertGetStylesParams(input: unknown): asserts input is GetStylesParams {
-  GetStylesParamsSchema.parse(input);
-}
-
-// Typed façades and schemas for style creation
-export type OnConflictMode = "error" | "skip" | "suffix";
-
-export interface CreatePaintStyleParams { name: string; paints: any[]; onConflict?: OnConflictMode }
-export interface CreateTextStyleParams { name: string; style: Record<string, any>; onConflict?: OnConflictMode }
-export interface CreateEffectStyleParams { name: string; effects: any[]; onConflict?: OnConflictMode }
-export interface CreateGridStyleParams { name: string; layoutGrids: any[]; onConflict?: OnConflictMode }
-
-export interface CreateStyleResult {
-  success: true;
-  summary: string;
-  modifiedNodeIds: string[];
-  createdStyleId: string;
-  name: string;
-  type: "paint" | "text" | "effect" | "grid";
-  skipped?: boolean;
-}
-
-export const CreatePaintStyleParamsSchema = z.object({
-  name: z.string().min(1),
-  paints: z.array(z.any()).nonempty(),
-  onConflict: z.enum(["error","skip","suffix"]).optional(),
-}).strict();
-export const CreateTextStyleParamsSchema = z.object({
-  name: z.string().min(1),
-  style: z.record(z.any()),
-  onConflict: z.enum(["error","skip","suffix"]).optional(),
-}).strict();
-export const CreateEffectStyleParamsSchema = z.object({
-  name: z.string().min(1),
-  effects: z.array(z.any()).nonempty(),
-  onConflict: z.enum(["error","skip","suffix"]).optional(),
-}).strict();
-export const CreateGridStyleParamsSchema = z.object({
-  name: z.string().min(1),
-  layoutGrids: z.array(z.any()).nonempty(),
-  onConflict: z.enum(["error","skip","suffix"]).optional(),
-}).strict();
-export function isCreatePaintStyleParams(input: unknown): input is CreatePaintStyleParams { try { CreatePaintStyleParamsSchema.parse(input); return true; } catch { return false; } }
-export function assertCreatePaintStyleParams(input: unknown): asserts input is CreatePaintStyleParams { CreatePaintStyleParamsSchema.parse(input); }
-export function isCreateTextStyleParams(input: unknown): input is CreateTextStyleParams { try { CreateTextStyleParamsSchema.parse(input); return true; } catch { return false; } }
-export function assertCreateTextStyleParams(input: unknown): asserts input is CreateTextStyleParams { CreateTextStyleParamsSchema.parse(input); }
-export function isCreateEffectStyleParams(input: unknown): input is CreateEffectStyleParams { try { CreateEffectStyleParamsSchema.parse(input); return true; } catch { return false; } }
-export function assertCreateEffectStyleParams(input: unknown): asserts input is CreateEffectStyleParams { CreateEffectStyleParamsSchema.parse(input); }
-export function isCreateGridStyleParams(input: unknown): input is CreateGridStyleParams { try { CreateGridStyleParamsSchema.parse(input); return true; } catch { return false; } }
-export function assertCreateGridStyleParams(input: unknown): asserts input is CreateGridStyleParams { CreateGridStyleParamsSchema.parse(input); }
-
-// Typed façade and schema for get_node_info
-export interface GetNodeInfoParams { nodeId: string }
-export interface FilteredTextStyle {
-  fontFamily?: string;
-  fontStyle?: string;
-  fontWeight?: number;
-  fontSize?: number;
-  textAlignHorizontal?: string;
-  letterSpacing?: number | string;
-  lineHeightPx?: number;
-}
-export interface AbsoluteBoundingBox { x: number; y: number; width: number; height: number }
-export interface FilteredNodeDocument {
+// === Tools: Category 1 - Scoping & Orientation ===
+export interface GetCanvasSnapshotParams { include_images?: boolean }
+export interface BasicNodeSummary { id: string; name: string; type: string; has_children: boolean }
+export interface RichNodeSummary {
   id: string;
   name: string;
   type: string;
-  fills?: Array<any>;
-  strokes?: Array<any>;
-  cornerRadius?: number;
-  absoluteBoundingBox?: AbsoluteBoundingBox;
-  characters?: string;
-  style?: FilteredTextStyle;
-  children?: Array<FilteredNodeDocument> | null;
+  absolute_bounding_box: { x: number; y: number; width: number; height: number };
+  auto_layout_mode: string | null;
+  has_children: boolean;
 }
-export type GetNodeInfoResult = FilteredNodeDocument | null;
-export const GetNodeInfoParamsSchema = z.object({ nodeId: z.string() }).strict();
-export function isGetNodeInfoParams(input: unknown): input is GetNodeInfoParams {
-  try {
-    GetNodeInfoParamsSchema.parse(input);
-    return true;
-  } catch {
-    return false;
-  }
+export interface SelectionSummary {
+  selection_count: number;
+  types_count: Record<string, number>;
+  hints: {
+    has_instances: boolean;
+    has_variants: boolean;
+    has_auto_layout: boolean;
+    sticky_note_count: number;
+    total_text_chars: number;
+  };
+  nodes: Array<{ id: string; name: string; type: string }>;
 }
-export function assertGetNodeInfoParams(input: unknown): asserts input is GetNodeInfoParams {
-  GetNodeInfoParamsSchema.parse(input);
+export interface GetCanvasSnapshotResult {
+  page: { id: string; name: string };
+  // Canonical snapshot per `plugin/new-tools.md`: page, selection, root_nodes_on_page
+  selection: RichNodeSummary[];
+  root_nodes_on_page: BasicNodeSummary[];
+  // Optional helpful metadata returned by the plugin
+  selection_signature?: string;
+  selection_summary?: SelectionSummary;
 }
+export const GetCanvasSnapshotParamsSchema = z.object({ include_images: z.boolean().optional() }).strict();
 
-// Layout tools schemas and typed façades
+export function isGetCanvasSnapshotParams(input: unknown): input is GetCanvasSnapshotParams { try { GetCanvasSnapshotParamsSchema.parse(input); return true; } catch { return false; } }
+export function assertGetCanvasSnapshotParams(input: unknown): asserts input is GetCanvasSnapshotParams { GetCanvasSnapshotParamsSchema.parse(input); }
 
-// Typed façade and schema for set_layout_mode
-export interface SetLayoutModeParams {
-  nodeId: string;
-  layoutMode?: "NONE" | "HORIZONTAL" | "VERTICAL" | "GRID";
-  layoutWrap?: "NO_WRAP" | "WRAP";
+// === Tools: Category 2 - Observation & Inspection ===
+export interface FindNodesFilters {
+  name_regex?: string;
+  text_regex?: string;
+  node_types?: string[];
+  main_component_id?: string;
+  style_id?: string;
 }
-export interface SetLayoutModeResult {
-  success: true;
-  summary: string;
-  modifiedNodeIds: string[];
-  node: { id: string; name: string; layoutMode: "NONE"|"HORIZONTAL"|"VERTICAL"|"GRID"; layoutWrap?: "NO_WRAP"|"WRAP" };
-}
-export const SetLayoutModeParamsSchema = z.object({
-  nodeId: z.string().min(1),
-  layoutMode: z.enum(["NONE","HORIZONTAL","VERTICAL","GRID"]).optional(),
-  layoutWrap: z.enum(["NO_WRAP","WRAP"]).optional(),
+export interface FindNodesParams { filters: FindNodesFilters; scope_node_id?: string | null; highlight_results?: boolean }
+export interface FindNodesResult { matching_nodes: Array<{ id: string; name: string; type: string; has_children: boolean; absolute_bounding_box: { x: number; y: number; width: number; height: number }; auto_layout_mode: string | null }> }
+export const FindNodesParamsSchema = z.object({
+  filters: z.object({
+    name_regex: z.string().optional(),
+    text_regex: z.string().optional(),
+    node_types: z.array(z.string()).nonempty().optional(),
+    main_component_id: z.string().optional(),
+    style_id: z.string().optional(),
+  }).strict(),
+  scope_node_id: z.union([z.string(), z.null()]).optional(),
+  highlight_results: z.boolean().optional(),
 }).strict();
-export function isSetLayoutModeParams(input: unknown): input is SetLayoutModeParams { try { SetLayoutModeParamsSchema.parse(input); return true; } catch { return false; } }
-export function assertSetLayoutModeParams(input: unknown): asserts input is SetLayoutModeParams { SetLayoutModeParamsSchema.parse(input); }
 
-// Typed façade and schema for set_padding
-export interface SetPaddingParams {
-  nodeId: string;
-  paddingTop?: number;
-  paddingRight?: number;
-  paddingBottom?: number;
-  paddingLeft?: number;
-}
-export interface SetPaddingResult {
-  success: true;
-  summary: string;
-  modifiedNodeIds: string[];
-  node: { id: string; name: string; paddingTop: number; paddingRight: number; paddingBottom: number; paddingLeft: number };
-}
-export const SetPaddingParamsSchema = z.object({
-  nodeId: z.string().min(1),
-  paddingTop: z.number().optional(),
-  paddingRight: z.number().optional(),
-  paddingBottom: z.number().optional(),
-  paddingLeft: z.number().optional(),
-}).strict().refine((d: SetPaddingParams) => [d.paddingTop,d.paddingRight,d.paddingBottom,d.paddingLeft].some(v => v !== undefined), {
-  message: "At least one padding value must be provided"
-});
-export function isSetPaddingParams(input: unknown): input is SetPaddingParams { try { SetPaddingParamsSchema.parse(input); return true; } catch { return false; } }
-export function assertSetPaddingParams(input: unknown): asserts input is SetPaddingParams { SetPaddingParamsSchema.parse(input); }
+export interface GetNodeDetailsParams { node_ids: string[] }
+export interface GetNodeDetailsResult { details: Record<string, { target_node: any; parent_summary: any | null; children_summaries: any[] }> }
+export const GetNodeDetailsParamsSchema = z.object({ node_ids: z.array(z.string()).nonempty() }).strict();
 
-// Typed façade and schema for set_axis_align
-export interface SetAxisAlignParams {
-  nodeId: string;
-  primaryAxisAlignItems?: "MIN" | "MAX" | "CENTER" | "SPACE_BETWEEN";
-  counterAxisAlignItems?: "MIN" | "MAX" | "CENTER" | "BASELINE";
+export interface GetImageOfNodeParams {
+  node_ids: string[];
+  export_settings?: {
+    format?: string;
+    constraint?: { type?: "SCALE" | "WIDTH" | "HEIGHT"; value?: number };
+    // Enforce snake_case keys at the bridge boundary
+    use_absolute_bounds?: boolean;
+    [key: string]: any;
+  };
 }
-export interface SetAxisAlignResult {
-  success: true;
-  summary: string;
-  modifiedNodeIds: string[];
-  node: { id: string; name: string; layoutMode: string; primaryAxisAlignItems?: string; counterAxisAlignItems?: string };
-}
-export const SetAxisAlignParamsSchema = z.object({
-  nodeId: z.string().min(1),
-  primaryAxisAlignItems: z.enum(["MIN","MAX","CENTER","SPACE_BETWEEN"]).optional(),
-  counterAxisAlignItems: z.enum(["MIN","MAX","CENTER","BASELINE"]).optional(),
-}).strict().refine((d: SetAxisAlignParams) => d.primaryAxisAlignItems !== undefined || d.counterAxisAlignItems !== undefined, {
-  message: "Provide primaryAxisAlignItems and/or counterAxisAlignItems"
-});
-export function isSetAxisAlignParams(input: unknown): input is SetAxisAlignParams { try { SetAxisAlignParamsSchema.parse(input); return true; } catch { return false; } }
-export function assertSetAxisAlignParams(input: unknown): asserts input is SetAxisAlignParams { SetAxisAlignParamsSchema.parse(input); }
-
-// Typed façade and schema for set_layout_sizing
-export interface SetLayoutSizingParams {
-  nodeId: string;
-  layoutSizingHorizontal?: "FIXED" | "HUG" | "FILL";
-  layoutSizingVertical?: "FIXED" | "HUG" | "FILL";
-}
-export interface SetLayoutSizingResult {
-  success: true;
-  summary: string;
-  modifiedNodeIds: string[];
-  node: { id: string; name: string; layoutMode?: string; layoutSizingHorizontal?: string; layoutSizingVertical?: string };
-}
-export const SetLayoutSizingParamsSchema = z.object({
-  nodeId: z.string().min(1),
-  layoutSizingHorizontal: z.enum(["FIXED","HUG","FILL"]).optional(),
-  layoutSizingVertical: z.enum(["FIXED","HUG","FILL"]).optional(),
-}).strict().refine((d: SetLayoutSizingParams) => d.layoutSizingHorizontal !== undefined || d.layoutSizingVertical !== undefined, {
-  message: "Provide layoutSizingHorizontal and/or layoutSizingVertical"
-});
-export function isSetLayoutSizingParams(input: unknown): input is SetLayoutSizingParams { try { SetLayoutSizingParamsSchema.parse(input); return true; } catch { return false; } }
-export function assertSetLayoutSizingParams(input: unknown): asserts input is SetLayoutSizingParams { SetLayoutSizingParamsSchema.parse(input); }
-
-// Typed façade and schema for set_item_spacing
-export interface SetItemSpacingParams {
-  nodeId: string;
-  itemSpacing?: number;
-  counterAxisSpacing?: number;
-}
-export interface SetItemSpacingResult {
-  success: true;
-  summary: string;
-  modifiedNodeIds: string[];
-  node: { id: string; name: string; layoutMode: string; layoutWrap?: string; itemSpacing?: number; counterAxisSpacing?: number };
-}
-export const SetItemSpacingParamsSchema = z.object({
-  nodeId: z.string().min(1),
-  itemSpacing: z.number().optional(),
-  counterAxisSpacing: z.number().optional(),
-}).strict().refine((d: SetItemSpacingParams) => d.itemSpacing !== undefined || d.counterAxisSpacing !== undefined, {
-  message: "Provide itemSpacing and/or counterAxisSpacing"
-});
-export function isSetItemSpacingParams(input: unknown): input is SetItemSpacingParams { try { SetItemSpacingParamsSchema.parse(input); return true; } catch { return false; } }
-export function assertSetItemSpacingParams(input: unknown): asserts input is SetItemSpacingParams { SetItemSpacingParamsSchema.parse(input); }
-
-// Typed façade and schema for get_nodes_info
-export interface GetNodesInfoParams { nodeIds: string[] }
-export interface NodeInfoEntryError { code: string; message?: string }
-export interface NodeInfoEntry { nodeId: string; document: FilteredNodeDocument | null; error?: NodeInfoEntryError }
-export type GetNodesInfoResult = Array<NodeInfoEntry>
-export const GetNodesInfoParamsSchema = z.object({ nodeIds: z.array(z.string()).nonempty() }).strict();
-export function isGetNodesInfoParams(input: unknown): input is GetNodesInfoParams {
-  try {
-    GetNodesInfoParamsSchema.parse(input);
-    return true;
-  } catch {
-    return false;
-  }
-}
-export function assertGetNodesInfoParams(input: unknown): asserts input is GetNodesInfoParams {
-  GetNodesInfoParamsSchema.parse(input);
-}
-
-// Typed façade and schema for get_reactions
-export interface GetReactionsParams { nodeIds: string[]; silent?: boolean }
-export interface ReactionNode { id: string; name: string; type: string; depth: number; hasReactions: true; reactions: any[]; path: string }
-export interface GetReactionsResult { nodesCount: number; nodesWithReactions: number; nodes: ReactionNode[] }
-export const GetReactionsParamsSchema = z.object({ nodeIds: z.array(z.string()).nonempty(), silent: z.boolean().optional() }).strict();
-export function isGetReactionsParams(input: unknown): input is GetReactionsParams {
-  try {
-    GetReactionsParamsSchema.parse(input);
-    return true;
-  } catch {
-    return false;
-  }
-}
-export function assertGetReactionsParams(input: unknown): asserts input is GetReactionsParams {
-  GetReactionsParamsSchema.parse(input);
-}
-
-// Typed façade and schema for read_my_design
-export type ReadMyDesignParams = Record<string, never>;
-export type ReadMyDesignResult = Array<NodeInfoEntry>;
-export const ReadMyDesignParamsSchema = z.object({}).strict();
-export function isReadMyDesignParams(input: unknown): input is ReadMyDesignParams {
-  try {
-    ReadMyDesignParamsSchema.parse(input);
-    return true;
-  } catch {
-    return false;
-  }
-}
-export function assertReadMyDesignParams(input: unknown): asserts input is ReadMyDesignParams {
-  ReadMyDesignParamsSchema.parse(input);
-}
-
-// Typed façade and schema for scan_text_nodes
-export interface ScanTextNodeEntry {
-  id: string;
-  name: string;
-  type: string; // "TEXT"
-  characters?: string;
-  fontSize: number;
-  fontFamily?: string;
-  fontStyle?: string;
-  x: number;
-  y: number;
-  width: number;
-  height: number;
-  path: string;
-  depth: number;
-}
-export interface ScanTextNodesParams {
-  nodeId: string;
-  useChunking?: boolean;
-  chunkSize?: number;
-  includeInvisible?: boolean;
-  highlight?: boolean;
-  maxDepth?: number;
-  textFilter?: string;
-  caseSensitive?: boolean;
-  includeCharacters?: boolean;
-}
-export interface ScanTextNodesResult { nodesCount: number; textNodes: ScanTextNodeEntry[]; commandId: string }
-export const ScanTextNodesParamsSchema = z.object({
-  nodeId: z.string(),
-  useChunking: z.boolean().optional(),
-  chunkSize: z.number().positive().optional(),
-  includeInvisible: z.boolean().optional(),
-  highlight: z.boolean().optional(),
-  maxDepth: z.number().int().min(0).optional(),
-  textFilter: z.string().optional(),
-  caseSensitive: z.boolean().optional(),
-  includeCharacters: z.boolean().optional(),
+export interface GetImageOfNodeResult { images: Record<string, string | null> }
+export const GetImageOfNodeParamsSchema = z.object({
+  node_ids: z.array(z.string()).nonempty(),
+  export_settings: z.object({
+    format: z.string().optional(),
+    constraint: z.object({ type: z.enum(["SCALE","WIDTH","HEIGHT"]).optional(), value: z.number().optional() }).optional(),
+    use_absolute_bounds: z.boolean().optional(),
+  }).optional(),
 }).strict();
-export function isScanTextNodesParams(input: unknown): input is ScanTextNodesParams { try { ScanTextNodesParamsSchema.parse(input); return true; } catch { return false; } }
-export function assertScanTextNodesParams(input: unknown): asserts input is ScanTextNodesParams { ScanTextNodesParamsSchema.parse(input); }
 
-// Typed façade and schema for scan_nodes_by_types
-export interface ScanNodesByTypesParams { nodeId: string; types: string[] }
-export interface ScanNodesByTypesNodeBBox { x: number; y: number; width: number; height: number }
-export interface ScanNodesByTypesNode { id: string; name: string; type: string; bbox: ScanNodesByTypesNodeBBox }
-export interface ScanNodesByTypesResult { nodesCount: number; matchingNodes: ScanNodesByTypesNode[]; searchedTypes: string[]; commandId: string }
-export const ScanNodesByTypesParamsSchema = z.object({ nodeId: z.string(), types: z.array(z.string()).nonempty() }).strict();
-export function isScanNodesByTypesParams(input: unknown): input is ScanNodesByTypesParams { try { ScanNodesByTypesParamsSchema.parse(input); return true; } catch { return false; } }
-export function assertScanNodesByTypesParams(input: unknown): asserts input is ScanNodesByTypesParams { ScanNodesByTypesParamsSchema.parse(input); }
+export interface GetNodeAncestryParams { node_id: string }
+export interface GetNodeAncestryResult { ancestors: Array<{ id: string; name: string; type: string; has_children: boolean }> }
+export const GetNodeAncestryParamsSchema = z.object({ node_id: z.string() }).strict();
 
-// Typed façade and schema for set_multiple_text_contents
-export interface SetMultipleTextReplacement { nodeId: string; text: string }
-export interface SetMultipleTextContentsParams {
-  nodeId: string;
-  text: SetMultipleTextReplacement[];
-  smartStrategy?: "prevail" | "strict" | "experimental";
-  fallbackFont?: { family: string; style: string };
-  select?: boolean;
-  chunkSize?: number;
-  delayMsBetweenChunks?: number;
-  highlight?: boolean;
-  skipLocked?: boolean;
-  stopOnFailure?: boolean;
-  ignoreMissing?: boolean;
-  previewOnly?: boolean;
-}
-export interface SetMultipleTextContentsResultEntry {
-  success: boolean;
-  nodeId: string;
-  originalText?: string;
-  translatedText?: string;
-  errorCode?: string;
-  errorMessage?: string;
-  preview?: boolean;
-}
-export interface SetMultipleTextContentsResult {
+export interface GetNodeHierarchyParams { node_id: string }
+export interface GetNodeHierarchyResult { parent_summary: any | null; children: Array<{ id: string; name: string; type: string; has_children: boolean }> }
+export const GetNodeHierarchyParamsSchema = z.object({ node_id: z.string() }).strict();
+
+export interface GetDocumentStylesParams { style_types?: Array<"PAINT"|"TEXT"|"EFFECT"|"GRID"> | null }
+export interface GetDocumentStylesResult { styles: Array<{ id: string; name: string; type: string }> }
+export const GetDocumentStylesParamsSchema = z.object({ style_types: z.array(z.enum(["PAINT","TEXT","EFFECT","GRID"]) ).optional().nullable() }).strict();
+
+export interface GetStyleConsumersParams { style_id: string }
+export interface GetStyleConsumersResult { consuming_nodes: Array<{ node: any; fields: string[] }> }
+export const GetStyleConsumersParamsSchema = z.object({ style_id: z.string() }).strict();
+
+// Observation: Components & Prototyping
+export interface GetDocumentComponentsParams {}
+export interface GetDocumentComponentsResult { components: Array<{ id: string; component_key: string | null; name: string; type: string }> }
+export const GetDocumentComponentsParamsSchema = z.object({}).strict();
+
+export interface GetPrototypeInteractionsParams { node_id: string }
+export interface GetPrototypeInteractionsResult { reactions: any[] }
+export const GetPrototypeInteractionsParamsSchema = z.object({ node_id: z.string() }).strict();
+
+export interface CreateComponentFromNodeParams { node_id: string; name: string }
+export interface CreateComponentFromNodeResult {
   success: true;
   summary: string;
-  modifiedNodeIds: string[];
-  nodeId: string;
-  replacementsApplied: number;
-  replacementsFailed: number;
-  totalReplacements: number;
-  results: SetMultipleTextContentsResultEntry[];
-  completedInChunks: number;
-  stoppedEarly?: boolean;
-  preview?: boolean;
-  commandId: string;
+  created_component_id: string;
+  modified_node_ids?: string[];
 }
-export const SetMultipleTextReplacementSchema = z.object({ nodeId: z.string(), text: z.string() }).strict();
-export const SetMultipleTextContentsParamsSchema = z.object({
-  nodeId: z.string(),
-  text: z.array(SetMultipleTextReplacementSchema),
-  smartStrategy: z.enum(["prevail","strict","experimental"]).optional(),
-  fallbackFont: z.object({ family: z.string(), style: z.string() }).strict().optional(),
-  select: z.boolean().optional(),
-  chunkSize: z.number().int().min(1).max(50).optional(),
-  delayMsBetweenChunks: z.number().int().min(0).optional(),
-  highlight: z.boolean().optional(),
-  skipLocked: z.boolean().optional(),
-  stopOnFailure: z.boolean().optional(),
-  ignoreMissing: z.boolean().optional(),
-  previewOnly: z.boolean().optional(),
+export const CreateComponentFromNodeParamsSchema = z.object({ node_id: z.string().min(1), name: z.string().min(1) }).strict();
+
+export interface SetInstancePropertiesParams { node_ids: string[]; properties: Record<string, any> }
+export interface SetInstancePropertiesResult { success: true; modified_node_ids: string[]; summary: string }
+export const SetInstancePropertiesParamsSchema = z.object({ node_ids: z.array(z.string()).nonempty(), properties: z.record(z.any()) }).strict();
+
+export interface DetachInstanceParams { node_ids: string[] }
+export interface DetachInstanceResult { success: true; created_frame_ids: string[]; summary: string }
+export const DetachInstanceParamsSchema = z.object({ node_ids: z.array(z.string()).nonempty() }).strict();
+
+export type CreateStyleType = "PAINT" | "TEXT" | "EFFECT" | "GRID";
+export interface CreateStyleParams { name: string; type: CreateStyleType; style_properties: Record<string, any> }
+export interface CreateStyleResult { success: true; summary: string; created_style_id: string }
+export const CreateStyleParamsSchema = z.object({ name: z.string().min(1), type: z.enum(["PAINT","TEXT","EFFECT","GRID"]), style_properties: z.record(z.any()) }).strict();
+
+export type ApplyStyleKind = "FILL" | "STROKE" | "TEXT" | "EFFECT" | "GRID";
+export interface ApplyStyleParams { node_ids: string[]; style_id: string; style_type: ApplyStyleKind }
+export interface ApplyStyleResult { success: true; modified_node_ids: string[]; summary: string }
+export const ApplyStyleParamsSchema = z.object({ node_ids: z.array(z.string()).nonempty(), style_id: z.string().min(1), style_type: z.enum(["FILL","STROKE","TEXT","EFFECT","GRID"]) }).strict();
+
+export type VariableResolvedType = "COLOR" | "FLOAT" | "STRING" | "BOOLEAN";
+export interface CreateVariableCollectionParams { name: string; initial_mode_name?: string }
+export interface CreateVariableCollectionResult { success: true; summary: string; collection_id: string; initial_mode_id?: string | null }
+export const CreateVariableCollectionParamsSchema = z.object({
+  name: z.string().min(1),
+  initial_mode_name: z.string().min(1).optional(),
 }).strict();
-export function isSetMultipleTextContentsParams(input: unknown): input is SetMultipleTextContentsParams { try { SetMultipleTextContentsParamsSchema.parse(input); return true; } catch { return false; } }
-export function assertSetMultipleTextContentsParams(input: unknown): asserts input is SetMultipleTextContentsParams { SetMultipleTextContentsParamsSchema.parse(input); }
 
-// Typed façade and schema for set_range_text_style
-export interface SetRangeTextStyleParams { nodeId: string; start: number; end: number; textStyleId: string; autoClamp?: boolean }
-export interface SetRangeTextStyleResult {
-  success: true;
-  summary: string;
-  modifiedNodeIds: string[];
-  nodeId: string;
-  start: number;
-  end: number;
-  textStyleId: string;
-  clamped?: boolean;
-  originalStart?: number;
-  originalEnd?: number;
-}
-export const SetRangeTextStyleParamsSchema = z.object({
-  nodeId: z.string(),
-  start: z.number().int().min(0),
-  end: z.number().int().min(1),
-  textStyleId: z.string(),
-  autoClamp: z.boolean().optional(),
+export interface CreateVariableParams { name: string; collection_id: string; resolved_type: VariableResolvedType }
+export interface CreateVariableResult { success: true; summary: string; variable_id: string }
+export const CreateVariableParamsSchema = z.object({
+  name: z.string().min(1),
+  collection_id: z.string().min(1),
+  resolved_type: z.enum(["COLOR","FLOAT","STRING","BOOLEAN"]),
 }).strict();
-export function isSetRangeTextStyleParams(input: unknown): input is SetRangeTextStyleParams {
-  try {
-    SetRangeTextStyleParamsSchema.parse(input);
-    return true;
-  } catch {
-    return false;
-  }
-}
-export function assertSetRangeTextStyleParams(input: unknown): asserts input is SetRangeTextStyleParams {
-  SetRangeTextStyleParamsSchema.parse(input);
-}
 
-// Typed façade and schema for set_text_content
-export interface SetTextContentParams {
-  nodeId: string;
-  text: string;
-  smartStrategy?: "prevail" | "strict" | "experimental";
-  fallbackFont?: { family: string; style: string };
-  select?: boolean;
-}
-export interface SetTextContentResult {
+export interface SetVariableValueParams { variable_id: string; mode_id: string; value: string | number | boolean | Record<string, any> }
+export interface SetVariableValueResult { success: true; modified_variable_id: string; summary: string }
+export const SetVariableValueParamsSchema = z.object({
+  variable_id: z.string().min(1),
+  mode_id: z.string().min(1),
+  value: z.union([z.string(), z.number(), z.boolean(), z.record(z.any())]),
+}).strict();
+
+export interface BindVariableToPropertyParams { node_id: string; property: string; variable_id: string }
+export interface BindVariableToPropertyResult { success: true; modified_node_ids: string[]; summary: string }
+export const BindVariableToPropertyParamsSchema = z.object({
+  node_id: z.string().min(1),
+  property: z.string().min(1),
+  variable_id: z.string().min(1),
+}).strict();
+
+// === Tools: Category 3 - Mutation & Creation ===
+// --- Subcategory 3.2: Modify (General Properties) ---
+export interface SetFillsParams { node_ids: string[]; paints: any[] }
+// Canonical success envelope for mutating tools
+export interface MutateSuccessResult {
   success: true;
   summary: string;
-  modifiedNodeIds: string[];
-  nodeId: string;
-  name: string;
-  characters: string;
-  fontName: any;
-  smartStrategy?: string | null;
+  modified_node_ids?: string[];
+  unresolved_node_ids?: string[];
+  details?: Record<string, any>;
 }
-export const SetTextContentParamsSchema = z
-  .object({
-    nodeId: z.string(),
-    text: z.string(),
-    smartStrategy: z.enum(["prevail","strict","experimental"]).optional(),
-    fallbackFont: z.object({ family: z.string(), style: z.string() }).strict().optional(),
-    select: z.boolean().optional(),
-  })
-  .strict();
-export function isSetTextContentParams(input: unknown): input is SetTextContentParams {
-  try { SetTextContentParamsSchema.parse(input); return true; } catch { return false; }
-}
-export function assertSetTextContentParams(input: unknown): asserts input is SetTextContentParams {
-  SetTextContentParamsSchema.parse(input);
-}
+export const SetFillsParamsSchema = z.object({ node_ids: z.array(z.string()).nonempty(), paints: z.array(z.any()) }).strict();
+export function isSetFillsParams(input: unknown): input is SetFillsParams { try { SetFillsParamsSchema.parse(input); return true; } catch { return false; } }
+export function assertSetFillsParams(input: unknown): asserts input is SetFillsParams { SetFillsParamsSchema.parse(input); }
 
-// Typed façade and schema for create_text
-export interface CreateTextParams {
-  x?: number;
-  y?: number;
-  text?: string;
-  fontSize?: number;
-  fontWeight?: number; // 100..900
-  fontColor?: RGBA;
-  name?: string;
-  parentId?: string;
+export interface SetStrokesParams { node_ids: string[]; paints: any[]; stroke_weight?: number; stroke_align?: "INSIDE"|"OUTSIDE"|"CENTER"; dash_pattern?: number[] }
+export const SetStrokesParamsSchema = z.object({
+  node_ids: z.array(z.string()).nonempty(),
+  paints: z.array(z.any()),
+  stroke_weight: z.number().optional(),
+  stroke_align: z.enum(["INSIDE","OUTSIDE","CENTER"]).optional(),
+  dash_pattern: z.array(z.number()).optional(),
+}).strict();
+export function isSetStrokesParams(input: unknown): input is SetStrokesParams { try { SetStrokesParamsSchema.parse(input); return true; } catch { return false; } }
+export function assertSetStrokesParams(input: unknown): asserts input is SetStrokesParams { SetStrokesParamsSchema.parse(input); }
+
+export interface SetCornerRadiusParams { node_ids: string[]; uniform_radius?: number; top_left?: number; top_right?: number; bottom_left?: number; bottom_right?: number }
+export const SetCornerRadiusParamsSchema = z.object({
+  node_ids: z.array(z.string()).nonempty(),
+  uniform_radius: z.number().min(0).optional(),
+  top_left: z.number().min(0).optional(),
+  top_right: z.number().min(0).optional(),
+  bottom_left: z.number().min(0).optional(),
+  bottom_right: z.number().min(0).optional(),
+}).strict().refine((d: SetCornerRadiusParams) => {
+  return d.uniform_radius !== undefined || d.top_left !== undefined || d.top_right !== undefined || d.bottom_left !== undefined || d.bottom_right !== undefined;
+}, { message: "Provide uniform_radius or at least one corner value" });
+export function isSetCornerRadiusParams(input: unknown): input is SetCornerRadiusParams { try { SetCornerRadiusParamsSchema.parse(input); return true; } catch { return false; } }
+export function assertSetCornerRadiusParams(input: unknown): asserts input is SetCornerRadiusParams { SetCornerRadiusParamsSchema.parse(input); }
+
+export interface SetSizeParams { node_ids: string[]; width?: number; height?: number }
+export const SetSizeParamsSchema = z.object({ node_ids: z.array(z.string()).nonempty(), width: z.number().optional(), height: z.number().optional() }).strict().refine((d: SetSizeParams) => d.width !== undefined || d.height !== undefined, { message: "Provide width and/or height" });
+export function isSetSizeParams(input: unknown): input is SetSizeParams { try { SetSizeParamsSchema.parse(input); return true; } catch { return false; } }
+export function assertSetSizeParams(input: unknown): asserts input is SetSizeParams { SetSizeParamsSchema.parse(input); }
+
+export interface SetPositionParams { node_ids: string[]; x: number; y: number }
+export const SetPositionParamsSchema = z.object({ node_ids: z.array(z.string()).nonempty(), x: z.number(), y: z.number() }).strict();
+export function isSetPositionParams(input: unknown): input is SetPositionParams { try { SetPositionParamsSchema.parse(input); return true; } catch { return false; } }
+export function assertSetPositionParams(input: unknown): asserts input is SetPositionParams { SetPositionParamsSchema.parse(input); }
+
+export interface SetRotationParams { node_ids: string[]; rotation_degrees: number }
+export const SetRotationParamsSchema = z.object({ node_ids: z.array(z.string()).nonempty(), rotation_degrees: z.number() }).strict();
+export function isSetRotationParams(input: unknown): input is SetRotationParams { try { SetRotationParamsSchema.parse(input); return true; } catch { return false; } }
+export function assertSetRotationParams(input: unknown): asserts input is SetRotationParams { SetRotationParamsSchema.parse(input); }
+
+export interface SetLayerPropertiesParams { node_ids: string[]; name?: string; opacity?: number; visible?: boolean; locked?: boolean; blend_mode?: "NORMAL"|"DARKEN"|"MULTIPLY"|"COLOR_BURN"|"LIGHTEN"|"SCREEN"|"COLOR_DODGE"|"OVERLAY"|"SOFT_LIGHT"|"HARD_LIGHT"|"DIFFERENCE"|"EXCLUSION"|"HUE"|"SATURATION"|"COLOR"|"LUMINOSITY" }
+export const SetLayerPropertiesParamsSchema = z.object({
+  node_ids: z.array(z.string()).nonempty(),
+  name: z.string().optional(),
+  opacity: z.number().min(0).max(1).optional(),
+  visible: z.boolean().optional(),
+  locked: z.boolean().optional(),
+  blend_mode: z.enum(["NORMAL","DARKEN","MULTIPLY","COLOR_BURN","LIGHTEN","SCREEN","COLOR_DODGE","OVERLAY","SOFT_LIGHT","HARD_LIGHT","DIFFERENCE","EXCLUSION","HUE","SATURATION","COLOR","LUMINOSITY"]).optional(),
+}).strict();
+export function isSetLayerPropertiesParams(input: unknown): input is SetLayerPropertiesParams { try { SetLayerPropertiesParamsSchema.parse(input); return true; } catch { return false; } }
+export function assertSetLayerPropertiesParams(input: unknown): asserts input is SetLayerPropertiesParams { SetLayerPropertiesParamsSchema.parse(input); }
+
+export interface SetEffectsParams { node_ids: string[]; effects: any[] }
+export const SetEffectsParamsSchema = z.object({ node_ids: z.array(z.string()).nonempty(), effects: z.array(z.any()) }).strict();
+export function isSetEffectsParams(input: unknown): input is SetEffectsParams { try { SetEffectsParamsSchema.parse(input); return true; } catch { return false; } }
+export function assertSetEffectsParams(input: unknown): asserts input is SetEffectsParams { SetEffectsParamsSchema.parse(input); }
+
+// --- Subcategory 3.4: Modify (Text) ---
+export interface SetTextCharactersParams { node_id: string; new_characters: string }
+export const SetTextCharactersParamsSchema = z.object({ node_id: z.string().min(1), new_characters: z.string() }).strict();
+
+export interface FontName { family: string; style: string }
+export interface SetTextStyleParams {
+  node_ids: string[];
+  font_size?: number;
+  font_name?: FontName;
+  text_align_horizontal?: "LEFT" | "CENTER" | "RIGHT" | "JUSTIFIED";
+  text_auto_resize?: "NONE" | "WIDTH_AND_HEIGHT" | "HEIGHT";
+  line_height_percent?: number;
+  letter_spacing_percent?: number;
+  text_case?: "ORIGINAL" | "UPPER" | "LOWER" | "TITLE";
+  text_decoration?: "NONE" | "STRIKETHROUGH" | "UNDERLINE";
 }
-export interface CreateTextResultNode {
-  id: string;
-  name: string;
-  x: number;
-  y: number;
-  width: number;
-  height: number;
-  characters: string;
-  fontSize: number;
-  fontWeight: number;
-  fontName: any; // FontName | 'MIXED'
-  fills: any[];
-  parentId?: string;
+export const SetTextStyleParamsSchema = z.object({
+  node_ids: z.array(z.string()).nonempty(),
+  font_size: z.number().optional(),
+  font_name: z.object({ family: z.string(), style: z.string() }).strict().optional(),
+  text_align_horizontal: z.enum(["LEFT","CENTER","RIGHT","JUSTIFIED"]).optional(),
+  text_auto_resize: z.enum(["NONE","WIDTH_AND_HEIGHT","HEIGHT"]).optional(),
+  line_height_percent: z.number().optional(),
+  letter_spacing_percent: z.number().optional(),
+  text_case: z.enum(["ORIGINAL","UPPER","LOWER","TITLE"]).optional(),
+  text_decoration: z.enum(["NONE","STRIKETHROUGH","UNDERLINE"]).optional(),
+}).strict().refine((d: SetTextStyleParams) => {
+  return d.font_size !== undefined || d.font_name !== undefined || d.text_align_horizontal !== undefined || d.text_auto_resize !== undefined || d.line_height_percent !== undefined || d.letter_spacing_percent !== undefined || d.text_case !== undefined || d.text_decoration !== undefined;
+}, { message: "Provide at least one style property to apply" });
+
+// --- Subcategory 3.3: Modify (Layout) ---
+export interface SetAutoLayoutParams {
+  node_ids: string[];
+  layout_mode?: "HORIZONTAL" | "VERTICAL" | "NONE" | "GRID";
+  padding_left?: number;
+  padding_right?: number;
+  padding_top?: number;
+  padding_bottom?: number;
+  item_spacing?: number;
+  primary_axis_align_items?: "MIN" | "MAX" | "CENTER" | "SPACE_BETWEEN";
+  counter_axis_align_items?: "MIN" | "MAX" | "CENTER";
+  primary_axis_sizing_mode?: "FIXED" | "AUTO";
+  counter_axis_sizing_mode?: "FIXED" | "AUTO";
 }
-export interface CreateTextResult {
-  success: true;
-  summary: string;
-  modifiedNodeIds: string[];
-  node: CreateTextResultNode;
+export const SetAutoLayoutParamsSchema = z.object({
+  node_ids: z.array(z.string()).nonempty(),
+  layout_mode: z.enum(["HORIZONTAL","VERTICAL","NONE","GRID"]).optional(),
+  padding_left: z.number().optional(),
+  padding_right: z.number().optional(),
+  padding_top: z.number().optional(),
+  padding_bottom: z.number().optional(),
+  item_spacing: z.number().optional(),
+  primary_axis_align_items: z.enum(["MIN","MAX","CENTER","SPACE_BETWEEN"]).optional(),
+  counter_axis_align_items: z.enum(["MIN","MAX","CENTER"]).optional(),
+  primary_axis_sizing_mode: z.enum(["FIXED","AUTO"]).optional(),
+  counter_axis_sizing_mode: z.enum(["FIXED","AUTO"]).optional(),
+}).strict();
+
+export interface SetAutoLayoutChildParams {
+  node_ids: string[];
+  layout_align?: "STRETCH" | "INHERIT" | "MIN" | "CENTER" | "MAX";
+  layout_grow?: 0 | 1;
+  layout_positioning?: "AUTO" | "ABSOLUTE";
 }
-export const CreateTextParamsSchema = z.object({
+export const SetAutoLayoutChildParamsSchema = z.object({
+  node_ids: z.array(z.string()).nonempty(),
+  layout_align: z.enum(["STRETCH","INHERIT","MIN","CENTER","MAX"]).optional(),
+  layout_grow: z.union([z.literal(0), z.literal(1)]).optional(),
+  layout_positioning: z.enum(["AUTO","ABSOLUTE"]).optional(),
+}).strict();
+
+export interface SetConstraintsParams { node_ids: string[]; horizontal: "MIN"|"MAX"|"CENTER"|"STRETCH"|"SCALE"; vertical: "MIN"|"MAX"|"CENTER"|"STRETCH"|"SCALE" }
+export const SetConstraintsParamsSchema = z.object({
+  node_ids: z.array(z.string()).nonempty(),
+  horizontal: z.enum(["MIN","MAX","CENTER","STRETCH","SCALE"]),
+  vertical: z.enum(["MIN","MAX","CENTER","STRETCH","SCALE"]),
+}).strict();
+
+ 
+// Prototyping: set_reaction (v2 tool)
+export interface SetReactionParams { node_ids: string[]; reactions: any[] }
+export interface SetReactionResult { success: true; modified_node_ids: string[]; summary: string }
+export const SetReactionParamsSchema = z.object({ node_ids: z.array(z.string()).nonempty(), reactions: z.array(z.any()) }).strict();
+
+ 
+ 
+ 
+// --- Subcategory 3.1: Create Tools ---
+export interface CreateFrameParams { name: string; parent_id?: string; width?: number; height?: number; x?: number; y?: number }
+export const CreateFrameParamsSchema = z.object({
+  name: z.string().min(1),
+  parent_id: z.string().min(1).optional(),
+  width: z.number().optional(),
+  height: z.number().optional(),
   x: z.number().optional(),
   y: z.number().optional(),
-  text: z.string().optional(),
-  fontSize: z.number().optional(),
-  fontWeight: z.number().optional(),
-  fontColor: RGBASchema.optional(),
-  name: z.string().optional(),
-  parentId: z.string().optional(),
+}).passthrough();
+
+export interface CreateRectangleParams { name: string; parent_id?: string; width?: number; height?: number; x?: number; y?: number }
+export const CreateRectangleParamsSchema = z.object({
+  name: z.string().min(1),
+  parent_id: z.string().min(1).optional(),
+  width: z.number().optional(),
+  height: z.number().optional(),
+  x: z.number().optional(),
+  y: z.number().optional(),
 }).strict();
-export function isCreateTextParams(input: unknown): input is CreateTextParams {
-  try {
-    CreateTextParamsSchema.parse(input);
-    return true;
-  } catch {
-    return false;
-  }
-}
-export function assertCreateTextParams(input: unknown): asserts input is CreateTextParams {
-  CreateTextParamsSchema.parse(input);
-}
+
+export interface CreateEllipseParams { name: string; parent_id?: string; width?: number; height?: number; x?: number; y?: number }
+export const CreateEllipseParamsSchema = z.object({
+  name: z.string().min(1),
+  parent_id: z.string().min(1).optional(),
+  width: z.number().optional(),
+  height: z.number().optional(),
+  x: z.number().optional(),
+  y: z.number().optional(),
+}).strict();
+
+export interface CreatePolygonParams { name: string; parent_id?: string; side_count?: number; radius?: number; x?: number; y?: number }
+export const CreatePolygonParamsSchema = z.object({
+  name: z.string().min(1),
+  parent_id: z.string().min(1).optional(),
+  side_count: z.number().int().min(3).optional(),
+  radius: z.number().positive().optional(),
+  x: z.number().optional(),
+  y: z.number().optional(),
+}).strict();
+
+export interface CreateStarParams { name: string; parent_id?: string; point_count?: number; outer_radius?: number; inner_radius_ratio?: number; x?: number; y?: number }
+export const CreateStarParamsSchema = z.object({
+  name: z.string().min(1),
+  parent_id: z.string().min(1).optional(),
+  point_count: z.number().int().min(3).optional(),
+  outer_radius: z.number().positive().optional(),
+  inner_radius_ratio: z.number().min(0).max(1).optional(),
+  x: z.number().optional(),
+  y: z.number().optional(),
+}).strict();
+
+export interface CreateLineParams { name: string; parent_id?: string; length?: number; x?: number; y?: number; rotation_degrees?: number }
+export const CreateLineParamsSchema = z.object({
+  name: z.string().min(1),
+  parent_id: z.string().min(1).optional(),
+  length: z.number().positive().optional(),
+  x: z.number().optional(),
+  y: z.number().optional(),
+  rotation_degrees: z.number().optional(),
+}).strict();
+
+// Reusable params schema for create_text (previously inline in validation)
+export const CreateTextParamsSchema = z
+  .object({
+    characters: z.string(),
+    parent_id: z.string(),
+    x: z.number().optional(),
+    y: z.number().optional(),
+    name: z.string().optional(),
+    // Optional text styling overrides supported by the plugin
+    font_size: z.number().optional(),
+    font_weight: z.union([z.number(), z.string()]).optional(),
+    font_color: z
+      .object({
+        r: z.number().optional(),
+        g: z.number().optional(),
+        b: z.number().optional(),
+        a: z.number().optional(),
+      })
+      .strict()
+      .optional(),
+  })
+  .strict();
 
 // Typed façade and schema for create_frame
-export type LayoutMode = "NONE" | "HORIZONTAL" | "VERTICAL";
+export type LayoutMode = "NONE" | "HORIZONTAL" | "VERTICAL" | "GRID";
 export type LayoutWrap = "NO_WRAP" | "WRAP";
 export type PrimaryAxisAlignItems = "MIN" | "MAX" | "CENTER" | "SPACE_BETWEEN";
 export type CounterAxisAlignItems = "MIN" | "MAX" | "CENTER" | "BASELINE";
@@ -778,155 +454,17 @@ export type LayoutSizing = "FIXED" | "HUG" | "FILL";
 // Typed façade and schema for create_rectangle
 export interface RGBA { r: number; g: number; b: number; a?: number }
 export interface ConstraintsKV { horizontal: "MIN" | "CENTER" | "MAX" | "STRETCH" | "SCALE"; vertical: "MIN" | "CENTER" | "MAX" | "STRETCH" | "SCALE" }
-export interface CreateRectangleParams {
-  x?: number;
-  y?: number;
-  width?: number;
-  height?: number;
-  name?: string;
-  parentId?: string;
-  fill?: RGBA;
-  stroke?: RGBA;
-  strokeWeight?: number;
-  strokeAlign?: "CENTER" | "INSIDE" | "OUTSIDE";
-  cornerRadius?: number;
-  topLeftRadius?: number;
-  topRightRadius?: number;
-  bottomLeftRadius?: number;
-  bottomRightRadius?: number;
-  rotation?: number;
-  opacity?: number;
-  visible?: boolean;
-  locked?: boolean;
-  layoutAlign?: "MIN" | "CENTER" | "MAX" | "STRETCH" | "INHERIT";
-  constraints?: ConstraintsKV;
-  select?: boolean;
-}
-export interface CreateRectangleResult {
-  success: true;
-  summary: string;
-  modifiedNodeIds: string[];
-  node: { id: string; name: string; x: number; y: number; width: number; height: number; parentId?: string };
-}
-export const CreateRectangleParamsSchema = z.object({
-  x: z.number().optional(),
-  y: z.number().optional(),
-  width: z.number().optional(),
-  height: z.number().optional(),
-  name: z.string().optional(),
-  parentId: z.string().optional(),
-  fill: RGBASchema.optional(),
-  stroke: RGBASchema.optional(),
-  strokeWeight: z.number().min(0).optional(),
-  strokeAlign: z.enum(["CENTER", "INSIDE", "OUTSIDE"]).optional(),
-  cornerRadius: z.number().min(0).optional(),
-  topLeftRadius: z.number().min(0).optional(),
-  topRightRadius: z.number().min(0).optional(),
-  bottomLeftRadius: z.number().min(0).optional(),
-  bottomRightRadius: z.number().min(0).optional(),
-  rotation: z.number().optional(),
-  opacity: z.number().min(0).max(1).optional(),
-  visible: z.boolean().optional(),
-  locked: z.boolean().optional(),
-  layoutAlign: z.enum(["MIN", "CENTER", "MAX", "STRETCH", "INHERIT"]).optional(),
-  constraints: z.object({ horizontal: z.enum(["MIN", "CENTER", "MAX", "STRETCH", "SCALE"]), vertical: z.enum(["MIN", "CENTER", "MAX", "STRETCH", "SCALE"]) }).strict().optional(),
-  select: z.boolean().optional(),
-}).strict();
-export function isCreateRectangleParams(input: unknown): input is CreateRectangleParams {
-  try {
-    CreateRectangleParamsSchema.parse(input);
-    return true;
-  } catch {
-    return false;
-  }
-}
-export function assertCreateRectangleParams(input: unknown): asserts input is CreateRectangleParams {
-  CreateRectangleParamsSchema.parse(input);
-}
-
 // Typed façade and schema for create_frame
-export interface CreateFrameParams {
-  x?: number;
-  y?: number;
-  width?: number;
-  height?: number;
-  name?: string;
-  parentId?: string;
-  fillColor?: RGBA;
-  strokeColor?: RGBA;
-  strokeWeight?: number;
-  layoutMode?: LayoutMode;
-  layoutWrap?: LayoutWrap;
-  paddingTop?: number;
-  paddingRight?: number;
-  paddingBottom?: number;
-  paddingLeft?: number;
-  primaryAxisAlignItems?: PrimaryAxisAlignItems;
-  counterAxisAlignItems?: CounterAxisAlignItems;
-  layoutSizingHorizontal?: LayoutSizing;
-  layoutSizingVertical?: LayoutSizing;
-  itemSpacing?: number;
-}
-export interface CreatedFrameNodeSummary {
-  id: string;
-  name: string;
-  x: number;
-  y: number;
-  width: number;
-  height: number;
-  fills?: any[];
-  strokes?: any[];
-  strokeWeight?: number;
-  layoutMode?: string;
-  layoutWrap?: string;
-  parentId?: string;
-}
-export interface CreateFrameResult {
-  success: true;
-  summary: string;
-  modifiedNodeIds: string[];
-  node: CreatedFrameNodeSummary;
-}
-export const CreateFrameParamsSchema = z.object({
-  x: z.number().optional(),
-  y: z.number().optional(),
-  width: z.number().optional(),
-  height: z.number().optional(),
-  name: z.string().optional(),
-  parentId: z.string().optional(),
-  fillColor: RGBASchema.optional(),
-  strokeColor: RGBASchema.optional(),
-  strokeWeight: z.number().optional(),
-  layoutMode: z.enum(["NONE","HORIZONTAL","VERTICAL"]).optional(),
-  layoutWrap: z.enum(["NO_WRAP","WRAP"]).optional(),
-  paddingTop: z.number().optional(),
-  paddingRight: z.number().optional(),
-  paddingBottom: z.number().optional(),
-  paddingLeft: z.number().optional(),
-  primaryAxisAlignItems: z.enum(["MIN","MAX","CENTER","SPACE_BETWEEN"]).optional(),
-  counterAxisAlignItems: z.enum(["MIN","MAX","CENTER","BASELINE"]).optional(),
-  layoutSizingHorizontal: z.enum(["FIXED","HUG","FILL"]).optional(),
-  layoutSizingVertical: z.enum(["FIXED","HUG","FILL"]).optional(),
-  itemSpacing: z.number().optional(),
-}).strict();
-export function isCreateFrameParams(input: unknown): input is CreateFrameParams {
-  try {
-    CreateFrameParamsSchema.parse(input);
-    return true;
-  } catch {
-    return false;
-  }
-}
-export function assertCreateFrameParams(input: unknown): asserts input is CreateFrameParams {
-  CreateFrameParamsSchema.parse(input);
-}
 
 // Typed façade and schema for create_component_instance
 export interface CreateComponentInstanceParams {
-  componentKey: string;
+  // Canonical keys are snake_case. Backends expect `component_key` or
+  // `component_id` and `parent_id` in the payload.
+  component_key?: string;
+  component_id?: string;
   x?: number;
   y?: number;
-  parentId?: string;
+  parent_id?: string;
 }
 export interface CreateComponentInstanceResultNode {
   id: string;
@@ -935,21 +473,28 @@ export interface CreateComponentInstanceResultNode {
   y: number;
   width?: number;
   height?: number;
-  componentId: string;
-  parentId?: string;
+  // Canonicalized fields in snake_case to match backend expectations.
+  component_id: string;
+  parent_id?: string;
 }
 export interface CreateComponentInstanceResult {
   success: true;
   summary: string;
-  modifiedNodeIds: string[];
+  modified_node_ids: string[];
   node: CreateComponentInstanceResultNode;
 }
-export const CreateComponentInstanceParamsSchema = z.object({
-  componentKey: z.string(),
-  x: z.number().optional(),
-  y: z.number().optional(),
-  parentId: z.string().optional(),
-}).strict();
+export const CreateComponentInstanceParamsSchema = z
+  .object({
+    component_key: z.string().optional(),
+    component_id: z.string().optional(),
+    x: z.number().optional(),
+    y: z.number().optional(),
+    parent_id: z.string().optional(),
+  })
+  .strict()
+  .refine((d: any) => {
+    return !!(d.component_key || d.component_id);
+  }, { message: "Provide component_key or component_id" });
 export function isCreateComponentInstanceParams(input: unknown): input is CreateComponentInstanceParams {
   try { CreateComponentInstanceParamsSchema.parse(input); return true; } catch { return false; }
 }
@@ -957,458 +502,91 @@ export function assertCreateComponentInstanceParams(input: unknown): asserts inp
   CreateComponentInstanceParamsSchema.parse(input);
 }
 
-// Typed façade and schema for create_component
-export interface CreateComponentParams { nodeId: string }
-export interface CreateComponentResult {
-  success: true;
-  summary: string;
-  modifiedNodeIds: string[];
-  componentId: string;
-  instanceId: string;
-  name: string;
+ 
+
+ 
+
+ 
+
+ 
+
+
+
+
+
+
+
+
+// === Category 4 — Meta & Utility ===
+export interface DeleteNodesParams { node_ids: string[] }
+export const DeleteNodesParamsSchema = z.object({ node_ids: z.array(z.string()).nonempty() }).strict();
+export function isDeleteNodesParams(input: unknown): input is DeleteNodesParams {
+  try { DeleteNodesParamsSchema.parse(input); return true; } catch { return false; }
 }
-export const CreateComponentParamsSchema = z.object({ nodeId: z.string() }).strict();
-export function isCreateComponentParams(input: unknown): input is CreateComponentParams {
-  try { CreateComponentParamsSchema.parse(input); return true; } catch { return false; }
-}
-export function assertCreateComponentParams(input: unknown): asserts input is CreateComponentParams {
-  CreateComponentParamsSchema.parse(input);
+export function assertDeleteNodesParams(input: unknown): asserts input is DeleteNodesParams {
+  DeleteNodesParamsSchema.parse(input);
 }
 
-// Typed façade and schema for publish_components
-export interface PublishComponentsParams {
-  description?: string;
-  cancelIfNoChanges?: boolean;
-  timeoutMs?: number;
-  includeComponents?: boolean;
-  includeComponentSets?: boolean;
-  includeStylesPaint?: boolean;
-  includeStylesText?: boolean;
-  includeStylesEffect?: boolean;
-  includeStylesGrid?: boolean;
-}
-export interface PublishComponentsResultCounts { components: number; componentSets: number; styles: number }
-export interface PublishComponentsResult {
-  success: true;
-  summary: string;
-  modifiedNodeIds: string[];
-  publishedComponentIds: string[];
-  publishedComponentSetIds: string[];
-  publishedStyleIds: string[];
-  counts: PublishComponentsResultCounts;
-}
-export const PublishComponentsParamsSchema = z.object({
-  description: z.string().optional(),
-  cancelIfNoChanges: z.boolean().optional(),
-  timeoutMs: z.number().int().min(1).optional(),
-  includeComponents: z.boolean().optional(),
-  includeComponentSets: z.boolean().optional(),
-  includeStylesPaint: z.boolean().optional(),
-  includeStylesText: z.boolean().optional(),
-  includeStylesEffect: z.boolean().optional(),
-  includeStylesGrid: z.boolean().optional(),
-}).strict();
-export function isPublishComponentsParams(input: unknown): input is PublishComponentsParams {
-  try { PublishComponentsParamsSchema.parse(input); return true; } catch { return false; }
-}
-export function assertPublishComponentsParams(input: unknown): asserts input is PublishComponentsParams {
-  PublishComponentsParamsSchema.parse(input);
-}
-
-// Typed façade and schema for get_instance_overrides
-export interface GetInstanceOverridesParams { instanceNodeId?: string }
-export const GetInstanceOverridesParamsSchema = z.object({ instanceNodeId: z.string().optional() }).strict();
-export function isGetInstanceOverridesParams(input: unknown): input is GetInstanceOverridesParams { try { GetInstanceOverridesParamsSchema.parse(input); return true; } catch { return false; } }
-export function assertGetInstanceOverridesParams(input: unknown): asserts input is GetInstanceOverridesParams { GetInstanceOverridesParamsSchema.parse(input); }
-
-// Typed façade and schema for set_instance_overrides
-export interface SetInstanceOverridesParams {
-  targetNodeIds: string[];
-  sourceInstanceId: string;
-  swapComponent?: boolean;
-  includeFields?: string[];
-  excludeFields?: string[];
-  previewOnly?: boolean;
-  stopOnFirstError?: boolean;
-}
-export interface SetInstanceOverridesResult {
-  success: true;
-  summary: string;
-  modifiedNodeIds: string[];
-  sourceInstanceId: string;
-  mainComponentId: string;
-  targetInstanceIds: string[];
-  totalOverridesApplied: number;
-  results: Array<{ success: boolean; instanceId: string; instanceName: string; appliedCount?: number; message?: string; code?: string }>;
-  preview?: boolean;
-}
-export const SetInstanceOverridesParamsSchema = z.object({
-  targetNodeIds: z.array(z.string()).nonempty(),
-  sourceInstanceId: z.string(),
-  swapComponent: z.boolean().optional(),
-  includeFields: z.array(z.string()).nonempty().optional(),
-  excludeFields: z.array(z.string()).nonempty().optional(),
-  previewOnly: z.boolean().optional(),
-  stopOnFirstError: z.boolean().optional(),
-}).strict();
-export function isSetInstanceOverridesParams(input: unknown): input is SetInstanceOverridesParams { try { SetInstanceOverridesParamsSchema.parse(input); return true; } catch { return false; } }
-export function assertSetInstanceOverridesParams(input: unknown): asserts input is SetInstanceOverridesParams { SetInstanceOverridesParamsSchema.parse(input); }
-
-// Typed façade and schema for set_fill_color
-export interface SetFillColorParams {
-  nodeId?: string;
-  nodeIds?: string[];
-  color?: RGBA;
-  styleId?: string;
-  replace?: boolean;
-}
-export interface SetFillColorResult {
-  success: true;
-  summary: string;
-  modifiedNodeIds: string[];
-  mode: "color" | "style";
-  replaced: boolean;
-}
-export const SetFillColorParamsSchema = z
-  .object({
-    nodeId: z.string().optional(),
-    nodeIds: z.array(z.string()).nonempty().optional(),
-    color: RGBASchema.optional(),
-    styleId: z.string().optional(),
-    replace: z.boolean().optional(),
-  })
-  .strict()
-  .refine(
-    (val: any) => (!!val.nodeId || !!val.nodeIds) && (!!val.color || typeof val.styleId === "string"),
-    { message: "Must provide nodeId or nodeIds, and either color or styleId" }
-  );
-export function isSetFillColorParams(input: unknown): input is SetFillColorParams {
-  try {
-    SetFillColorParamsSchema.parse(input);
-    return true;
-  } catch {
-    return false;
-  }
-}
-export function assertSetFillColorParams(input: unknown): asserts input is SetFillColorParams {
-  SetFillColorParamsSchema.parse(input);
-}
-
-// Typed façade and schema for set_stroke_color
-export interface SetStrokeColorParams {
-  nodeId: string;
-  color: RGBA;
-  weight?: number;
-}
-export interface SetStrokeColorResultNode {
-  id: string;
-  name: string;
-  strokes: any[];
-  strokeWeight?: number;
-}
-export interface SetStrokeColorResult {
-  success: true;
-  summary: string;
-  modifiedNodeIds: string[];
-  node: SetStrokeColorResultNode;
-}
-export const SetStrokeColorParamsSchema = z
-  .object({ nodeId: z.string(), color: RGBASchema, weight: z.number().min(0).optional() })
+// Additional small, reusable schemas to avoid inline duplication
+export const ShowNotificationParamsSchema = z
+  .object({ message: z.string(), is_error: z.boolean().optional() })
   .strict();
-export function isSetStrokeColorParams(input: unknown): input is SetStrokeColorParams {
-  try {
-    SetStrokeColorParamsSchema.parse(input);
-    return true;
-  } catch {
-    return false;
-  }
-}
-export function assertSetStrokeColorParams(input: unknown): asserts input is SetStrokeColorParams {
-  SetStrokeColorParamsSchema.parse(input);
-}
 
-// Typed façade and schema for set_corner_radius
-export interface SetCornerRadiusParams {
-  nodeId: string;
-  radius: number;
-  corners?: [boolean, boolean, boolean, boolean];
-}
-export interface SetCornerRadiusResult {
-  success: true;
-  summary: string;
-  modifiedNodeIds: string[];
-  id: string;
-  name: string;
-  cornerRadius?: number;
-  topLeftRadius?: number;
-  topRightRadius?: number;
-  bottomRightRadius?: number;
-  bottomLeftRadius?: number;
-}
-export const SetCornerRadiusParamsSchema = z
-  .object({
-    nodeId: z.string(),
-    radius: z.number().min(0),
-    corners: z.tuple([z.boolean(), z.boolean(), z.boolean(), z.boolean()]).optional()
-  })
-  .strict();
-export function isSetCornerRadiusParams(input: unknown): input is SetCornerRadiusParams {
-  try {
-    SetCornerRadiusParamsSchema.parse(input);
-    return true;
-  } catch {
-    return false;
-  }
-}
-export function assertSetCornerRadiusParams(input: unknown): asserts input is SetCornerRadiusParams {
-  SetCornerRadiusParamsSchema.parse(input);
-}
+export const CommitUndoStepParamsSchema = z.object({}).strict();
 
-// Typed façade and schema for set_gradient_fill
-export interface GradientStop { position: number; color: RGBA }
-export type GradientType = "GRADIENT_LINEAR" | "GRADIENT_RADIAL" | "GRADIENT_ANGULAR" | "GRADIENT_DIAMOND";
-export interface GradientPaint {
-  type: GradientType;
-  gradientStops: GradientStop[];
-  gradientTransform: [[number, number, number], [number, number, number]];
-  opacity?: number;
-  visible?: boolean;
-  blendMode?: string;
-}
-export interface SetGradientFillParams { nodeId: string; gradient: GradientPaint }
-export interface SetGradientFillResult {
-  success: true;
-  summary: string;
-  modifiedNodeIds: string[];
-  nodeId: string;
-  fills: any[];
-  gradientType: GradientType;
-}
-export const SetGradientFillParamsSchema = z
-  .object({
-    nodeId: z.string(),
-    gradient: z.object({
-      type: GradientTypeSchema,
-      gradientStops: z.array(GradientStopSchema).min(2),
-      gradientTransform: GradientTransformSchema,
-      opacity: z.number().min(0).max(1).optional(),
-      visible: z.boolean().optional(),
-      blendMode: z.string().optional(),
-    }).strict(),
-  })
-  .strict();
-export function isSetGradientFillParams(input: unknown): input is SetGradientFillParams {
-  try { SetGradientFillParamsSchema.parse(input); return true; } catch { return false; }
-}
-export function assertSetGradientFillParams(input: unknown): asserts input is SetGradientFillParams {
-  SetGradientFillParamsSchema.parse(input);
-}
+ 
 
-// Typed façade and schema for move_node
-export interface MoveNodeParams { nodeId: string; x: number; y: number }
-export interface MoveNodeResultNode { id: string; name: string; x: number; y: number }
-export interface MoveNodeResult { success: true; summary: string; modifiedNodeIds: string[]; node: MoveNodeResultNode }
-export const MoveNodeParamsSchema = z.object({ nodeId: z.string(), x: z.number(), y: z.number() }).strict();
-export function isMoveNodeParams(input: unknown): input is MoveNodeParams {
-  try { MoveNodeParamsSchema.parse(input); return true; } catch { return false; }
-}
-export function assertMoveNodeParams(input: unknown): asserts input is MoveNodeParams {
-  MoveNodeParamsSchema.parse(input);
-}
-
-// Typed façade and schema for resize_node
-export interface ResizeNodeParams { nodeId: string; width: number; height: number }
-export interface ResizeNodeResultNode { id: string; name: string; width: number; height: number }
-export interface ResizeNodeResult { success: true; summary: string; modifiedNodeIds: string[]; node: ResizeNodeResultNode }
-export const ResizeNodeParamsSchema = z.object({ nodeId: z.string(), width: z.number(), height: z.number() }).strict();
-export function isResizeNodeParams(input: unknown): input is ResizeNodeParams {
-  try { ResizeNodeParamsSchema.parse(input); return true; } catch { return false; }
-}
-export function assertResizeNodeParams(input: unknown): asserts input is ResizeNodeParams {
-  ResizeNodeParamsSchema.parse(input);
-}
-
-// Typed façade and schema for clone_node
-export interface CloneNodeParams {
-  nodeId: string;
-  x?: number;
-  y?: number;
-  offsetX?: number;
-  offsetY?: number;
-  parentId?: string;
-  insertIndex?: number;
-  select?: boolean;
-  name?: string;
-  locked?: boolean;
-  visible?: boolean;
-}
-export interface CloneNodeResultNode {
-  id: string;
-  name: string;
-  type: string;
-  x?: number;
-  y?: number;
-  width?: number;
-  height?: number;
-  parentId?: string;
-}
-export interface CloneNodeResult {
-  success: true;
-  summary: string;
-  modifiedNodeIds: string[];
-  node: CloneNodeResultNode;
-  originalNodeId: string;
-  parentId?: string;
-}
-export const CloneNodeParamsSchema = z.object({
-  nodeId: z.string(),
-  x: z.number().optional(),
-  y: z.number().optional(),
-  offsetX: z.number().optional(),
-  offsetY: z.number().optional(),
-  parentId: z.string().optional(),
-  insertIndex: z.number().int().min(0).optional(),
-  select: z.boolean().optional(),
-  name: z.string().optional(),
-  locked: z.boolean().optional(),
-  visible: z.boolean().optional(),
+// New Hierarchy & Structure (v2 per new-tools.md)
+export interface GroupNodesParams { node_ids: string[]; new_group_name: string; parent_id: string }
+export const GroupNodesParamsSchema = z.object({
+  node_ids: z.array(z.string()).nonempty(),
+  new_group_name: z.string().min(1),
+  parent_id: z.string().min(1),
 }).strict();
-export function isCloneNodeParams(input: unknown): input is CloneNodeParams {
-  try { CloneNodeParamsSchema.parse(input); return true; } catch { return false; }
-}
-export function assertCloneNodeParams(input: unknown): asserts input is CloneNodeParams {
-  CloneNodeParamsSchema.parse(input);
-}
 
-// Typed façade and schema for delete_node
-export interface DeleteNodeParams { nodeId: string; force?: boolean; selectParent?: boolean }
-export interface DeleteNodeResultNode { id: string; name: string; type: string }
-export interface DeleteNodeResult { success: true; summary: string; modifiedNodeIds: string[]; node: DeleteNodeResultNode; parentId?: string }
-export const DeleteNodeParamsSchema = z.object({ nodeId: z.string(), force: z.boolean().optional(), selectParent: z.boolean().optional() }).strict();
-export function isDeleteNodeParams(input: unknown): input is DeleteNodeParams {
-  try { DeleteNodeParamsSchema.parse(input); return true; } catch { return false; }
-}
-export function assertDeleteNodeParams(input: unknown): asserts input is DeleteNodeParams {
-  DeleteNodeParamsSchema.parse(input);
-}
+export interface UngroupNodeParams { node_id: string }
+export const UngroupNodeParamsSchema = z.object({ node_id: z.string().min(1) }).strict();
 
-// Typed façade and schema for delete_multiple_nodes
-export interface DeleteMultipleNodesParams {
-  nodeIds: string[];
-  chunkSize?: number;
-  delayMsBetweenChunks?: number;
-  skipLocked?: boolean;
-  stopOnFailure?: boolean;
-  previewOnly?: boolean;
-}
-export interface DeleteMultipleNodesResultItem {
-  success: boolean;
-  nodeId: string;
-  nodeInfo?: { id: string; name: string; type: string };
-  error?: string;
-  code?: string;
-  preview?: boolean;
-  wouldDelete?: boolean;
-}
-export interface DeleteMultipleNodesResult {
-  success: true;
-  summary: string;
-  modifiedNodeIds: string[];
-  nodesDeleted: number;
-  nodesFailed: number;
-  totalNodes: number;
-  results: DeleteMultipleNodesResultItem[];
-  completedInChunks: number;
-  stoppedEarly?: boolean;
-  preview?: boolean;
-  commandId: string;
-}
-export const DeleteMultipleNodesParamsSchema = z.object({
-  nodeIds: z.array(z.string()).min(1),
-  chunkSize: z.number().int().min(1).max(50).optional(),
-  delayMsBetweenChunks: z.number().int().min(0).optional(),
-  skipLocked: z.boolean().optional(),
-  stopOnFailure: z.boolean().optional(),
-  previewOnly: z.boolean().optional(),
+export interface ReparentNodesParams { node_ids_to_move: string[]; new_parent_id: string }
+export const ReparentNodesParamsSchema = z.object({
+  node_ids_to_move: z.array(z.string()).nonempty(),
+  new_parent_id: z.string().min(1),
 }).strict();
-export function isDeleteMultipleNodesParams(input: unknown): input is DeleteMultipleNodesParams {
-  try { DeleteMultipleNodesParamsSchema.parse(input); return true; } catch { return false; }
-}
-export function assertDeleteMultipleNodesParams(input: unknown): asserts input is DeleteMultipleNodesParams {
-  DeleteMultipleNodesParamsSchema.parse(input);
-}
 
-// Grouping / parenting schemas and typed façades
-export interface GroupParams { nodeIds: string[]; parentId?: string; name?: string; index?: number }
-export interface GroupResult {
-  success: true;
-  summary: string;
-  modifiedNodeIds: string[];
-  groupId: string;
-  name: string;
-  parentId: string;
-  index: number;
-  children: string[];
-}
-export const GroupParamsSchema = z.object({
-  nodeIds: z.array(z.string()).nonempty(),
-  parentId: z.string().optional(),
-  name: z.string().optional(),
-  index: z.number().int().min(0).optional(),
+export type ReorderMode = "BRING_FORWARD" | "SEND_BACKWARD" | "BRING_TO_FRONT" | "SEND_TO_BACK";
+export interface ReorderNodesParams { node_ids: string[]; mode: ReorderMode }
+export const ReorderNodesParamsSchema = z.object({
+  node_ids: z.array(z.string()).nonempty(),
+  mode: z.enum(["BRING_FORWARD","SEND_BACKWARD","BRING_TO_FRONT","SEND_TO_BACK"]),
 }).strict();
-export function isGroupParams(input: unknown): input is GroupParams { try { GroupParamsSchema.parse(input); return true; } catch { return false; } }
-export function assertGroupParams(input: unknown): asserts input is GroupParams { GroupParamsSchema.parse(input); }
 
-export interface UngroupParams { nodeId: string }
-export interface UngroupResult {
-  success: true;
-  summary: string;
-  modifiedNodeIds: string[];
-  childrenIds: string[];
-  parentId: string;
-  removedGroupId: string;
-}
-export const UngroupParamsSchema = z.object({ nodeId: z.string() }).strict();
-export function isUngroupParams(input: unknown): input is UngroupParams { try { UngroupParamsSchema.parse(input); return true; } catch { return false; } }
-export function assertUngroupParams(input: unknown): asserts input is UngroupParams { UngroupParamsSchema.parse(input); }
+// Additional schema per new-tools.md for clone_nodes
+export interface CloneNodesParams { node_ids: string[] }
+export const CloneNodesParamsSchema = z.object({ node_ids: z.array(z.string()).nonempty() }).strict();
 
-export interface ReparentParams { nodeIds: string[]; newParentId: string; index?: number }
-export interface ReparentResult {
-  success: true;
-  summary: string;
-  modifiedNodeIds: string[];
-  parentId: string;
-  insertIndex?: number;
-  movedNodeIds: string[];
-  unresolvedNodeIds?: string[];
-}
-export const ReparentParamsSchema = z.object({
-  nodeIds: z.array(z.string()).nonempty(),
-  newParentId: z.string(),
-  index: z.number().int().min(0).optional(),
+// Forward-looking schemas to satisfy validation for vector/boolean tools (per new-tools.md)
+export const PerformBooleanOperationParamsSchema = z.object({
+  node_ids: z.array(z.string()).nonempty(),
+  operation: z.enum(["UNION","SUBTRACT","INTERSECT","EXCLUDE"]),
+  parent_id: z.string().min(1),
 }).strict();
-export function isReparentParams(input: unknown): input is ReparentParams { try { ReparentParamsSchema.parse(input); return true; } catch { return false; } }
-export function assertReparentParams(input: unknown): asserts input is ReparentParams { ReparentParamsSchema.parse(input); }
-
-export interface InsertChildParams { parentId: string; childId: string; index: number }
-export interface InsertChildResult {
-  success: true;
-  summary: string;
-  modifiedNodeIds: string[];
-  parentId: string;
-  childId: string;
-  index: number;
-}
-export const InsertChildParamsSchema = z.object({
-  parentId: z.string(),
-  childId: z.string(),
-  index: z.number().int().min(0),
+export interface PerformBooleanOperationParams { node_ids: string[]; operation: "UNION"|"SUBTRACT"|"INTERSECT"|"EXCLUDE"; parent_id: string }
+export interface PerformBooleanOperationResult { created_node_id: string | null; summary: string; unresolved_node_ids: string[] }
+export function isPerformBooleanOperationParams(input: unknown): input is PerformBooleanOperationParams { try { PerformBooleanOperationParamsSchema.parse(input); return true; } catch { return false; } }
+export function assertPerformBooleanOperationParams(input: unknown): asserts input is PerformBooleanOperationParams { PerformBooleanOperationParamsSchema.parse(input); }
+export const FlattenNodesParamsSchema = z.object({
+  node_ids: z.array(z.string()).nonempty(),
+  parent_id: z.string().min(1),
 }).strict();
-export function isInsertChildParams(input: unknown): input is InsertChildParams { try { InsertChildParamsSchema.parse(input); return true; } catch { return false; } }
-export function assertInsertChildParams(input: unknown): asserts input is InsertChildParams { InsertChildParamsSchema.parse(input); }
+export interface FlattenNodesParams { node_ids: string[]; parent_id: string }
+export interface FlattenNodesResult { created_node_id: string | null; summary: string; unresolved_node_ids: string[] }
+export function isFlattenNodesParams(input: unknown): input is FlattenNodesParams { try { FlattenNodesParamsSchema.parse(input); return true; } catch { return false; } }
+export function assertFlattenNodesParams(input: unknown): asserts input is FlattenNodesParams { FlattenNodesParamsSchema.parse(input); }
 
+// === Config & Constants ===
 const PORT = 3055;
 
+// === Channel Management ===
 // Channel management
 interface ChannelMembers {
   plugin?: ServerWebSocket<unknown>;
@@ -1418,6 +596,7 @@ interface ChannelMembers {
 const channels = new Map<string, ChannelMembers>();
 
 
+// === Message Types ===
 // Message types
 interface JoinMessage {
   type: "join";
@@ -1478,7 +657,10 @@ interface ToolResponseMessage {
   type: "tool_response";
   id: string;
   result?: any;
-  error?: string;
+  // `error` may be a string (legacy) or an object (structured). We also
+  // provide `error_structured` for explicit structured errors.
+  error?: any;
+  error_structured?: any;
 }
 // Progress updates from plugin UI to be forwarded to agent
 interface ProgressUpdateMessage {
@@ -1490,16 +672,269 @@ interface ProgressUpdateMessage {
 
 type Message = JoinMessage | NewChatMessage | UserPromptMessage | AgentResponseMessage | AgentResponseChunkMessage | SystemMessage | ErrorMessage | PingMessage | PongMessage | ToolCallMessage | ToolResponseMessage | ProgressUpdateMessage;
 
+// === Helpers: logging, file I/O, and message utilities ===
+// === Logging & File I/O ===
 function log(level: string, message: string, data?: any) {
   const timestamp = new Date().toISOString();
   console.log(`[${timestamp}] [bridge] [${level}] ${message}`, data ? JSON.stringify(data) : "");
 }
 
-function sendMessage(ws: ServerWebSocket<unknown>, message: any) {
-  if (ws.readyState === WebSocket.OPEN) {
-    ws.send(JSON.stringify(message));
+// File logging (JSONL) for full session transcripts
+const BRIDGE_DIR = fileURLToPath(new URL("./", import.meta.url));
+const ENV_LOG = (typeof process !== "undefined" && process.env && process.env.LOG_FILE) ? String(process.env.LOG_FILE) : null;
+const LOG_CANDIDATES = [
+  ...(ENV_LOG ? [ENV_LOG] : []),
+  // Prefer repo root logs.txt (../logs.txt) if writable
+  path.resolve(BRIDGE_DIR, "../logs.txt"),
+  // Fallback to bridge-local logs.txt
+  path.resolve(BRIDGE_DIR, "logs.txt"),
+  // Last-resort: cwd
+  path.resolve(process.cwd(), "logs.txt"),
+];
+
+let SELECTED_LOG_PATH: string | null = null;
+
+function tryAppendTo(filePath: string, line: string): boolean {
+  try {
+    const dir = path.dirname(filePath);
+    mkdirSync(dir, { recursive: true });
+    appendFileSync(filePath, line, { encoding: "utf8" });
+    return true;
+  } catch {
+    return false;
   }
 }
+
+// Try appending a line to the currently selected log path or the first
+// writable candidate. Returns true on success and sets SELECTED_LOG_PATH.
+function appendLineToBestCandidate(line: string): boolean {
+  if (SELECTED_LOG_PATH) {
+    if (tryAppendTo(SELECTED_LOG_PATH, line)) return true;
+    SELECTED_LOG_PATH = null; // reset and try candidates
+  }
+
+  for (const candidate of LOG_CANDIDATES) {
+    if (tryAppendTo(candidate, line)) {
+      SELECTED_LOG_PATH = candidate;
+      log("info", "📝 Using logs file", { path: SELECTED_LOG_PATH });
+      return true;
+    }
+  }
+
+  return false;
+}
+
+function logToFile(entry: {
+  timestamp?: string;
+  channel: string;
+  from: "plugin" | "agent";
+  type: string;
+  text?: string;
+  meta?: Record<string, any>;
+}) {
+  const payload = {
+    timestamp: entry.timestamp ?? new Date().toISOString(),
+    channel: entry.channel,
+    from: entry.from,
+    type: entry.type,
+    text: entry.text,
+    meta: entry.meta,
+  };
+
+  const line = JSON.stringify(payload) + "\n";
+
+  if (appendLineToBestCandidate(line)) return;
+
+  // Fall back to console on file write errors
+  log("error", "Failed writing to logs.txt", { tried: LOG_CANDIDATES });
+}
+
+// Track outstanding tool calls to compute durations and correlate responses
+const TOOL_CALL_TRACKER = new Map<string, { command: string; params: any; start_ts: number }>();
+
+// Persist only tool events (tool_call, tool_response) to logs.txt as JSONL
+function persistToolEventIfNeeded(message: any, senderChannel: string, senderRole: "plugin" | "agent") {
+  try {
+    if (message.type === "tool_call") {
+      const m = message as any;
+      const id = m.id;
+      const command = m.command;
+      const params = m.params;
+
+      TOOL_CALL_TRACKER.set(id, { command, params, start_ts: Date.now() });
+
+      logToFile({
+        channel: senderChannel,
+        from: senderRole,
+        type: "tool_call",
+        text: command,
+        meta: { id, tool: command, params }
+      });
+    } else if (message.type === "tool_response") {
+      const m = message as any;
+      const id = m.id;
+      const tracked = TOOL_CALL_TRACKER.get(id);
+      const now = Date.now();
+      const duration_ms = tracked ? now - tracked.start_ts : undefined;
+      const tool = tracked ? tracked.command : undefined;
+      const params = tracked ? tracked.params : undefined;
+
+      const error_structured = m.error_structured || (typeof m.error === "object" ? m.error : undefined) || undefined;
+      const ok = !error_structured;
+
+      // Once logged, drop tracker entry
+      if (tracked) TOOL_CALL_TRACKER.delete(id);
+
+      logToFile({
+        channel: senderChannel,
+        from: senderRole,
+        type: "tool_response",
+        text: tool || "<unknown_tool>",
+        meta: {
+          id,
+          tool,
+          ok,
+          status: ok ? "success" : "error",
+          duration_ms,
+          params,
+          result: ok ? m.result : undefined,
+          error: error_structured || (typeof m.error === "string" ? m.error : undefined)
+        }
+      });
+    }
+  } catch (e) {
+    log("warn", "persistToolEventIfNeeded failed", { error: (e as Error).message });
+  }
+}
+
+// === WebSocket Utilities ===
+function sendMessage(ws: ServerWebSocket<unknown>, message: any) {
+  try {
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify(message));
+    }
+  } catch (e) {
+    // Non-fatal: log send failures for diagnostics
+    log("warn", "Failed to send websocket message", { error: (e as Error).message });
+  }
+}
+
+// === Param Normalization Utilities ===
+function normalizeParamsToSnakeCase(_params: any): void {
+  // Recursively convert object keys from camelCase to snake_case in-place.
+  function toSnakeCase(s: string): string {
+    return s.replace(/([A-Z])/g, "_$1").replace(/\-+/g, "_").toLowerCase();
+  }
+
+  function transform(obj: any): any {
+    if (obj === null || obj === undefined) return obj;
+    if (Array.isArray(obj)) return obj.map(transform);
+    if (typeof obj !== "object") return obj;
+
+    const entries = Object.entries(obj);
+    for (const [key, value] of entries) {
+      const newKey = toSnakeCase(key);
+      const transformed = transform(value);
+      if (newKey !== key) {
+        // assign new key and delete old key
+        (obj as any)[newKey] = transformed;
+        delete (obj as any)[key];
+      } else {
+        (obj as any)[key] = transformed;
+      }
+    }
+    return obj;
+  }
+
+  try {
+    transform(_params);
+  } catch (e) {
+    log("warn", "normalizeParamsToSnakeCase failed", { error: (e as Error).message });
+  }
+}
+
+// === Schema Registry ===
+// Central tool schemas map (single source of truth for validation)
+// Centralized schema registry used for runtime validation of incoming tool calls
+// Keep the typing permissive to avoid cross-version zod type export issues
+const TOOL_SCHEMAS: Record<string, any> = {
+  // Category 1: Scoping & Orientation
+  get_canvas_snapshot: GetCanvasSnapshotParamsSchema,
+
+  // Category 2: Observation & Inspection
+  find_nodes: FindNodesParamsSchema,
+  get_node_details: GetNodeDetailsParamsSchema,
+  get_image_of_node: GetImageOfNodeParamsSchema,
+  get_node_ancestry: GetNodeAncestryParamsSchema,
+  get_node_hierarchy: GetNodeHierarchyParamsSchema,
+  get_document_styles: GetDocumentStylesParamsSchema,
+  get_style_consumers: GetStyleConsumersParamsSchema,
+  get_document_components: GetDocumentComponentsParamsSchema,
+  get_prototype_interactions: GetPrototypeInteractionsParamsSchema,
+
+  // Category 3: Mutation & Creation
+  // Subcategory 3.1: Create Tools
+  create_frame: CreateFrameParamsSchema,
+  create_rectangle: CreateRectangleParamsSchema,
+  create_ellipse: CreateEllipseParamsSchema,
+  create_polygon: CreatePolygonParamsSchema,
+  create_star: CreateStarParamsSchema,
+  create_line: CreateLineParamsSchema,
+  create_text: CreateTextParamsSchema,
+
+  // Subcategory 3.2: Modify (General Properties)
+  set_fills: SetFillsParamsSchema,
+  set_strokes: SetStrokesParamsSchema,
+  set_corner_radius: SetCornerRadiusParamsSchema,
+  set_size: SetSizeParamsSchema,
+  set_position: SetPositionParamsSchema,
+  set_rotation: SetRotationParamsSchema,
+  set_layer_properties: SetLayerPropertiesParamsSchema,
+  set_effects: SetEffectsParamsSchema,
+
+  // Subcategory 3.3: Modify (Layout)
+  set_auto_layout: SetAutoLayoutParamsSchema,
+  set_auto_layout_child: SetAutoLayoutChildParamsSchema,
+  set_constraints: SetConstraintsParamsSchema,
+
+  // Subcategory 3.4: Modify (Text)
+  set_text_characters: SetTextCharactersParamsSchema,
+  set_text_style: SetTextStyleParamsSchema,
+
+  // Subcategory 3.5: Hierarchy & Structure
+  clone_nodes: CloneNodesParamsSchema,
+  group_nodes: GroupNodesParamsSchema,
+  ungroup_node: UngroupNodeParamsSchema,
+  reparent_nodes: ReparentNodesParamsSchema,
+  reorder_nodes: ReorderNodesParamsSchema,
+
+  // Subcategory 3.6: Vector & Boolean
+  perform_boolean_operation: PerformBooleanOperationParamsSchema,
+  flatten_nodes: FlattenNodesParamsSchema,
+
+  // Subcategory 3.7: Components & Styles
+  create_component_from_node: CreateComponentFromNodeParamsSchema,
+  create_component_instance: CreateComponentInstanceParamsSchema,
+  set_instance_properties: SetInstancePropertiesParamsSchema,
+  detach_instance: DetachInstanceParamsSchema,
+  create_style: CreateStyleParamsSchema,
+  apply_style: ApplyStyleParamsSchema,
+
+  // Subcategory 3.8: Variables
+  create_variable_collection: CreateVariableCollectionParamsSchema,
+  create_variable: CreateVariableParamsSchema,
+  set_variable_value: SetVariableValueParamsSchema,
+  bind_variable_to_property: BindVariableToPropertyParamsSchema,
+
+  // Subcategory 3.9: Prototyping
+  set_reaction: SetReactionParamsSchema,
+
+  // Category 4: Meta & Utility
+  scroll_and_zoom_into_view: ScrollAndZoomIntoViewParamsSchema,
+  delete_nodes: DeleteNodesParamsSchema,
+  show_notification: ShowNotificationParamsSchema,
+  commit_undo_step: CommitUndoStepParamsSchema,
+};
 
 function validateMessage(data: any): data is Message {
   if (!data || typeof data !== "object" || !data.type) {
@@ -1519,290 +954,14 @@ function validateMessage(data: any): data is Message {
     case "agent_response_chunk":
       return typeof data.chunk === "string" && typeof data.is_partial === "boolean";
     case "tool_call":
+      normalizeParamsToSnakeCase(data.params);
       if (!(typeof data.id === "string" && typeof data.command === "string" && data.params !== undefined)) {
         return false;
       }
-      // Per-command params validation
-      if (data.command === "get_document_info") {
-        try {
-          GetDocumentInfoParamsSchema.parse(data.params);
-        } catch (e) {
-          log("warn", "Invalid params for get_document_info", { error: (e as Error).message });
-          return false;
-        }
-      } else if (data.command === "get_selection") {
-        try {
-          GetSelectionParamsSchema.parse(data.params);
-        } catch (e) {
-          log("warn", "Invalid params for get_selection", { error: (e as Error).message });
-          return false;
-        }
-      } else if (data.command === "get_node_info") {
-        try {
-          GetNodeInfoParamsSchema.parse(data.params);
-        } catch (e) {
-          log("warn", "Invalid params for get_node_info", { error: (e as Error).message });
-          return false;
-        }
-      } else if (data.command === "get_nodes_info") {
-        try {
-          GetNodesInfoParamsSchema.parse(data.params);
-        } catch (e) {
-          log("warn", "Invalid params for get_nodes_info", { error: (e as Error).message });
-          return false;
-        }
-      } else if (data.command === "scan_text_nodes") {
-        try {
-          ScanTextNodesParamsSchema.parse(data.params);
-        } catch (e) {
-          log("warn", "Invalid params for scan_text_nodes", { error: (e as Error).message });
-          return false;
-        }
-      } else if (data.command === "scan_nodes_by_types") {
-        try {
-          ScanNodesByTypesParamsSchema.parse(data.params);
-        } catch (e) {
-          log("warn", "Invalid params for scan_nodes_by_types", { error: (e as Error).message });
-          return false;
-        }
-      } else if (data.command === "set_multiple_text_contents") {
-        try {
-          SetMultipleTextContentsParamsSchema.parse(data.params);
-        } catch (e) {
-          log("warn", "Invalid params for set_multiple_text_contents", { error: (e as Error).message });
-          return false;
-        }
-      } else if (data.command === "get_local_components") {
-        try {
-          GetLocalComponentsParamsSchema.parse(data.params);
-        } catch (e) {
-          log("warn", "Invalid params for get_local_components", { error: (e as Error).message });
-          return false;
-        }
-      } else if (data.command === "list_available_fonts") {
-        try {
-          ListAvailableFontsParamsSchema.parse(data.params);
-        } catch (e) {
-          log("warn", "Invalid params for list_available_fonts", { error: (e as Error).message });
-          return false;
-        }
-      } else if (data.command === "get_styles") {
-        try {
-          GetStylesParamsSchema.parse(data.params);
-        } catch (e) {
-          log("warn", "Invalid params for get_styles", { error: (e as Error).message });
-          return false;
-        }
-      } else if (data.command === "get_reactions") {
-        try {
-          GetReactionsParamsSchema.parse(data.params);
-        } catch (e) {
-          log("warn", "Invalid params for get_reactions", { error: (e as Error).message });
-          return false;
-        }
-      } else if (data.command === "read_my_design") {
-        try {
-          ReadMyDesignParamsSchema.parse(data.params);
-        } catch (e) {
-          log("warn", "Invalid params for read_my_design", { error: (e as Error).message });
-          return false;
-        }
-      } else if (data.command === "create_rectangle") {
-        try {
-          CreateRectangleParamsSchema.parse(data.params);
-        } catch (e) {
-          log("warn", "Invalid params for create_rectangle", { error: (e as Error).message });
-          return false;
-        }
-      } else if (data.command === "create_text") {
-        try {
-          CreateTextParamsSchema.parse(data.params);
-        } catch (e) {
-          log("warn", "Invalid params for create_text", { error: (e as Error).message });
-          return false;
-        }
-      } else if (data.command === "set_text_content") {
-        try {
-          SetTextContentParamsSchema.parse(data.params);
-        } catch (e) {
-          log("warn", "Invalid params for set_text_content", { error: (e as Error).message });
-          return false;
-        }
-      } else if (data.command === "create_frame") {
-        try {
-          CreateFrameParamsSchema.parse(data.params);
-        } catch (e) {
-          log("warn", "Invalid params for create_frame", { error: (e as Error).message });
-          return false;
-        }
-      } else if (data.command === "create_component_instance") {
-        try {
-          CreateComponentInstanceParamsSchema.parse(data.params);
-        } catch (e) {
-          log("warn", "Invalid params for create_component_instance", { error: (e as Error).message });
-          return false;
-        }
-      } else if (data.command === "set_fill_color") {
-        try {
-          SetFillColorParamsSchema.parse(data.params);
-        } catch (e) {
-          log("warn", "Invalid params for set_fill_color", { error: (e as Error).message });
-          return false;
-        }
-      } else if (data.command === "set_stroke_color") {
-        try {
-          SetStrokeColorParamsSchema.parse(data.params);
-        } catch (e) {
-          log("warn", "Invalid params for set_stroke_color", { error: (e as Error).message });
-          return false;
-        }
-      } else if (data.command === "set_corner_radius") {
-        try {
-          SetCornerRadiusParamsSchema.parse(data.params);
-        } catch (e) {
-          log("warn", "Invalid params for set_corner_radius", { error: (e as Error).message });
-          return false;
-        }
-      } else if (data.command === "set_gradient_fill") {
-        try {
-          SetGradientFillParamsSchema.parse(data.params);
-        } catch (e) {
-          log("warn", "Invalid params for set_gradient_fill", { error: (e as Error).message });
-          return false;
-        }
-      } else if (data.command === "move_node") {
-        try {
-          MoveNodeParamsSchema.parse(data.params);
-        } catch (e) {
-          log("warn", "Invalid params for move_node", { error: (e as Error).message });
-          return false;
-        }
-      } else if (data.command === "resize_node") {
-        try {
-          ResizeNodeParamsSchema.parse(data.params);
-        } catch (e) {
-          log("warn", "Invalid params for resize_node", { error: (e as Error).message });
-          return false;
-        }
-      } else if (data.command === "create_component") {
-        try {
-          CreateComponentParamsSchema.parse(data.params);
-        } catch (e) {
-          log("warn", "Invalid params for create_component", { error: (e as Error).message });
-          return false;
-        }
-      } else if (data.command === "publish_components") {
-        try {
-          PublishComponentsParamsSchema.parse(data.params);
-        } catch (e) {
-          log("warn", "Invalid params for publish_components", { error: (e as Error).message });
-          return false;
-        }
-      } else if (data.command === "get_instance_overrides") {
-        try {
-          GetInstanceOverridesParamsSchema.parse(data.params);
-        } catch (e) {
-          log("warn", "Invalid params for get_instance_overrides", { error: (e as Error).message });
-          return false;
-        }
-      } else if (data.command === "set_instance_overrides") {
-        try {
-          SetInstanceOverridesParamsSchema.parse(data.params);
-        } catch (e) {
-          log("warn", "Invalid params for set_instance_overrides", { error: (e as Error).message });
-          return false;
-        }
-      } else if (data.command === "delete_multiple_nodes") {
-        try {
-          DeleteMultipleNodesParamsSchema.parse(data.params);
-        } catch (e) {
-          log("warn", "Invalid params for delete_multiple_nodes", { error: (e as Error).message });
-          return false;
-        }
-      } else if (data.command === "group") {
-        try {
-          GroupParamsSchema.parse(data.params);
-        } catch (e) {
-          log("warn", "Invalid params for group", { error: (e as Error).message });
-          return false;
-        }
-      } else if (data.command === "ungroup") {
-        try {
-          UngroupParamsSchema.parse(data.params);
-        } catch (e) {
-          log("warn", "Invalid params for ungroup", { error: (e as Error).message });
-          return false;
-        }
-      } else if (data.command === "reparent") {
-        try {
-          ReparentParamsSchema.parse(data.params);
-        } catch (e) {
-          log("warn", "Invalid params for reparent", { error: (e as Error).message });
-          return false;
-        }
-      } else if (data.command === "insert_child") {
-        try {
-          InsertChildParamsSchema.parse(data.params);
-        } catch (e) {
-          log("warn", "Invalid params for insert_child", { error: (e as Error).message });
-          return false;
-        }
-      } else if (data.command === "zoom") {
-        try {
-          ZoomParamsSchema.parse(data.params);
-        } catch (e) {
-          log("warn", "Invalid params for zoom", { error: (e as Error).message });
-          return false;
-        }
-      } else if (data.command === "center") {
-        try {
-          CenterParamsSchema.parse(data.params);
-        } catch (e) {
-          log("warn", "Invalid params for center", { error: (e as Error).message });
-          return false;
-        }
-      } else if (data.command === "scroll_and_zoom_into_view") {
-        try {
-          ScrollAndZoomIntoViewParamsSchema.parse(data.params);
-        } catch (e) {
-          log("warn", "Invalid params for scroll_and_zoom_into_view", { error: (e as Error).message });
-          return false;
-        }
-      } else if (data.command === "get_comments") {
-        try {
-          GetCommentsParamsSchema.parse(data.params);
-        } catch (e) {
-          log("warn", "Invalid params for get_comments", { error: (e as Error).message });
-          return false;
-        }
-      } else if (data.command === "create_paint_style") {
-        try {
-          CreatePaintStyleParamsSchema.parse(data.params);
-        } catch (e) {
-          log("warn", "Invalid params for create_paint_style", { error: (e as Error).message });
-          return false;
-        }
-      } else if (data.command === "create_text_style") {
-        try {
-          CreateTextStyleParamsSchema.parse(data.params);
-        } catch (e) {
-          log("warn", "Invalid params for create_text_style", { error: (e as Error).message });
-          return false;
-        }
-      } else if (data.command === "create_effect_style") {
-        try {
-          CreateEffectStyleParamsSchema.parse(data.params);
-        } catch (e) {
-          log("warn", "Invalid params for create_effect_style", { error: (e as Error).message });
-          return false;
-        }
-      } else if (data.command === "create_grid_style") {
-        try {
-          CreateGridStyleParamsSchema.parse(data.params);
-        } catch (e) {
-          log("warn", "Invalid params for create_grid_style", { error: (e as Error).message });
-          return false;
-        }
+      const schema = TOOL_SCHEMAS[data.command];
+      if (schema) {
+        try { schema.parse(data.params); }
+        catch (e) { log("warn", `Invalid params for ${data.command}`, { error: (e as Error).message }); return false; }
       }
       return true;
     case "tool_response":
@@ -1816,6 +975,107 @@ function validateMessage(data: any): data is Message {
       return true;
     default:
       return false;
+  }
+}
+
+// === Channel Management & Handlers ===
+
+// Return the membership (role + channelId) for a websocket, or null
+function findSocketMembership(ws: ServerWebSocket<unknown>): { role: "plugin" | "agent"; channel: string } | null {
+  for (const [channelId, members] of channels.entries()) {
+    if (members.plugin === ws) return { role: "plugin", channel: channelId };
+    if (members.agent === ws) return { role: "agent", channel: channelId };
+  }
+  return null;
+}
+
+// If a tool_response contains a JSON-stringified `error`, parse it and attach
+// `error_structured` for downstream consumers. Mutates message in-place.
+function parseStructuredToolError(msg: any): void {
+  try {
+    if (!msg || msg.type !== "tool_response") return;
+
+    // If already provided as structured, ensure both fields are present and logged
+    if (msg.error_structured && typeof msg.error_structured === "object" && msg.error_structured.code) {
+      // Mirror into `error` for backward compatibility
+      msg.error = msg.error_structured;
+      log("error", "Plugin returned structured error", { code: msg.error_structured.code, message: msg.error_structured.message, details: msg.error_structured.details || {} });
+      return;
+    }
+
+    // If `error` is a string, attempt to parse JSON and normalize
+    if (typeof msg.error === "string") {
+      try {
+        const parsed = JSON.parse(msg.error);
+        if (parsed && typeof parsed === "object" && parsed.code) {
+          msg.error_structured = parsed;
+          msg.error = parsed;
+          log("error", "Plugin returned structured error", { code: parsed.code, message: parsed.message, details: parsed.details || {} });
+        } else {
+          // Parsed JSON but not structured; normalize into a structured envelope
+          const normalized = { code: "unknown_plugin_error", message: String(msg.error), details: { raw_payload: parsed } };
+          msg.error_structured = normalized;
+          msg.error = normalized;
+          msg.error_raw = String(msg.error);
+          log("warn", "Plugin returned non-structured JSON error; normalized", { details: normalized.details });
+        }
+      } catch (err) {
+        // Not JSON - wrap the raw string into a structured error
+        const normalized = { code: "unknown_plugin_error", message: String(msg.error), details: { raw_payload: msg.error } };
+        msg.error_structured = normalized;
+        msg.error = normalized;
+        msg.error_raw = String(msg.error);
+        log("warn", "Plugin returned non-JSON error string; normalized", { raw: msg.error });
+      }
+      return;
+    }
+
+    // If `error` is already an object but lacks `code`, normalize it
+    if (msg.error && typeof msg.error === "object") {
+      const errObj = msg.error;
+      if (errObj.code) {
+        msg.error_structured = errObj;
+        msg.error = errObj;
+        log("error", "Plugin returned structured error object", { code: errObj.code, message: errObj.message, details: errObj.details || {} });
+      } else {
+        const normalized = { code: "unknown_plugin_error", message: String(errObj.message || JSON.stringify(errObj)), details: { raw_payload: errObj } };
+        msg.error_structured = normalized;
+        msg.error = normalized;
+        msg.error_raw = errObj;
+        log("warn", "Plugin returned error object without code; normalized", { details: normalized.details });
+      }
+      return;
+    }
+
+  } catch (e) {
+    log("warn", "parseStructuredToolError failed", { error: (e as Error).message });
+  }
+}
+
+// Persist chat-related messages to the JSONL log file when relevant.
+function persistChatIfNeeded(message: any, senderChannel: string, senderRole: "plugin" | "agent") {
+  try {
+    if (message.type === "user_prompt") {
+      const m = message as any;
+      const snapshot = m.snapshot;
+      const snap_sig = snapshot ? (snapshot.selection_signature || null) : null;
+      logToFile({ channel: senderChannel, from: senderRole, type: message.type, text: m.prompt, meta: snapshot ? { snapshot_signature: snap_sig, snapshot } : undefined });
+    } else if (message.type === "agent_response") {
+      logToFile({ channel: senderChannel, from: senderRole, type: message.type, text: (message as AgentResponseMessage).prompt });
+    } else if (message.type === "agent_response_chunk") {
+      logToFile({ channel: senderChannel, from: senderRole, type: message.type, text: (message as AgentResponseChunkMessage).chunk, meta: { is_partial: (message as AgentResponseChunkMessage).is_partial } });
+    } else if (message.type === "new_chat") {
+      logToFile({ channel: senderChannel, from: senderRole, type: message.type, text: "<new_chat>" });
+    } else if (message.type === "progress_update") {
+      const m = message as any;
+      const inner = m.message;
+      if (inner && typeof inner === "object" && (inner.kind === "full_prompt" || inner.type === "full_prompt")) {
+        const sig = inner.selection_signature || null;
+        logToFile({ channel: senderChannel, from: senderRole, type: "full_prompt", text: inner.prompt, meta: { instructions: inner.instructions, selection_signature: sig } });
+      }
+    }
+  } catch (e) {
+    log("warn", "persistChatIfNeeded failed", { error: (e as Error).message });
   }
 }
 
@@ -1862,68 +1122,45 @@ function handleJoin(ws: ServerWebSocket<unknown>, message: JoinMessage) {
 }
 
 function handleMessage(ws: ServerWebSocket<unknown>, message: NewChatMessage | UserPromptMessage | AgentResponseMessage | AgentResponseChunkMessage | ToolCallMessage | ToolResponseMessage | ProgressUpdateMessage) {
-  // Find which channel this socket belongs to
-  let senderRole: "plugin" | "agent" | null = null;
-  let senderChannel: string | null = null;
-  
-  for (const [channelId, members] of channels.entries()) {
-    if (members.plugin === ws) {
-      senderRole = "plugin";
-      senderChannel = channelId;
-      break;
-    }
-    if (members.agent === ws) {
-      senderRole = "agent";
-      senderChannel = channelId;
-      break;
-    }
-  }
-  
-  if (!senderRole || !senderChannel) {
-    const errorMsg: ErrorMessage = {
-      type: "error",
-      message: "Socket not joined to any channel"
-    };
+  const membership = findSocketMembership(ws);
+  if (!membership) {
+    const errorMsg: ErrorMessage = { type: "error", message: "Socket not joined to any channel" };
     sendMessage(ws, errorMsg);
     log("warn", "Message from non-joined socket");
     return;
   }
-  
+
+  const { role: senderRole, channel: senderChannel } = membership;
   const channelMembers = channels.get(senderChannel);
   if (!channelMembers) {
     log("error", "Channel not found", { channel: senderChannel });
     return;
   }
-  
-  // Forward to the other role in the same channel
+
   const targetRole = senderRole === "plugin" ? "agent" : "plugin";
   const targetSocket = channelMembers[targetRole];
-  
-  if (targetSocket) {
-    sendMessage(targetSocket, message);
-    log("info", "Message forwarded", { 
-      from: senderRole, 
-      to: targetRole, 
-      channel: senderChannel,
-      type: message.type,
-      id: (message as any).id || "no-id"
-    });
-  } else {
-    log("warn", "No target socket for message", { 
-      senderRole, 
-      targetRole, 
-      channel: senderChannel 
-    });
+
+  // Try to parse structured errors early
+  parseStructuredToolError(message);
+
+  if (!targetSocket) {
+    log("warn", "No target socket for message", { senderRole, targetRole, channel: senderChannel });
+    return;
   }
+
+  // Forward message and persist tool events (only)
+  sendMessage(targetSocket, message);
+  log("info", "Message forwarded", { from: senderRole, to: targetRole, channel: senderChannel, type: message.type, id: (message as any).id || "no-id" });
+  persistToolEventIfNeeded(message, senderChannel, senderRole);
 }
 
-// (Idle channel cleanup removed)
+ 
 
 function handleDisconnection(ws: ServerWebSocket<unknown>) {
   // Find and remove this socket from all channels
   for (const [channelId, members] of channels.entries()) {
     let disconnectedRole: "plugin" | "agent" | null = null;
-    
+
     if (members.plugin === ws) {
       disconnectedRole = "plugin";
       delete members.plugin;
@@ -1931,33 +1168,30 @@ function handleDisconnection(ws: ServerWebSocket<unknown>) {
       disconnectedRole = "agent";
       delete members.agent;
     }
-    
-    if (disconnectedRole) {
-      log("info", "Socket disconnected", { role: disconnectedRole, channel: channelId });
-      
-      // Notify the remaining participant
-      const remainingRole = disconnectedRole === "plugin" ? "agent" : "plugin";
-      const remainingSocket = members[remainingRole];
-      if (remainingSocket) {
-        const leaveMessage = {
-          type: "system",
-          message: `The ${disconnectedRole} has disconnected`,
-          channel: channelId
-        };
-        sendMessage(remainingSocket, leaveMessage);
-      }
-      
-      // Clean up empty channels
-      if (!members.plugin && !members.agent) {
-        channels.delete(channelId);
-        log("info", "Channel cleaned up", { channel: channelId });
-      }
-      
-      break;
+
+    if (!disconnectedRole) continue;
+
+    log("info", "Socket disconnected", { role: disconnectedRole, channel: channelId });
+
+    // Notify the remaining participant
+    const remainingRole = disconnectedRole === "plugin" ? "agent" : "plugin";
+    const remainingSocket = members[remainingRole];
+    if (remainingSocket) {
+      const leaveMessage = { type: "system", message: `The ${disconnectedRole} has disconnected`, channel: channelId };
+      sendMessage(remainingSocket, leaveMessage);
     }
+
+    // Clean up empty channels
+    if (!members.plugin && !members.agent) {
+      channels.delete(channelId);
+      log("info", "Channel cleaned up", { channel: channelId });
+    }
+
+    break;
   }
 }
 
+// === Server bootstrap ===
 serve({
   fetch(req, server) {
     // Upgrade to WebSocket if possible

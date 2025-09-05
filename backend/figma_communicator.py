@@ -33,7 +33,6 @@ class ToolExecutionError(Exception):
             self.details: Dict[str, Any] = payload.get("details", {}) or {}
             normalized_payload = payload
         else:
-            # Allow legacy string usage
             self.code = "unknown_plugin_error"
             self.message = str(payload)
             self.details = {}
@@ -152,7 +151,7 @@ class FigmaCommunicator:
             try:
                 await self.websocket.send(json.dumps({
                     "type": "progress_update",
-                    "message": {"phase": 3, "status": "step_failed", "message": f"❗ {command} timed out", "data": {"command": command, "id": request_id, "elapsedMs": int(elapsed*1000)}}
+                    "message": {"phase": 3, "status": "step_failed", "message": f"❗ {command} timed out", "data": {"command": command, "id": request_id, "elapsed_ms": int(elapsed*1000)}}
                 }))
             except Exception:
                 pass
@@ -209,18 +208,31 @@ class FigmaCommunicator:
         elapsed = time.time() - start_time if start_time else 0
         
         # Check if the response contains an error or an explicit failure result
+        if "error_structured" in message and isinstance(message.get("error_structured"), dict):
+            error_payload = message.get("error_structured")
+            logger.error(f"❌ Tool call {request_id} failed after {elapsed:.3f}s: code={error_payload.get('code')}, message={error_payload.get('message')}")
+            tool_error = ToolExecutionError(error_payload, command=cmd, params=params)
+            logger.debug(f"🔥 Setting exception on future for {request_id}")
+            if not future.done():
+                future.set_exception(tool_error)
+            else:
+                logger.debug(f"⚠️ Future already completed for {request_id}")
+            return
+
         if "error" in message:
-            error_msg = message["error"]
-            logger.error(f"❌ Tool call {request_id} failed after {elapsed:.3f}s: {error_msg}")
-            # Attempt to parse structured error payload
+            error_val = message.get("error")
+            logger.error(f"❌ Tool call {request_id} failed after {elapsed:.3f}s: {error_val}")
+            # If `error` is already an object, use it directly; otherwise attempt to parse JSON string
             try:
-                error_payload = json.loads(error_msg)
+                if isinstance(error_val, dict):
+                    error_payload = error_val
+                else:
+                    error_payload = json.loads(error_val)
                 if not isinstance(error_payload, dict):
                     raise TypeError("Parsed error is not an object")
-                logger.error(f"❌ Tool {cmd} failed with code={error_payload.get('code')}")
                 tool_error = ToolExecutionError(error_payload, command=cmd, params=params)
             except Exception:
-                tool_error = ToolExecutionError({"code": "unknown_plugin_error", "message": str(error_msg)}, command=cmd, params=params)
+                tool_error = ToolExecutionError({"code": "unknown_plugin_error", "message": str(error_val)}, command=cmd, params=params)
             logger.debug(f"🔥 Setting exception on future for {request_id}")
             if not future.done():
                 future.set_exception(tool_error)

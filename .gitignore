@@ -34,3 +34,8 @@ Thumbs.db
 **/.env
 
 .cursor/
+
+
+docs/agents-book.md 
+docs/ignore.md
+docs/design-encyclopedia.md

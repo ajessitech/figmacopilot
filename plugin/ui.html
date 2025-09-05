@@ -164,40 +164,7 @@
         100% { transform: rotate(360deg); }
       }
 
-      /* Typing indicator */
-      .typing-indicator {
-        display: inline-flex;
-        align-items: center;
-        gap: 4px;
-        padding: 8px 12px;
-      }
-
-      .typing-indicator span {
-        width: 8px;
-        height: 8px;
-        border-radius: 50%;
-        background: rgb(255, 120, 71);
-        animation: typing 1.4s infinite;
-      }
-
-      .typing-indicator span:nth-child(2) {
-        animation-delay: 0.2s;
-      }
-
-      .typing-indicator span:nth-child(3) {
-        animation-delay: 0.4s;
-      }
-
-      @keyframes typing {
-        0%, 60%, 100% {
-          transform: translateY(0);
-          opacity: 0.7;
-        }
-        30% {
-          transform: translateY(-10px);
-          opacity: 1;
-        }
-      }
+      /* (removed) Typing indicator - unused */
 
       /* Welcome Message */
       .welcome-message {
@@ -490,18 +457,20 @@
       // Selections context cache
       const snapshotCache = {
         document: null, // { pageId, pageName }
-        last: null,      // { selectionSignature, selectionSummary, document, ts }
+        last: null,      // { selection_signature, selection_summary, document, ts }
         latestSig: null,
         lastSnapshot: null // { snapshot, mode, ts }
       };
       const SNAPSHOT_TTL_MS = 60000;
-      const DEFAULT_SELECTIONS_MODE = 'complete'; // 'snapshot' | 'complete'
 
       // Reconnect/heartbeat config
       const HEARTBEAT_INTERVAL = 30000; // 30s
       const BASE_RECONNECT_DELAY = 3000; // 3s
       const MAX_RECONNECT_DELAY = 60000; // 60s
       const MAX_RECONNECT_ATTEMPTS = 7;
+      const SNAPSHOT_REQUEST_TIMEOUT_MS = 6000; // node-map snapshot request timeout
+      const INPUT_COUNTER_THRESHOLD = 500; // show counter after this many chars
+      const INPUT_MAX_CHARS = 2000; // display-only reference
       let heartbeatTimer = null;
       let reconnectAttempts = 0;
       let reconnectTimer = null;
@@ -516,12 +485,10 @@
       let acceptingStream = false;
       let streamedAnyChunks = false;
       let startNewAssistantBlockAfterTool = false;
-      let uiStartTs = Date.now();
 
       // Status messages
       const statusMessages = {
-        thinking: ['Thinking...', 'Working on it...', 'Considering your request...', 'Processing your idea...'],
-        generating: ['Writing response...', 'Crafting your answer...', 'Putting it together...', 'Almost there...']
+        thinking: ['Thinking...', 'Working on it...', 'Putting it together...', 'Almost there...']
       };
 
       function getStatusMessage(category) {
@@ -573,6 +540,24 @@
       });
 
       // UI helpers
+      function scrollToBottom() {
+        try { chatContainer.scrollTop = chatContainer.scrollHeight; } catch (_) {}
+      }
+
+      function buildStatusIndicator(text) {
+        const statusDiv = document.createElement('div');
+        statusDiv.className = 'status-indicator';
+        const spinner = document.createElement('div');
+        spinner.className = 'spinner';
+        const statusText = document.createElement('div');
+        statusText.className = 'status-text';
+        statusText.textContent = text;
+        statusDiv.appendChild(spinner);
+        statusDiv.appendChild(statusText);
+        chatContainer.appendChild(statusDiv);
+        scrollToBottom();
+        return { el: statusDiv, spinnerEl: spinner, textEl: statusText };
+      }
       function addMessage(type, content) {
         const messageDiv = document.createElement('div');
         messageDiv.className = 'message ' + (type === 'user' ? 'user' : 'assistant');
@@ -583,26 +568,14 @@
 
         messageDiv.appendChild(contentDiv);
         chatContainer.appendChild(messageDiv);
-        chatContainer.scrollTop = chatContainer.scrollHeight;
+        scrollToBottom();
         return contentDiv;
       }
 
       function showStatusIndicator(text = 'Processing...') {
         removeStatusIndicator(true);
-        const statusDiv = document.createElement('div');
-        statusDiv.className = 'status-indicator';
-        statusDiv.id = 'statusIndicator';
-
-        const spinner = document.createElement('div');
-        spinner.className = 'spinner';
-        const statusText = document.createElement('div');
-        statusText.className = 'status-text';
-        statusText.textContent = text;
-
-        statusDiv.appendChild(spinner);
-        statusDiv.appendChild(statusText);
-        chatContainer.appendChild(statusDiv);
-        chatContainer.scrollTop = chatContainer.scrollHeight;
+        const built = buildStatusIndicator(text);
+        built.el.id = 'statusIndicator';
       }
 
       function clearChatUI() {
@@ -659,15 +632,7 @@
       let contextGroup = null; // { line: {...}, pendingIds: Set<string>, failed: boolean, open: boolean }
 
       const TOOL_COPY_OVERRIDES = {
-        'gather_context': 'Gathering context…',
-        'get_selection_context': 'Gathering context…',
-        'get_selection_snapshot': 'Capturing selection snapshot…',
-        'scan_text_nodes': 'Scanning text…',
-        'scan_nodes': 'Scanning layers…',
-        'scan_styles': 'Scanning styles…',
-        'measure_layout': 'Measuring layout…',
-        'update_colors': 'Updating colors…',
-        'apply_color_updates': 'Updating colors…'
+        'get_canvas_snapshot': 'Gathering context…'
       };
 
       const CONTEXT_TOOL_HINTS = ['context', 'scan', 'snapshot', 'selection', 'inspect'];
@@ -713,18 +678,8 @@
       }
 
       function createToolStatusLine(text) {
-        const statusDiv = document.createElement('div');
-        statusDiv.className = 'status-indicator';
-        const spinner = document.createElement('div');
-        spinner.className = 'spinner';
-        const statusText = document.createElement('div');
-        statusText.className = 'status-text';
-        statusText.textContent = text;
-        statusDiv.appendChild(spinner);
-        statusDiv.appendChild(statusText);
-        chatContainer.appendChild(statusDiv);
-        chatContainer.scrollTop = chatContainer.scrollHeight;
-        return { el: statusDiv, spinnerEl: spinner, textEl: statusText, iconEl: null };
+        const built = buildStatusIndicator(text);
+        return { el: built.el, spinnerEl: built.spinnerEl, textEl: built.textEl, iconEl: null };
       }
 
       function completeToolStatusLine(line, ok) {
@@ -748,13 +703,13 @@
         const entry = toolStatusLines.get(id);
         if (entry && entry.textEl) {
           entry.textEl.textContent = text;
-          chatContainer.scrollTop = chatContainer.scrollHeight;
+          scrollToBottom();
           return true;
         }
         if (contextGroup && contextGroup.open && contextGroup.pendingIds.has(id)) {
           if (contextGroup.line && contextGroup.line.textEl) {
             contextGroup.line.textEl.textContent = text;
-            chatContainer.scrollTop = chatContainer.scrollHeight;
+            scrollToBottom();
             return true;
           }
         }
@@ -837,9 +792,9 @@
         } else {
           inputWrapper.classList.remove('has-content');
         }
-        if (text.length > 500) {
+        if (text.length > INPUT_COUNTER_THRESHOLD) {
           inputWrapper.classList.add('show-counter');
-          charCounter.textContent = `${text.length}/2000`;
+          charCounter.textContent = `${text.length}/${INPUT_MAX_CHARS}`;
         } else {
           inputWrapper.classList.remove('show-counter');
         }
@@ -878,13 +833,13 @@
 
         // No warmup selection traffic; selections are requested only when user sends
 
-        // Build or reuse selections_context (30s TTL) keyed by selectionSignature
-        async function requestSelectionsContextFromPlugin(mode = DEFAULT_SELECTIONS_MODE) {
+        // Request a fresh node-map snapshot if cache is stale or selection changed
+        async function requestNodeMapSnapshotFromPlugin() {
           return new Promise((resolve, reject) => {
             const timeout = setTimeout(() => {
               window.removeEventListener('message', listener);
-              reject(new Error('selections_context_timeout'));
-            }, 6000);
+              reject(new Error('node_map_snapshot_timeout'));
+            }, SNAPSHOT_REQUEST_TIMEOUT_MS);
             const listener = (event) => {
               const msg = event.data && event.data.pluginMessage;
               if (!msg) return;
@@ -892,12 +847,13 @@
                 clearTimeout(timeout);
                 window.removeEventListener('message', listener);
                 const result = msg.result;
-                snapshotCache.lastSnapshot = { snapshot: result, mode, ts: Date.now() };
-                snapshotCache.latestSig = (result && result.selectionSignature) || snapshotCache.latestSig;
+                // update cache
+                snapshotCache.lastSnapshot = { snapshot: result, mode: 'node_map', ts: Date.now() };
+                snapshotCache.latestSig = (result && result.selection_signature) || snapshotCache.latestSig;
                 snapshotCache.document = (result && result.document) || snapshotCache.document;
                 snapshotCache.last = {
-                  selectionSignature: result.selectionSignature,
-                  selectionSummary: result.selectionSummary,
+                  selection_signature: result.selection_signature,
+                  selection_summary: result.selection_summary,
                   document: result.document || snapshotCache.document || null,
                   ts: Date.now()
                 };
@@ -911,21 +867,19 @@
               }
             };
             window.addEventListener('message', listener);
-            parent.postMessage({ pluginMessage: { type: 'request_selections_context', mode } }, '*');
+            parent.postMessage({ pluginMessage: { type: 'request_selections_context' } }, '*');
           });
         }
 
-        let snapshot = undefined;
-        const latestSig = snapshotCache.latestSig || (snapshotCache.last && snapshotCache.last.selectionSignature) || null;
-        const haveExact = snapshotCache.lastSnapshot && snapshotCache.lastSnapshot.snapshot && (snapshotCache.lastSnapshot.snapshot.selectionSignature === latestSig) && (snapshotCache.lastSnapshot.mode === DEFAULT_SELECTIONS_MODE) && ((Date.now() - snapshotCache.lastSnapshot.ts) <= SNAPSHOT_TTL_MS);
-        if (haveExact) {
-          snapshot = snapshotCache.lastSnapshot.snapshot;
-        } else {
-          showStatusIndicator('Gathering context…');
+        const latestSig = snapshotCache.latestSig || (snapshotCache.last && snapshotCache.last.selection_signature) || null;
+        const haveExact = !!(snapshotCache.lastSnapshot && snapshotCache.lastSnapshot.snapshot && (snapshotCache.lastSnapshot.snapshot.selection_signature === latestSig) && ((Date.now() - snapshotCache.lastSnapshot.ts) <= SNAPSHOT_TTL_MS));
+        let snapshot = haveExact ? snapshotCache.lastSnapshot.snapshot : undefined;
+        if (!snapshot) {
+          showStatusIndicator('Gathering selection…');
           try {
-            snapshot = await requestSelectionsContextFromPlugin(DEFAULT_SELECTIONS_MODE);
+            snapshot = await requestNodeMapSnapshotFromPlugin();
           } catch (e) {
-            // Proceed without snapshot on failure
+            // proceed without snapshot
           } finally {
             removeStatusIndicator(true);
           }
@@ -1010,7 +964,7 @@
                   currentStreamingContentEl.textContent += sanitized;
                   streamedAnyChunks = true;
                 }
-                chatContainer.scrollTop = chatContainer.scrollHeight;
+                scrollToBottom();
               } else if (data.type === 'agent_response') {
                 if (!acceptingStream) {
                   // Ignore stray responses not tied to the current prompt
@@ -1158,27 +1112,26 @@
         currentStreamingContentEl = null;
       }
 
-      // Command/Tool plumbing retained
-      function sendSuccessResponse(id, result) {
-        if (!state.connected || !state.socket) return;
-        state.socket.send(JSON.stringify({ id, type: 'message', channel: state.channel, message: { id, result } }));
-      }
-
-      function sendErrorResponse(id, errorMessage) {
-        if (!state.connected || !state.socket) return;
-        state.socket.send(JSON.stringify({ id, type: 'message', channel: state.channel, message: { id, error: errorMessage, result: {} } }));
-      }
-
-      function sendProgressUpdateToServer(progressData) {
-        if (!state.connected || !state.socket) return;
-        state.socket.send(JSON.stringify({ id: progressData.commandId, type: 'progress_update', channel: state.channel, message: { id: progressData.commandId, type: 'progress_update', data: progressData } }));
-      }
+      // (removed) Message relays for command/execute path – unused
 
       // Receive messages from plugin code
       window.onmessage = (event) => {
         const message = event.data.pluginMessage;
         if (!message) return;
         switch (message.type) {
+          case 'init-settings': {
+            try {
+              if (message.settings && typeof message.settings.serverPort === 'number') {
+                state.serverPort = message.settings.serverPort;
+              }
+            } catch (_) {}
+            // If not already connected or connecting, attempt connect using provided port
+            if (!state.connected && !(state.socket && (state.socket.readyState === WebSocket.OPEN || state.socket.readyState === WebSocket.CONNECTING)) && !isConnecting) {
+              updateConnectingUI('Connecting to bridge...');
+              connectToServer(state.serverPort);
+            }
+            break;
+          }
           case 'document_info': {
             snapshotCache.document = { pageId: message.pageId, pageName: message.pageName };
             break;
@@ -1186,11 +1139,11 @@
           case 'selection_summary': {
             // Keep latest selection signature so cache invalidates on selection change
             try {
-              if (message.selectionSignature) {
-                snapshotCache.latestSig = message.selectionSignature;
+              if (message.selection_signature) {
+                snapshotCache.latestSig = message.selection_signature;
                 snapshotCache.last = {
-                  selectionSignature: message.selectionSignature,
-                  selectionSummary: message.selectionSummary || null,
+                  selection_signature: message.selection_signature,
+                  selection_summary: message.selection_summary || null,
                   document: message.document || snapshotCache.document || null,
                   ts: Date.now()
                 };
@@ -1199,16 +1152,6 @@
             break;
           }
           
-          case 'connection-status': {
-            if (message.connected) {
-              hideError();
-              removeStatusIndicator();
-              enableInput();
-            } else {
-              updateConnectingUI();
-            }
-            break;
-          }
           case 'auto-connect': {
             // Guard to avoid duplicate connections if already open/connecting
             if (state.socket && (state.socket.readyState === WebSocket.OPEN || state.socket.readyState === WebSocket.CONNECTING)) {
@@ -1219,18 +1162,8 @@
             connectToServer(state.serverPort);
             break;
           }
-          case 'auto-disconnect': {
-            cleanupConnection('manual');
-            break;
-          }
-          case 'command-result': {
-            sendSuccessResponse(message.id, message.result);
-            break;
-          }
-          case 'command-error': {
-            sendErrorResponse(message.id, message.error);
-            break;
-          }
+          
+          
           case 'tool_response': {
             const ts = new Date().toISOString();
             console.log(`[${ts}] tool_response`, message);
@@ -1239,6 +1172,17 @@
               const toolResponse = { type: 'tool_response', id: message.id };
               if (message.error || isFailure) {
                 toolResponse.error = message.error || (message.result && message.result.message) || 'Tool reported failure';
+                // Best-effort: also forward a structured error payload if available/parseable
+                if (typeof message.error === 'string') {
+                  try {
+                    const parsed = JSON.parse(message.error);
+                    if (parsed && typeof parsed === 'object' && parsed.code) {
+                      toolResponse.error_structured = parsed;
+                    }
+                  } catch (_) {}
+                } else if (isFailure && message.result && typeof message.result === 'object' && message.result.code) {
+                  toolResponse.error_structured = message.result;
+                }
               } else {
                 toolResponse.result = message.result;
               }
@@ -1256,17 +1200,7 @@
             }
             break;
           }
-          case 'command_progress': {
-            // Update the existing tool status line instead of creating a separate spinner
-            const text = message.message || message.status || 'Working…';
-            const id = message.commandId || message.id;
-            const updated = updateToolStatusLineTextById(id, text);
-            sendProgressUpdateToServer(message);
-            if (!updated && message.status === 'completed') {
-              setTimeout(() => removeStatusIndicator(), 600);
-            }
-            break;
-          }
+          
         }
       };
     </script>

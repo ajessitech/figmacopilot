@@ -7,7 +7,7 @@ A sophisticated AI-powered Figma plugin that provides real-time streaming chat w
 - **Real-time Streaming Responses** - See AI responses appear word-by-word.
 - **Persistent Conversation History** - Context maintained throughout your session using an in-memory SQLite database.
 - **Direct Figma API Control** - Instruct the agent to perform actions like creating shapes, changing styles, and manipulating layers.
-- **OpenAI Agents SDK Integration** - Enterprise-grade AI agent management with `gpt-4.1-nano` (or a user-defined model).
+- **OpenAI Agents SDK Integration** - Enterprise-grade AI agent management with `gemini-2.5-flash-lite` (using LiteLLM).
 - **Modern Architecture** - Single-container deployment with a high-performance Bun-based WebSocket bridge.
 - **Robust Tooling** - An extensive set of tools for interacting with the Figma canvas.
 

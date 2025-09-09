@@ -1,164 +1,3147 @@
-// This is the main code file for the Cursor MCP Figma plugin
-// It handles Figma API commands
+// ==============================================================
+// This file contains the main code for the figma copilot plugin
+// It handles Figma API commands 
+// ==============================================================
+
+
+// ======================================================
+// Config
+// ======================================================
 
 // Plugin state
 const state = {
   serverPort: 3055, // Default port
 };
 
-
-// Helper function for progress updates
-function sendProgressUpdate(
-  commandId,
-  commandType,
-  status,
-  progress,
-  totalItems,
-  processedItems,
-  message,
-  payload = null
-) {
-  const update = {
-    type: "command_progress",
-    commandId,
-    commandType,
-    status,
-    progress,
-    totalItems,
-    processedItems,
-    message,
-    timestamp: Date.now(),
-  };
-
-  // Add optional chunk information if present
-  if (payload) {
-    if (
-      payload.currentChunk !== undefined &&
-      payload.totalChunks !== undefined
-    ) {
-      update.currentChunk = payload.currentChunk;
-      update.totalChunks = payload.totalChunks;
-      update.chunkSize = payload.chunkSize;
-    }
-    update.payload = payload;
-  }
-
-  // Send to UI
-  figma.ui.postMessage(update);
-  console.log(`Progress update: ${status} - ${progress}% - ${message}`);
-
-  return update;
-}
-
 // Show UI
-figma.showUI(__html__, { width: 420, height: 640 });
+figma.showUI(__html__, { width: 380, height: 700 });
 
-// ================================
-// Phase-1: Selection Snapshot (Tier A)
-// ================================
-const phase1State = {
-  lastSelectionSignature: "",
-  lastDocumentInfo: null,
+// Load persisted settings and inform UI
+(async function initializePlugin() {
+  try {
+    const savedSettings = await figma.clientStorage.getAsync("settings");
+    if (savedSettings) {
+      if (savedSettings.serverPort) {
+        state.serverPort = savedSettings.serverPort;
+      }
+    }
+
+    // Send initial settings to UI
+    figma.ui.postMessage({
+      type: "init-settings",
+      settings: {
+        serverPort: state.serverPort,
+      },
+    });
+  } catch (error) {
+    console.error("Error loading settings:", error);
+  }
+})();
+
+// Config helpers
+function updateSettings(settings) {
+  if (settings.serverPort) {
+    state.serverPort = settings.serverPort;
+  }
+
+  figma.clientStorage.setAsync("settings", {
+    serverPort: state.serverPort,
+  });
+}
+
+
+// ======================================================
+// Command Registry & Registration
+// ======================================================
+const commandRegistry = new Map();
+let commandsRegistered = false;
+function registerDefaultCommands() {
+  if (commandsRegistered) return;
+  commandsRegistered = true;
+
+  // TOOL SET
+  commandRegistry.set("get_canvas_snapshot", (p) => getCanvasSnapshot(p));
+
+  commandRegistry.set("find_nodes", (p) => findNodes(p));
+  commandRegistry.set("get_node_details", (p) => getNodeDetails(p));
+  commandRegistry.set("get_image_of_node", (p) => getImageOfNode(p));
+  commandRegistry.set("get_node_ancestry", (p) => getNodeAncestry(p));
+  commandRegistry.set("get_node_hierarchy", (p) => getNodeHierarchy(p));
+  commandRegistry.set("get_document_styles", (p) => getDocumentStyles(p));
+  commandRegistry.set("get_style_consumers", (p) => getStyleConsumers(p));
+  commandRegistry.set("get_document_components", (p) => getDocumentComponents(p));
+
+  commandRegistry.set("create_frame", (p) => createFrame(p));
+  commandRegistry.set("create_text", (p) => createText(p));
+
+  commandRegistry.set("set_fills", (p) => set_fills(p));
+  commandRegistry.set("set_strokes", (p) => set_strokes(p));
+  commandRegistry.set("set_corner_radius", (p) => set_corner_radius(p));
+  commandRegistry.set("set_size", (p) => set_size(p));
+  commandRegistry.set("set_position", (p) => set_position(p));
+  commandRegistry.set("set_layer_properties", (p) => set_layer_properties(p));
+  commandRegistry.set("set_effects", (p) => set_effects(p));
+
+  commandRegistry.set("set_auto_layout", (p) => set_auto_layout(p));
+  commandRegistry.set("set_auto_layout_child", (p) => set_auto_layout_child(p));
+  commandRegistry.set("set_constraints", (p) => set_constraints(p));
+  commandRegistry.set("set_child_index", (p) => set_child_index(p));
+
+  commandRegistry.set("set_text_characters", (p) => setTextCharacters(p));
+  commandRegistry.set("set_text_style", (p) => setTextStyle(p));
+
+  commandRegistry.set("clone_nodes", (p) => clone_nodes(p));
+  commandRegistry.set("reparent_nodes", (p) => reparent_nodes(p));
+  commandRegistry.set("reorder_nodes", (p) => reorder_nodes(p));
+
+
+  commandRegistry.set("create_component_from_node", (p) => createComponentFromNode(p));
+  commandRegistry.set("create_component_instance", (p) => createComponentInstance(p));
+  commandRegistry.set("set_instance_properties", (p) => setInstanceProperties(p));
+  commandRegistry.set("detach_instance", (p) => detachInstance(p));
+
+  commandRegistry.set("create_style", (p) => createStyle(p));
+  commandRegistry.set("apply_style", (p) => applyStyle(p));
+
+  commandRegistry.set("create_variable_collection", (p) => createVariableCollection(p));
+  commandRegistry.set("create_variable", (p) => createVariable(p));
+  commandRegistry.set("set_variable_value", (p) => setVariableValue(p));
+  commandRegistry.set("bind_variable_to_property", (p) => bindVariableToProperty(p));
+
+
+  commandRegistry.set("scroll_and_zoom_into_view", (p) => scroll_and_zoom_into_view(p));
+  commandRegistry.set("delete_nodes", (p) => delete_nodes(p));
+
+  commandRegistry.set("show_notification", (p) => show_notification(p));
+  commandRegistry.set("commit_undo_step", () => commit_undo_step());
+
+}
+
+// ======================================================
+// Command Router
+// ======================================================
+async function handleCommand(command, params) {
+  registerDefaultCommands();
+
+  // Resolve the action/handler to execute
+  let action = null;
+  const handler = commandRegistry.get(command);
+  if (handler) {
+    action = () => handler(params || {});
+  } else {
+    const payload = { code: "unknown_command", message: `Unknown command: ${command}`, details: { command } };
+    try { logger.error("unknown command", { code: payload.code, originalError: payload.message, details: payload.details }); } catch (_) {}
+    throw new Error(JSON.stringify(payload));
+  }
+
+  // Compute a human-friendly step label for logging/undo grouping
+  const stepLabel = (params && (params.stepLabel || params.label || params.name || params.toolName)) || command;
+
+  // Avoid redundant reveal for viewport-only commands
+  const viewportOnly = new Set(["zoom", "center", "scroll_and_zoom_into_view"]);
+  const autoReveal = !(params && params.autoReveal === false) && !viewportOnly.has(command);
+
+  // Wrap the execution in an undo group for atomic step semantics and UX reveal
+  // Provide candidate ids from params so reveal can still work for read-only commands
+  let candidate_ids = [];
+  try {
+    if (params && Array.isArray(params.node_ids)) {
+      candidate_ids = params.node_ids.filter((id) => typeof id === 'string' && id.length > 0);
+    }
+    if (params && typeof params.node_id === 'string' && params.node_id.length > 0) {
+      candidate_ids = [params.node_id, ...candidate_ids];
+    }
+  } catch (_) {}
+
+  return await withUndoGroup(stepLabel, async () => {
+    return await action();
+  }, { autoReveal, candidate_ids });
+}
+
+// ======================================================
+// Lightweight logger abstraction
+// ======================================================
+// Lightweight logger abstraction for consistent, emoji-friendly logs
+// Normalizes contexts to structured { code, message, details } to satisfy
+// cross-layer observability and automated remediation expectations.
+const logger = {
+  info: (message, context) => {
+    try {
+      const ctx = (context && typeof context === "object") ? context : {};
+      const out = {
+        code: ctx.code || ctx.error_code || "info",
+        message: ctx.message || ctx.originalError || ctx.error || "",
+        details: ctx.details || {},
+        _raw: ctx,
+      };
+      console.log(`🧠 ${message}`, out);
+    } catch (_) {}
+  },
+  warn: (message, context) => {
+    try {
+      const ctx = (context && typeof context === "object") ? context : {};
+      const out = {
+        code: ctx.code || ctx.error_code || "warning",
+        message: ctx.message || ctx.originalError || ctx.error || "",
+        details: ctx.details || {},
+        _raw: ctx,
+      };
+      console.warn(`⚠️ ${message}`, out);
+    } catch (_) {}
+  },
+  error: (message, context) => {
+    try {
+      const ctx = (context && typeof context === "object") ? context : {};
+      const out = {
+        code: ctx.code || ctx.error_code || "unknown_plugin_error",
+        message: ctx.message || ctx.originalError || ctx.error || (typeof ctx === "string" ? ctx : String(ctx)),
+        details: ctx.details || {},
+        _raw: ctx,
+      };
+      console.error(`❌ ${message}`, out);
+    } catch (_) {}
+  },
 };
 
-// Cache for gather_full_context results (heavy traversal)
-const FULL_CONTEXT_TTL_MS = 45000; // 45s
-const fullContextCache = {
-  lastSignature: null,
-  includeComments: true,
-  data: null,
-  ts: 0,
-};
+// Small async delay helper used by highlight/preview flows
+function delay(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
 
-function phase1Debounce(fn, wait) {
-  let t = null;
-  return (...args) => {
-    if (t) clearTimeout(t);
-    t = setTimeout(() => fn.apply(null, args), wait);
+
+
+
+// ============================================
+// ===============  TOOLS  ====================
+// ============================================
+
+// ============================================
+// === Category 1: Scoping & Orientation ======
+// ============================================
+
+// -------- TOOL : get_canvas_snapshot --------
+const CANVAS_SNAPSHOT_TTL_MS = 60000;
+let _lastCanvasSnapshot = null; // { signature, include_images, ts, payload }
+
+async function getCanvasSnapshot(params) {
+  try {
+    const include_images = !!(params && params.include_images);
+    const page = figma.currentPage;
+    if (!page) {
+      const payload = { code: "page_unavailable", message: "Current page unavailable", details: {} };
+      logger.error("get_canvas_snapshot failed", { code: payload.code, message: payload.message, details: payload.details });
+      throw new Error(JSON.stringify(payload));
+    }
+
+    const selection = Array.isArray(page.selection) ? page.selection : [];
+    const signature = computeSelectionSignature(selection || []);
+
+    if (_lastCanvasSnapshot && _lastCanvasSnapshot.signature === signature && _lastCanvasSnapshot.include_images === include_images) {
+      const age = Date.now() - _lastCanvasSnapshot.ts;
+      if (age <= CANVAS_SNAPSHOT_TTL_MS) {
+        logger.info("✅ get_canvas_snapshot cache_hit", { signature, ageMs: age });
+        return _lastCanvasSnapshot.payload;
+      }
+    }
+
+    const pageInfo = { id: page.id, name: page.name };
+    const selectionSummaries = (selection || []).map(_toRichNodeSummary);
+    const selectionSummary = buildSelectionSummary(selection || []);
+
+    const roots = selectionSummaries.length === 0 && Array.isArray(page.children) ? page.children.map(_toBasicNodeSummary) : [];
+
+    const payload = {
+      page: pageInfo,
+      selection: selectionSummaries,
+      root_nodes_on_page: roots,
+      selection_signature: signature,
+      selection_summary: selectionSummary,
+    };
+
+    // Optionally include lightweight exported images for the current selection
+    if (include_images && Array.isArray(selection) && selection.length > 0) {
+      try {
+        const maxExports = 2; // keep snapshot small; backend will further cap/validate
+        const fmt = 'PNG';
+        const constraint = { type: 'SCALE', value: 2 };
+        const useAbsoluteBounds = true;
+        const images = {};
+        let exportedCount = 0;
+        for (const node of selection) {
+          if (exportedCount >= maxExports) break;
+          try {
+            if (node && typeof node.exportAsync === 'function') {
+              const bytes = await node.exportAsync({ format: fmt, constraint, useAbsoluteBounds });
+              images[node.id] = customBase64Encode(bytes);
+              exportedCount++;
+            }
+          } catch (e) {
+            try { logger.warn("⚠️ snapshot export failed for node", { node_id: node && node.id, error: (e && e.message) || String(e) }); } catch (_) {}
+          }
+        }
+        if (exportedCount > 0) {
+          payload.exported_images = images;
+          try { logger.info("🖼️ get_canvas_snapshot included exported_images", { count: exportedCount }); } catch (_) {}
+        }
+      } catch (e) {
+        try { logger.warn("⚠️ snapshot image export skipped due to error", { error: (e && e.message) || String(e) }); } catch (_) {}
+      }
+    }
+
+    _lastCanvasSnapshot = { signature, include_images, ts: Date.now(), payload };
+
+    logger.info("✅ get_canvas_snapshot succeeded", { selectionCount: selectionSummaries.length, roots: roots.length });
+    return payload;
+  } catch (error) {
+    try {
+      const maybe = JSON.parse(error && error.message ? error.message : String(error));
+      if (maybe && maybe.code) {
+        logger.error("❌ get_canvas_snapshot failed", { code: maybe.code, message: (error && error.message) || String(error), details: maybe.details || {} });
+        throw new Error(JSON.stringify(maybe));
+      }
+    } catch (_) {}
+    const payload = { code: "unknown_plugin_error", message: (error && error.message) || String(error), details: {} };
+    logger.error("❌ get_canvas_snapshot failed", { code: payload.code, message: payload.message, details: payload.details });
+    throw new Error(JSON.stringify(payload));
+  }
+}
+
+
+// ============================================
+// === Category 2: Observation & Inspection ===
+// ============================================
+
+
+// -------- TOOL : find_nodes --------
+async function findNodes(params) {
+  try {
+    const { filters, scope_node_id, highlight_results } = params || {};
+    const f = (filters && typeof filters === "object") ? filters : {};
+
+    // Resolve scope
+    let scope = null;
+    if (typeof scope_node_id === "string" && scope_node_id.length > 0) {
+      scope = await figma.getNodeByIdAsync(scope_node_id);
+      if (!scope) {
+        const payload = { code: "scope_not_found", message: `Scope node not found: ${scope_node_id}`, details: { scope_node_id } };
+        logger.error("❌ find_nodes failed", { code: payload.code, originalError: payload.message, details: payload.details });
+        throw new Error(JSON.stringify(payload));
+      }
+    }
+
+    const root = scope || figma.currentPage;
+    if (!root || (root !== figma.currentPage && !("findAll" in root) && !("findAllWithCriteria" in root))) {
+      const payload = { code: "invalid_scope", message: "Scope does not support search", details: { scope_node_id } };
+      logger.error("❌ find_nodes failed", { code: payload.code, originalError: payload.message, details: payload.details });
+      throw new Error(JSON.stringify(payload));
+    }
+
+    // Build initial candidate set
+    let candidates = [];
+    const nodeTypes = Array.isArray(f.node_types) ? Array.from(new Set(f.node_types.filter((t) => typeof t === "string" && t.length > 0))) : null;
+    if (nodeTypes && nodeTypes.length > 0 && "findAllWithCriteria" in root) {
+      try {
+        candidates = root.findAllWithCriteria({ types: nodeTypes });
+      } catch (e) {
+        // Fallback to full scan if criteria fails in certain scopes
+        try {
+          logger.warn("⚠️ findAllWithCriteria failed; falling back to findAll", { error: (e && e.message) || String(e), node_types: nodeTypes, scope: scope ? scope.id : null });
+        } catch (_) {}
+        candidates = root.findAll(() => true);
+      }
+    } else {
+      candidates = root.findAll(() => true);
+    }
+
+    // Compile regex filters
+    let nameRegex = null;
+    if (typeof f.name_regex === "string" && f.name_regex.length > 0) {
+      try { nameRegex = new RegExp(f.name_regex); } catch (e) {
+        const payload = { code: "invalid_regex", message: `Invalid name_regex: ${(e && e.message) || String(e)}`, details: { name_regex: f.name_regex } };
+        logger.error("❌ find_nodes failed", { code: payload.code, originalError: payload.message, details: payload.details });
+        throw new Error(JSON.stringify(payload));
+      }
+    }
+    let textRegex = null;
+    if (typeof f.text_regex === "string" && f.text_regex.length > 0) {
+      try { textRegex = new RegExp(f.text_regex); } catch (e) {
+        const payload = { code: "invalid_regex", message: `Invalid text_regex: ${(e && e.message) || String(e)}`, details: { text_regex: f.text_regex } };
+        logger.error("❌ find_nodes failed", { code: payload.code, originalError: payload.message, details: payload.details });
+        throw new Error(JSON.stringify(payload));
+      }
+    }
+
+    const mainComponentId = (typeof f.main_component_id === "string" && f.main_component_id.length > 0) ? f.main_component_id : null;
+    const styleId = (typeof f.style_id === "string" && f.style_id.length > 0) ? f.style_id : null;
+
+    // Apply AND-composed filters
+    let results = candidates.filter((n) => {
+      if (nameRegex && !(typeof n.name === "string" && nameRegex.test(n.name))) return false;
+      if (textRegex) {
+        if (n.type !== "TEXT") return false;
+        const chars = ("characters" in n) ? (n.characters || "") : "";
+        if (!textRegex.test(chars)) return false;
+      }
+      if (mainComponentId) {
+        if (n.type !== "INSTANCE") return false;
+        try {
+          const mc = ("mainComponent" in n && n.mainComponent) ? n.mainComponent : null;
+          if (!mc || mc.id !== mainComponentId) return false;
+        } catch (_) { return false; }
+      }
+      if (styleId) {
+        const hasStyle = ("fillStyleId" in n && n.fillStyleId === styleId)
+          || ("strokeStyleId" in n && n.strokeStyleId === styleId)
+          || ("effectStyleId" in n && n.effectStyleId === styleId)
+          || (n.type === "TEXT" && "textStyleId" in n && n.textStyleId === styleId);
+        if (!hasStyle) return false;
+      }
+      return true;
+    });
+
+    const summaries = results.map((n) => _toRichNodeSummary(n));
+
+    // Optional brief highlight
+    if (highlight_results === true) {
+      const MAX_HIGHLIGHTS = 25;
+      const toHighlight = results.slice(0, MAX_HIGHLIGHTS);
+      for (const node of toHighlight) {
+        try {
+          if (!("fills" in node)) continue;
+          const originalFills = JSON.parse(JSON.stringify(node.fills));
+          node.fills = [{ type: "SOLID", color: { r: 1, g: 0.5, b: 0 }, opacity: 0.25 }];
+          await delay(80);
+          try { node.fills = originalFills; } catch (_) {}
+        } catch (_) {}
+      }
+    }
+
+    const payload = { matching_nodes: summaries };
+    logger.info("✅ find_nodes succeeded", { matched: summaries.length, scope: scope ? scope.id : "page" });
+    return payload;
+  } catch (error) {
+    try {
+      const maybe = JSON.parse(error && error.message ? error.message : String(error));
+      if (maybe && maybe.code) {
+        logger.error("❌ find_nodes failed", { code: maybe.code, originalError: (error && error.message) || String(error), details: maybe.details || {} });
+        throw new Error(JSON.stringify(maybe));
+      }
+    } catch (_) {}
+    const payload = { code: "unknown_plugin_error", message: (error && error.message) || String(error), details: {} };
+    logger.error("❌ find_nodes failed", { code: payload.code, originalError: payload.message, details: payload.details });
+    throw new Error(JSON.stringify(payload));
+  }
+}
+
+// -------- TOOL : get_node_details --------
+async function getNodeDetails(params) {
+  try {
+    const { node_ids } = params || {};
+    if (!Array.isArray(node_ids) || node_ids.length === 0) {
+      const payload = { code: "missing_parameter", message: "'node_ids' must be a non-empty array of strings", details: { node_ids } };
+      logger.error("❌ get_node_details failed", { code: payload.code, originalError: payload.message, details: payload.details });
+      throw new Error(JSON.stringify(payload));
+    }
+
+    const details = {};
+    for (const id of node_ids) {
+      try {
+        const node = await figma.getNodeByIdAsync(id);
+        if (!node) continue;
+        // Reuse existing rich inspection
+        const obs = await buildNodeDetailsInternal(id, false);
+        const parent_summary = node.parent ? _toRichNodeSummary(node.parent) : null;
+        let children_summaries = [];
+        if ("children" in node && Array.isArray(node.children)) {
+          children_summaries = node.children.map((c) => _toRichNodeSummary(c));
+        }
+        details[id] = {
+          target_node: obs && obs.target_node ? obs.target_node : null,
+          parent_summary,
+          children_summaries,
+        };
+      } catch (e) {
+        // skip this id
+      }
+    }
+    logger.info("✅ get_node_details succeeded", { count: Object.keys(details).length });
+    return { details };
+  } catch (error) {
+    try {
+      const maybe = JSON.parse(error && error.message ? error.message : String(error));
+      if (maybe && maybe.code) {
+        logger.error("❌ get_node_details failed", { code: maybe.code, originalError: (error && error.message) || String(error), details: maybe.details || {} });
+        throw new Error(JSON.stringify(maybe));
+      }
+    } catch (_) {}
+    const payload = { code: "unknown_plugin_error", message: (error && error.message) || String(error), details: {} };
+    logger.error("❌ get_node_details failed", { code: payload.code, originalError: payload.message, details: payload.details });
+    throw new Error(JSON.stringify(payload));
+  }
+}
+
+// -------- TOOL : get_image_of_node --------
+async function getImageOfNode(params) {
+  try {
+    const { node_ids, export_settings } = params || {};
+    if (!Array.isArray(node_ids) || node_ids.length === 0) {
+      const payload = { code: "missing_parameter", message: "'node_ids' must be a non-empty array of strings", details: { node_ids } };
+      logger.error("❌ get_image_of_node failed", { code: payload.code, message: payload.message, details: payload.details });
+      throw new Error(JSON.stringify(payload));
+    }
+
+    // Normalize export settings (accept both snake_case and camelCase inputs)
+    let fmt = 'PNG';
+    if (export_settings && typeof export_settings.format === 'string') {
+      let raw = String(export_settings.format).trim();
+      if (/^jpeg$/i.test(raw) || /^jpg$/i.test(raw)) raw = 'JPG';
+      fmt = raw.toUpperCase();
+    }
+
+    // Constraint normalization: accept only snake_case { type, value }
+    let constraint = { type: 'SCALE', value: 2 };
+    if (export_settings && export_settings.constraint && typeof export_settings.constraint === 'object') {
+      const c = export_settings.constraint;
+      if (typeof c.type === 'string' && (c.value !== undefined)) {
+        constraint = { type: String(c.type).toUpperCase(), value: Number(c.value) };
+      }
+    }
+
+    // Respect explicit use_absolute_bounds if provided; default to true for visual fidelity
+    const useAbsoluteBounds = export_settings
+      ? !((export_settings.use_absolute_bounds === false))
+      : true;
+
+    const images = {};
+    for (const id of node_ids) {
+      try {
+        const node = await figma.getNodeByIdAsync(id);
+        if (!node || typeof node.exportAsync !== 'function') {
+          images[id] = null;
+          continue;
+        }
+        const bytes = await node.exportAsync({ format: fmt, constraint, useAbsoluteBounds });
+        images[id] = customBase64Encode(bytes);
+      } catch (e) {
+        // Export failed for this node; log structured error and record null
+        try {
+          const details = { node_id: id, error: (e && e.message) || String(e) };
+          logger.error("❌ export_failed", { code: "export_failed", message: "Export failed for node", details });
+        } catch (_) {}
+        images[id] = null;
+      }
+    }
+    logger.info("✅ get_image_of_node succeeded", { count: Object.keys(images).length, format: fmt });
+    return { images };
+  } catch (error) {
+    try {
+      const maybe = JSON.parse(error && error.message ? error.message : String(error));
+      if (maybe && maybe.code) {
+        logger.error("❌ get_image_of_node failed", { code: maybe.code, message: maybe.message || String(error), details: maybe.details || {} });
+        throw new Error(JSON.stringify(maybe));
+      }
+    } catch (_) {}
+    const payload = { code: "unknown_plugin_error", message: (error && error.message) || String(error), details: {} };
+    logger.error("❌ get_image_of_node failed", { code: payload.code, message: payload.message, details: payload.details });
+    throw new Error(JSON.stringify(payload));
+  }
+}
+
+// -------- TOOL : get_node_ancestry --------
+async function getNodeAncestry(params) {
+  try {
+    const { node_id } = params || {};
+    if (typeof node_id !== 'string' || node_id.length === 0) {
+      const payload = { code: 'missing_parameter', message: "'node_id' must be a non-empty string", details: { node_id } };
+      logger.error('❌ get_node_ancestry failed', { code: payload.code, originalError: payload.message, details: payload.details });
+      throw new Error(JSON.stringify(payload));
+    }
+    const node = await figma.getNodeByIdAsync(node_id);
+    if (!node) {
+      const payload = { code: 'node_not_found', message: `Node not found: ${node_id}`, details: { node_id } };
+      logger.error('❌ get_node_ancestry failed', { code: payload.code, originalError: payload.message, details: payload.details });
+      throw new Error(JSON.stringify(payload));
+    }
+    const ancestors = [];
+    let current = node.parent || null;
+    while (current && current.type !== 'PAGE') {
+      ancestors.push(_toBasicNodeSummary(current));
+      current = current.parent || null;
+    }
+    if (current && current.type === 'PAGE') {
+      ancestors.push(_toBasicNodeSummary(current));
+    }
+    logger.info('✅ get_node_ancestry succeeded', { count: ancestors.length });
+    return { ancestors };
+  } catch (error) {
+    try {
+      const maybe = JSON.parse(error && error.message ? error.message : String(error));
+      if (maybe && maybe.code) {
+        logger.error('❌ get_node_ancestry failed', { code: maybe.code, originalError: (error && error.message) || String(error), details: maybe.details || {} });
+        throw new Error(JSON.stringify(maybe));
+      }
+    } catch (_) {}
+    const payload = { code: 'unknown_plugin_error', message: (error && error.message) || String(error), details: {} };
+    logger.error('❌ get_node_ancestry failed', { code: payload.code, originalError: payload.message, details: payload.details });
+    throw new Error(JSON.stringify(payload));
+  }
+}
+
+// -------- TOOL : get_node_hierarchy --------
+async function getNodeHierarchy(params) {
+  try {
+    const { node_id } = params || {};
+    if (typeof node_id !== 'string' || node_id.length === 0) {
+      const payload = { code: 'missing_parameter', message: "'node_id' must be a non-empty string", details: { node_id } };
+      logger.error('❌ get_node_hierarchy failed', { code: payload.code, originalError: payload.message, details: payload.details });
+      throw new Error(JSON.stringify(payload));
+    }
+    const node = await figma.getNodeByIdAsync(node_id);
+    if (!node) {
+      const payload = { code: 'node_not_found', message: `Node not found: ${node_id}`, details: { node_id } };
+      logger.error('❌ get_node_hierarchy failed', { code: payload.code, originalError: payload.message, details: payload.details });
+      throw new Error(JSON.stringify(payload));
+    }
+    const parent = node.parent || null;
+    const parent_summary = parent ? _toBasicNodeSummary(parent) : null;
+    let children = [];
+    try {
+      if ('children' in node && Array.isArray(node.children)) {
+        children = node.children.map((c) => _toBasicNodeSummary(c));
+      }
+    } catch (_) {}
+    logger.info('✅ get_node_hierarchy succeeded', { childCount: children.length, hasParent: !!parent_summary });
+    return { parent_summary, children };
+  } catch (error) {
+    try {
+      const maybe = JSON.parse(error && error.message ? error.message : String(error));
+      if (maybe && maybe.code) {
+        logger.error('❌ get_node_hierarchy failed', { code: maybe.code, originalError: (error && error.message) || String(error), details: maybe.details || {} });
+        throw new Error(JSON.stringify(maybe));
+      }
+    } catch (_) {}
+    const payload = { code: 'unknown_plugin_error', message: (error && error.message) || String(error), details: {} };
+    logger.error('❌ get_node_hierarchy failed', { code: payload.code, originalError: payload.message, details: payload.details });
+    throw new Error(JSON.stringify(payload));
+  }
+}
+
+// -------- TOOL : get_document_styles --------
+async function getDocumentStyles(params) {
+  try {
+    const allowed = new Set(['PAINT', 'TEXT', 'EFFECT', 'GRID']);
+    const style_types = (params && Array.isArray(params.style_types)) ? params.style_types.filter((t) => typeof t === 'string' && allowed.has(t)) : null;
+
+    const include = style_types && style_types.length > 0 ? new Set(style_types) : allowed;
+    const styles = [];
+
+    // Guard: Styles APIs only in Figma Design
+    if (figma.editorType !== 'figma') {
+      logger.info('ℹ️ get_document_styles in non-design editor', { editorType: figma.editorType });
+      return { styles };
+    }
+
+    if (include.has('PAINT') && typeof figma.getLocalPaintStylesAsync === 'function') {
+      try { const arr = await figma.getLocalPaintStylesAsync(); for (const s of arr) styles.push({ id: s.id, name: String(s.name), type: 'PAINT' }); } catch (_) {}
+    }
+    if (include.has('TEXT') && typeof figma.getLocalTextStylesAsync === 'function') {
+      try { const arr = await figma.getLocalTextStylesAsync(); for (const s of arr) styles.push({ id: s.id, name: String(s.name), type: 'TEXT' }); } catch (_) {}
+    }
+    if (include.has('EFFECT') && typeof figma.getLocalEffectStylesAsync === 'function') {
+      try { const arr = await figma.getLocalEffectStylesAsync(); for (const s of arr) styles.push({ id: s.id, name: String(s.name), type: 'EFFECT' }); } catch (_) {}
+    }
+    if (include.has('GRID') && typeof figma.getLocalGridStylesAsync === 'function') {
+      try { const arr = await figma.getLocalGridStylesAsync(); for (const s of arr) styles.push({ id: s.id, name: String(s.name), type: 'GRID' }); } catch (_) {}
+    }
+    logger.info('✅ get_document_styles succeeded', { count: styles.length });
+    return { styles };
+  } catch (error) {
+    try {
+      const maybe = JSON.parse(error && error.message ? error.message : String(error));
+      if (maybe && maybe.code) {
+        logger.error('❌ get_document_styles failed', { code: maybe.code, originalError: (error && error.message) || String(error), details: maybe.details || {} });
+        throw new Error(JSON.stringify(maybe));
+      }
+    } catch (_) {}
+    const payload = { code: 'unknown_plugin_error', message: (error && error.message) || String(error), details: {} };
+    logger.error('❌ get_document_styles failed', { code: payload.code, originalError: payload.message, details: payload.details });
+    throw new Error(JSON.stringify(payload));
+  }
+}
+
+// -------- TOOL : get_style_consumers --------
+async function getStyleConsumers(params) {
+  try {
+    const { style_id } = params || {};
+    if (typeof style_id !== 'string' || style_id.length === 0) {
+      const payload = { code: 'missing_parameter', message: "'style_id' must be a non-empty string", details: { style_id } };
+      logger.error('❌ get_style_consumers failed', { code: payload.code, originalError: payload.message, details: payload.details });
+      throw new Error(JSON.stringify(payload));
+    }
+
+    const consumers = [];
+
+    // Preferred: use the Style API if available to get canonical consumers and fields
+    try {
+      if (typeof figma.getStyleByIdAsync === 'function') {
+        const style = await figma.getStyleByIdAsync(style_id);
+        if (style && typeof style.getStyleConsumersAsync === 'function') {
+          const style_consumers = await style.getStyleConsumersAsync();
+          for (const sc of style_consumers) {
+            try {
+              const node = sc && sc.node ? sc.node : null;
+              const fields = Array.isArray(sc && sc.fields) ? sc.fields.slice() : [];
+              if (node) consumers.push({ node: _toRichNodeSummary(node), fields });
+            } catch (_) {}
+          }
+          logger.info('✅ get_style_consumers succeeded', { count: consumers.length, method: 'style_api' });
+          return { consuming_nodes: consumers };
+        }
+      }
+    } catch (e) {
+      // Non-fatal: fall back to scanning nodes on the page
+    }
+
+    // Fallback: scan nodes on the current page and detect style ids on known fields
+    const page = figma.currentPage;
+    const nodes = page ? page.findAll(() => true) : [];
+    for (const n of nodes) {
+      try {
+        const applied_fields = [];
+        if ('fillStyleId' in n && n.fillStyleId === style_id) applied_fields.push('fillStyleId');
+        if ('strokeStyleId' in n && n.strokeStyleId === style_id) applied_fields.push('strokeStyleId');
+        if ('effectStyleId' in n && n.effectStyleId === style_id) applied_fields.push('effectStyleId');
+        if (n.type === 'TEXT' && 'textStyleId' in n && n.textStyleId === style_id) applied_fields.push('textStyleId');
+        if (applied_fields.length > 0) {
+          consumers.push({ node: _toRichNodeSummary(n), fields: applied_fields });
+        }
+      } catch (_) {}
+    }
+
+    logger.info('✅ get_style_consumers succeeded', { count: consumers.length, method: 'scan' });
+    return { consuming_nodes: consumers };
+  } catch (error) {
+    try {
+      const maybe = JSON.parse(error && error.message ? error.message : String(error));
+      if (maybe && maybe.code) {
+        logger.error('❌ get_style_consumers failed', { code: maybe.code, originalError: (error && error.message) || String(error), details: maybe.details || {} });
+        throw new Error(JSON.stringify(maybe));
+      }
+    } catch (_) {}
+    const payload = { code: 'unknown_plugin_error', message: (error && error.message) || String(error), details: {} };
+    logger.error('❌ get_style_consumers failed', { code: payload.code, originalError: payload.message, details: payload.details });
+    throw new Error(JSON.stringify(payload));
+  }
+}
+
+// -------- TOOL : get_document_components --------
+async function getDocumentComponents(params) {
+  try {
+    const components = [];
+    // Optional filter: 'all' | 'published_only' | 'unpublished_only'
+    let published_filter = (params && typeof params === 'object' && typeof params.published_filter === 'string') ? params.published_filter : 'all';
+    if (published_filter !== 'published_only' && published_filter !== 'unpublished_only' && published_filter !== 'all') {
+      published_filter = 'all';
+    }
+    try {
+      const all = figma.root && typeof figma.root.findAll === 'function' ? figma.root.findAll(() => true) : [];
+      for (const n of all) {
+        if (n.type === 'COMPONENT' || n.type === 'COMPONENT_SET') {
+          const is_published = ("key" in n && !!n.key);
+          if ((published_filter === 'published_only' && !is_published) || (published_filter === 'unpublished_only' && is_published)) {
+            continue;
+          }
+          const entry = { id: n.id, component_key: ("key" in n && n.key) ? String(n.key) : null, name: n.name, type: n.type, is_published };
+          components.push(entry);
+        }
+      }
+    } catch (_) {}
+    logger.info('✅ get_document_components succeeded', { count: components.length, published_filter });
+    return { components };
+  } catch (error) {
+    try {
+      const maybe = JSON.parse(error && error.message ? error.message : String(error));
+      if (maybe && maybe.code) {
+        logger.error('❌ get_document_components failed', { code: maybe.code, originalError: (error && error.message) || String(error), details: maybe.details || {} });
+        throw new Error(JSON.stringify(maybe));
+      }
+    } catch (_) {}
+    const payload = { code: 'unknown_plugin_error', message: (error && error.message) || String(error), details: {} };
+    logger.error('❌ get_document_components failed', { code: payload.code, originalError: payload.message, details: payload.details });
+    throw new Error(JSON.stringify(payload));
+  }
+}
+
+
+
+
+
+
+
+
+// ============================================
+// ==== Category 3: Mutation & Creation =======
+// ============================================
+
+
+// ------------------------------------------------
+// -------- Sub-Category 3.1: Create Tools --------
+// ------------------------------------------------
+
+
+// -------- TOOL : create_frame --------
+async function createFrame(params) {
+  try {
+    const name = params && typeof params.name === 'string' ? params.name : 'Frame';
+    const parent_id = params && (typeof params.parent_id === 'string' ? params.parent_id : undefined);
+    const width = params && typeof params.width === 'number' ? params.width : 100;
+    const height = params && typeof params.height === 'number' ? params.height : 100;
+    const x = params && typeof params.x === 'number' ? params.x : 0;
+    const y = params && typeof params.y === 'number' ? params.y : 0;
+
+    const frame = figma.createFrame();
+    frame.name = name;
+    frame.x = x;
+    frame.y = y;
+    try { frame.resize(width, height); } catch (_) {}
+    // Default: enable auto layout for new frames for efficiency
+    try { frame.layoutMode = 'None'; } catch (_) {}
+
+    if (!parent_id) {
+      figma.currentPage.appendChild(frame);
+    } else {
+      const parentNode = await figma.getNodeByIdAsync(parent_id);
+      if (!parentNode) {
+        logger.error('create_frame failed', { code: 'parent_not_found', details: { parent_id } });
+        throw new Error(JSON.stringify({ code: 'parent_not_found', message: `Parent node not found with ID: ${parent_id}`, details: { parent_id } }));
+      }
+      if (!('appendChild' in parentNode)) {
+        logger.error('create_frame failed', { code: 'invalid_parent_type', details: { parent_id, parentType: parentNode.type } });
+        throw new Error(JSON.stringify({ code: 'invalid_parent_type', message: `Parent node does not support children: ${parent_id}`, details: { parent_id, parentType: parentNode.type } }));
+      }
+      try { parentNode.appendChild(frame); } catch (e) {
+        const originalError = (e && e.message) ? e.message : String(e);
+        const isLocked = /lock/i.test(originalError);
+        const code = isLocked ? 'locked_parent' : 'append_failed';
+        logger.error('create_frame failed', { code, originalError, details: { parent_id } });
+        throw new Error(JSON.stringify({ code, message: `Failed to append frame to parent ${parent_id}: ${originalError}`, details: { parent_id } }));
+      }
+    }
+
+    logger.info('create_frame succeeded', { id: frame.id, name: frame.name });
+    return {
+      success: true,
+      summary: `Created frame ${frame.id}`,
+      created_node_id: frame.id,
+      node: { id: frame.id, name: frame.name, x: frame.x, y: frame.y, width: frame.width || width, height: frame.height || height, parent_id }
+    };
+  } catch (error) {
+    try { const asObj = JSON.parse(error && error.message ? error.message : String(error)); if (asObj && asObj.code) throw error; } catch(_) {}
+    const originalError = (error && error.message) ? error.message : String(error);
+    logger.error('create_frame failed', { code: 'create_frame_failed', originalError, details: {} });
+    throw new Error(JSON.stringify({ code: 'create_frame_failed', message: `Failed to create frame: ${originalError}`, details: {} }));
+  }
+}
+
+
+// -------- TOOL : create_text --------
+async function createText(params) {
+  try {
+    const characters = params && (typeof params.characters === 'string' ? params.characters : 'Text');
+    const parent_id = params && (typeof params.parent_id === 'string' ? params.parent_id : undefined);
+    const x = params && typeof params.x === 'number' ? params.x : 0;
+    const y = params && typeof params.y === 'number' ? params.y : 0;
+    const name = params && typeof params.name === 'string' ? params.name : characters;
+
+    // New snake_case params
+    const font_size = params && typeof params.font_size === 'number' ? params.font_size : undefined;
+    const font_weight = params && (typeof params.font_weight === 'number' || typeof params.font_weight === 'string') ? params.font_weight : undefined;
+    const font_color = params && typeof params.font_color === 'object' ? params.font_color : undefined;
+
+    await figma.loadFontAsync({ family: 'Inter', style: 'Regular' });
+    const textNode = figma.createText();
+    textNode.x = x;
+    textNode.y = y;
+    textNode.name = name;
+    try { await setCharacters(textNode, String(characters)); } catch (_) {}
+
+    // Apply optional typography overrides
+    try {
+      if (typeof font_size === 'number') textNode.fontSize = font_size;
+    } catch (_) {}
+    try {
+      if (font_weight !== undefined && textNode.fontName && typeof textNode.fontName === 'object') {
+        // Keep existing font family but attempt to set style if possible.
+        const current_family = textNode.fontName.family || 'Inter';
+        const style = typeof font_weight === 'string' ? font_weight : String(font_weight);
+        try { textNode.fontName = { family: current_family, style }; } catch (_) {}
+      }
+    } catch (_) {}
+
+    // Apply font color if provided (expects r,g,b in 0..1 and optional a)
+    try {
+      if (font_color && typeof font_color === 'object' && (font_color.r !== undefined || font_color.g !== undefined || font_color.b !== undefined)) {
+        const c = { r: font_color.r || 0, g: font_color.g || 0, b: font_color.b || 0 };
+        const opacity = (font_color.a !== undefined && font_color.a !== null) ? font_color.a : 1;
+        try { textNode.fills = [{ type: 'SOLID', color: c, opacity }]; } catch (_) {}
+      }
+    } catch (_) {}
+
+    if (!parent_id) {
+      figma.currentPage.appendChild(textNode);
+    } else {
+      const parentNode = await figma.getNodeByIdAsync(parent_id);
+      if (!parentNode) {
+        logger.error('❌ create_text failed', { code: 'parent_not_found', originalError: 'Parent not found', details: { parent_id } });
+        throw new Error(JSON.stringify({ code: 'parent_not_found', message: 'Parent node not found', details: { parent_id } }));
+      }
+      if (!('appendChild' in parentNode)) {
+        logger.error('❌ create_text failed', { code: 'invalid_parent', originalError: 'Parent cannot accept children', details: { parent_id, parentType: parentNode.type } });
+        throw new Error(JSON.stringify({ code: 'invalid_parent', message: 'Parent node does not support children', details: { parent_id, parentType: parentNode.type } }));
+      }
+      try { parentNode.appendChild(textNode); } catch (e) {
+        const originalError = (e && e.message) || String(e);
+        const isLocked = /lock/i.test(originalError);
+        const code = isLocked ? 'locked_parent' : 'append_failed';
+        logger.error('❌ create_text failed', { code, originalError, details: { parent_id } });
+        throw new Error(JSON.stringify({ code, message: `Failed to append text to parent ${parent_id}: ${originalError}`, details: { parent_id } }));
+      }
+    }
+
+    logger.info('✅ create_text succeeded', { id: textNode.id, name: textNode.name });
+    return {
+      success: true,
+      summary: `Created text ${textNode.id}`,
+      created_node_id: textNode.id,
+      node: {
+        id: textNode.id,
+        name: textNode.name,
+        x: textNode.x,
+        y: textNode.y,
+        characters,
+        font_size: textNode.fontSize,
+        font_weight: (textNode.fontName && textNode.fontName.style) ? textNode.fontName.style : undefined,
+        parent_id
+      }
+    };
+  } catch (error) {
+    try { const maybe = JSON.parse(error && error.message ? error.message : '{}'); if (maybe && maybe.code) throw error; } catch (_) {}
+    logger.error('❌ create_text failed', { code: 'unknown_plugin_error', originalError: (error && error.message) || String(error), details: {} });
+    throw new Error(JSON.stringify({ code: 'unknown_plugin_error', message: (error && error.message) || 'Failed to create text', details: {} }));
+  }
+}
+
+
+
+// ---------------------------------------------------------------
+// -------- Sub-Category 3.2: Modify (General Properties) --------
+// ---------------------------------------------------------------
+
+
+// Helpers: normalization & validation for Paint arrays (Figma Plugin API compliant)
+function _deep_clone(value) {
+  try { return structuredClone(value); } catch (_) {
+    try { return JSON.parse(JSON.stringify(value)); } catch (_) { return value; }
+  }
+}
+
+function _clamp01(n) {
+  if (typeof n !== "number" || !isFinite(n)) return 0;
+  if (n < 0) return 0;
+  if (n > 1) return 1;
+  return n;
+}
+
+function _normalize_color_channels(color) {
+  if (!color || typeof color !== "object") return { r: 0, g: 0, b: 0 };
+  let { r, g, b, a } = color;
+  const any_over_one = [r, g, b].some((v) => typeof v === "number" && v > 1);
+  const to_unit = (v) => {
+    if (typeof v !== "number" || !isFinite(v)) return 0;
+    if (any_over_one) return Math.max(0, Math.min(1, v / 255));
+    return _clamp01(v);
+  };
+  const to_alpha = (v) => {
+    if (typeof v !== "number" || !isFinite(v)) return 1;
+    if (v > 1 && v <= 255) return Math.max(0, Math.min(1, v / 255));
+    return _clamp01(v);
+  };
+  const res = { r: to_unit(r), g: to_unit(g), b: to_unit(b) };
+  if (a !== undefined) res.a = to_alpha(a);
+  return res;
+}
+
+function _solid_from_hex(hex) {
+  try {
+    if (figma.util && typeof figma.util.solidPaint === "function") {
+      return figma.util.solidPaint(String(hex));
+    }
+  } catch (_) {}
+  // Fallback minimal hex parser (#RRGGBB or #RRGGBBAA)
+  try {
+    const h = String(hex).trim().replace(/^#/, "");
+    if (!(h.length === 6 || h.length === 8)) throw new Error("bad_hex");
+    const r = parseInt(h.slice(0, 2), 16) / 255;
+    const g = parseInt(h.slice(2, 4), 16) / 255;
+    const b = parseInt(h.slice(4, 6), 16) / 255;
+    const a = h.length === 8 ? parseInt(h.slice(6, 8), 16) / 255 : 1;
+    return { type: "SOLID", color: { r, g, b }, opacity: a };
+  } catch (_) {
+    return { type: "SOLID", color: { r: 0, g: 0, b: 0 } };
+  }
+}
+
+function _normalize_gradient_stops(stops) {
+  if (!Array.isArray(stops)) return [];
+  const normalized = stops.map((s) => {
+    const color = _normalize_color_channels(s && s.color);
+    const position = _clamp01((s && typeof s.position === "number") ? s.position : 0);
+    return { color, position };
+  });
+  // Sort by position ascending to please the API
+  normalized.sort((a, b) => a.position - b.position);
+  return normalized;
+}
+
+function _normalize_paint_type(type_value) {
+  const t = String(type_value || "").toUpperCase();
+  // Accept friendly aliases
+  if (t === "LINEAR") return "GRADIENT_LINEAR";
+  if (t === "RADIAL") return "GRADIENT_RADIAL";
+  if (t === "ANGULAR") return "GRADIENT_ANGULAR";
+  if (t === "DIAMOND") return "GRADIENT_DIAMOND";
+  return t;
+}
+
+function _camelize_known_paint_fields(paint) {
+  // Handle common snake_case inputs
+  const p = _deep_clone(paint) || {};
+  if (p.image_hash && !p.imageHash) { p.imageHash = p.image_hash; delete p.image_hash; }
+  if (p.gradient_stops && !p.gradientStops) { p.gradientStops = p.gradient_stops; delete p.gradient_stops; }
+  if (p.gradient_transform && !p.gradientTransform) { p.gradientTransform = p.gradient_transform; delete p.gradient_transform; }
+  if (p.stops && !p.gradientStops) { p.gradientStops = p.stops; delete p.stops; }
+  // Accept gradient_handle_positions from callers and convert to gradientTransform
+  if (Array.isArray(p.gradient_handle_positions)) {
+    try {
+      const handles = p.gradient_handle_positions;
+      // Compute a reasonable gradientTransform from handle positions
+      let t;
+      if (handles.length >= 3) {
+        const h0 = handles[0] || { x: 0, y: 0 };
+        const h1 = handles[1] || { x: 1, y: 0 };
+        const h2 = handles[2] || { x: 0, y: 1 };
+        t = [
+          [ (h1.x - h0.x) || 0, (h2.x - h0.x) || 0, h0.x || 0 ],
+          [ (h1.y - h0.y) || 0, (h2.y - h0.y) || 0, h0.y || 0 ],
+        ];
+      } else if (handles.length >= 2) {
+        const h0 = handles[0] || { x: 0, y: 0 };
+        const h1 = handles[1] || { x: 1, y: 0 };
+        const vx = (h1.x - h0.x) || 1;
+        const vy = (h1.y - h0.y) || 0;
+        // Perpendicular vector for width; normalize length to match main vector length
+        const t2x = -vy;
+        const t2y = vx;
+        t = [ [ vx, t2x, h0.x || 0 ], [ vy, t2y, h0.y || 0 ] ];
+      }
+      if (!p.gradientTransform && t) {
+        p.gradientTransform = t;
+      }
+    } catch (_) {}
+    // Remove unrecognized property regardless
+    delete p.gradient_handle_positions;
+  }
+  if (p.visible !== undefined) p.visible = !!p.visible;
+  return p;
+}
+
+async function _normalize_paints_input(paints) {
+  const result = [];
+  for (const raw of paints) {
+    if (typeof raw === "string") {
+      result.push(_solid_from_hex(raw));
+      continue;
+    }
+    if (!raw || typeof raw !== "object") {
+      const payload = { code: "invalid_fills", message: "Invalid paint entry", details: { entry: raw } };
+      logger.error("❌ normalize_paints_input failed", payload);
+      throw new Error(JSON.stringify(payload));
+    }
+    const p0 = _camelize_known_paint_fields(raw);
+    const type = _normalize_paint_type(p0.type);
+    if (!type) {
+      const payload = { code: "invalid_fills", message: "Paint object missing type", details: { entry: p0 } };
+      logger.error("❌ normalize_paints_input failed", payload);
+      throw new Error(JSON.stringify(payload));
+    }
+    if (type === "SOLID") {
+      const clone = _deep_clone(p0);
+      clone.type = "SOLID";
+      clone.color = _normalize_color_channels(clone.color);
+      // Move alpha from color.a to top-level opacity per Figma API expectations
+      if (clone && clone.color && typeof clone.color === "object" && Object.prototype.hasOwnProperty.call(clone.color, "a")) {
+        const alpha = clone.color.a;
+        if (clone.opacity === undefined) {
+          clone.opacity = _clamp01(alpha);
+        } else {
+          clone.opacity = _clamp01(clone.opacity);
+        }
+        // Remove unsupported channel from color
+        delete clone.color.a;
+      } else if (clone.opacity !== undefined) {
+        clone.opacity = _clamp01(clone.opacity);
+      }
+      result.push(clone);
+      continue;
+    }
+    if (type.startsWith("GRADIENT_")) {
+      const clone = _deep_clone(p0);
+      clone.type = type;
+      // Normalize and validate stops
+      clone.gradientStops = _normalize_gradient_stops(clone.gradientStops);
+      if (!Array.isArray(clone.gradientStops) || clone.gradientStops.length < 2) {
+        const payload = { code: "invalid_fills", message: "gradientStops must have at least 2 entries", details: { entry: p0 } };
+        logger.error("❌ normalize_paints_input failed", payload);
+        throw new Error(JSON.stringify(payload));
+      }
+      // Default transform to identity if missing
+      if (!Array.isArray(clone.gradientTransform)) {
+        clone.gradientTransform = [ [1, 0, 0], [0, 1, 0] ];
+      }
+      if (clone.opacity !== undefined) clone.opacity = _clamp01(clone.opacity);
+      result.push(clone);
+      continue;
+    }
+    if (type === "IMAGE") {
+      const clone = _deep_clone(p0);
+      clone.type = "IMAGE";
+      // Expect imageHash to be present if caller pre-created image; otherwise keep as-is
+      if (!clone.imageHash && clone.imageBytes) {
+        try {
+          const image = figma.createImage(clone.imageBytes);
+          clone.imageHash = image.hash;
+        } catch (_) {}
+      }
+      result.push(clone);
+      continue;
+    }
+    // Pass through unmodified but cloned for any other paint subtypes (e.g., VIDEO)
+    result.push(_deep_clone(p0));
+  }
+  return result;
+}
+
+// -------- TOOL : set_fills --------
+async function set_fills(params) {
+  logger.info("🎨 set_fills called", params);
+  try {
+    const { node_ids, paints } = params || {};
+    if (!Array.isArray(node_ids) || node_ids.length === 0) {
+      const payload = { code: "missing_parameter", message: "Provide node_ids array", details: { received: params || {} } };
+      logger.error("❌ set_fills failed", payload);
+      throw new Error(JSON.stringify(payload));
+    }
+    if (!Array.isArray(paints)) {
+      const payload = { code: "invalid_parameter", message: "paints must be an array (use [] to remove)", details: {} };
+      logger.error("❌ set_fills failed", payload);
+      throw new Error(JSON.stringify(payload));
+    }
+    // Dynamic page: ensure pages are loaded before mutating nodes
+    try {
+      if (typeof figma.loadAllPagesAsync === "function") {
+        await figma.loadAllPagesAsync();
+      }
+      if (figma.currentPage && typeof figma.currentPage.loadAsync === "function") {
+        await figma.currentPage.loadAsync();
+      }
+    } catch (e) {
+      try { logger.error("⚠️ set_fills page preload failed (continuing)", { code: "page_preload_failed", originalError: (e && e.message) || String(e), details: {} }); } catch (_) {}
+    }
+
+    // Normalize paints per Figma API: ensure unit color channels, handle hex strings, clone to avoid readonly objects
+    const normalized_paints = await _normalize_paints_input(paints);
+
+    const modified = [];
+    const notFoundIds = [];
+    const lockedNodes = [];
+    const unsupportedNodes = [];
+    const readOnlyNodes = [];
+    const nonOverridableNodes = [];
+    const failedNodes = [];
+    const failureReasons = {};
+    for (const id of node_ids) {
+      try {
+        const node = await figma.getNodeByIdAsync(id);
+        if (!node) { notFoundIds.push(id); continue; }
+        if (node.locked) { lockedNodes.push(id); continue; }
+        if (!("fills" in node)) { unsupportedNodes.push(id); continue; }
+        const original = node.fills;
+        try {
+          node.fills = _deep_clone(normalized_paints);
+          modified.push(id);
+        } catch (e) {
+          const msg = (e && e.message) ? String(e.message) : String(e);
+          // Classify common failure reasons per Figma API
+          if (/read-?only/i.test(msg) || /Cannot write to internal/i.test(msg)) {
+            readOnlyNodes.push(id);
+          } else if (/cannot be overriden|cannot be overridden|override/i.test(msg)) {
+            nonOverridableNodes.push(id);
+          } else {
+            failedNodes.push(id);
+          }
+          try { failureReasons[id] = msg; } catch (_) {}
+          try { node.fills = original; } catch (_) {}
+        }
+      } catch (_) { notFoundIds.push(id); }
+    }
+
+    if (modified.length === 0) {
+      const payload = { code: "set_fills_failed", message: "No nodes were updated", details: { notFoundIds, lockedNodes, unsupportedNodes, readOnlyNodes, nonOverridableNodes, failedNodes, failureReasons } };
+      logger.error("❌ set_fills failed", payload);
+      throw new Error(JSON.stringify(payload));
+    }
+    const summary = paints.length === 0 ? `Removed fills from ${modified.length} node(s)` : `Applied fills to ${modified.length} node(s)`;
+    logger.info("✅ set_fills succeeded", { modified_node_ids: modified });
+    const unresolved = Array.from(new Set([...notFoundIds, ...lockedNodes, ...unsupportedNodes]));
+    return { success: true, modified_node_ids: modified, unresolved_node_ids: unresolved, summary, details: { not_found_node_ids: notFoundIds, locked_node_ids: lockedNodes, unsupported_node_ids: unsupportedNodes } };
+  } catch (error) {
+    try { const maybe = JSON.parse(error && error.message ? error.message : "{}"); if (maybe && maybe.code) throw error; } catch (_) {}
+    const payload = { code: "unknown_plugin_error", message: (error && error.message) || String(error), details: { command: "set_fills" } };
+    logger.error("❌ set_fills failed", payload);
+    throw new Error(JSON.stringify(payload));
+  }
+}
+
+// -------- TOOL : set_strokes --------
+async function set_strokes(params) {
+  logger.info("🖊️ set_strokes called", params);
+  try {
+    const { node_ids, paints, stroke_weight, stroke_align, dash_pattern } = params || {};
+    if (!Array.isArray(node_ids) || node_ids.length === 0) throw new Error(JSON.stringify({ code: "missing_parameter", message: "Provide node_ids array", details: {} }));
+    if (!Array.isArray(paints)) throw new Error(JSON.stringify({ code: "invalid_parameter", message: "paints must be an array (use [] to remove)", details: {} }));
+
+    // Validate stroke parameters per API
+    if (stroke_weight !== undefined && (typeof stroke_weight !== "number" || !(stroke_weight >= 0))) {
+      throw new Error(JSON.stringify({ code: "invalid_parameter", message: "stroke_weight must be a non-negative number", details: { stroke_weight } }));
+    }
+    let normalized_align = undefined;
+    if (typeof stroke_align === "string") {
+      const a = String(stroke_align).toUpperCase().trim();
+      const allowed = ["CENTER", "INSIDE", "OUTSIDE"];
+      if (!allowed.includes(a)) {
+        throw new Error(JSON.stringify({ code: "invalid_parameter", message: "stroke_align must be one of CENTER|INSIDE|OUTSIDE", details: { stroke_align } }));
+      }
+      normalized_align = a;
+    }
+    let normalized_dash = undefined;
+    if (dash_pattern !== undefined) {
+      if (!Array.isArray(dash_pattern) || dash_pattern.some((n) => typeof n !== "number" || !isFinite(n) || n < 0)) {
+        throw new Error(JSON.stringify({ code: "invalid_parameter", message: "dash_pattern must be an array of non-negative numbers", details: { dash_pattern } }));
+      }
+      normalized_dash = dash_pattern.slice();
+    }
+
+    const normalized_paints = await _normalize_paints_input(paints);
+
+    const modified = [];
+    const notFoundIds = [];
+    const lockedNodes = [];
+    const unsupportedNodes = [];
+    for (const id of node_ids) {
+      try {
+        const node = await figma.getNodeByIdAsync(id);
+        if (!node) { notFoundIds.push(id); continue; }
+        if (node.locked) { lockedNodes.push(id); continue; }
+        if (!("strokes" in node)) { unsupportedNodes.push(id); continue; }
+        const original = { strokes: node.strokes, strokeWeight: node.strokeWeight, strokeAlign: node.strokeAlign, dashPattern: node.dashPattern };
+        try {
+          node.strokes = _deep_clone(normalized_paints);
+          if (typeof stroke_weight === "number") node.strokeWeight = stroke_weight;
+          if (normalized_align) node.strokeAlign = normalized_align;
+          if (normalized_dash) node.dashPattern = normalized_dash;
+          modified.push(id);
+        } catch (e) {
+          try { node.strokes = original.strokes; node.strokeWeight = original.strokeWeight; node.strokeAlign = original.strokeAlign; node.dashPattern = original.dashPattern; } catch (_) {}
+        }
+      } catch (_) { notFoundIds.push(id); }
+    }
+    if (modified.length === 0) {
+      const payload = { code: "set_strokes_failed", message: "No nodes were updated", details: { notFoundIds, lockedNodes, unsupportedNodes } };
+      logger.error("❌ set_strokes failed", payload);
+      throw new Error(JSON.stringify(payload));
+    }
+    const summary = paints.length === 0 ? `Removed strokes from ${modified.length} node(s)` : `Applied strokes to ${modified.length} node(s)`;
+    logger.info("✅ set_strokes succeeded", { modified_node_ids: modified });
+    const unresolved = Array.from(new Set([...notFoundIds, ...lockedNodes, ...unsupportedNodes]));
+    return { success: true, modified_node_ids: modified, unresolved_node_ids: unresolved, summary, details: { not_found_node_ids: notFoundIds, locked_node_ids: lockedNodes, unsupported_node_ids: unsupportedNodes } };
+  } catch (error) {
+    try { const maybe = JSON.parse(error && error.message ? error.message : "{}"); if (maybe && maybe.code) throw error; } catch (_) {}
+    const payload = { code: "unknown_plugin_error", message: (error && error.message) || String(error), details: { command: "set_strokes" } };
+    logger.error("❌ set_strokes failed", payload);
+    throw new Error(JSON.stringify(payload));
+  }
+}
+
+// -------- TOOL : set_corner_radius --------
+async function set_corner_radius(params) {
+  logger.info("📐 set_corner_radius (v2) called", params);
+  try {
+    const { node_ids, uniform_radius, top_left, top_right, bottom_left, bottom_right } = params || {};
+    if (!Array.isArray(node_ids) || node_ids.length === 0) throw new Error(JSON.stringify({ code: "missing_parameter", message: "Provide node_ids array", details: {} }));
+    const hasAny = [uniform_radius, top_left, top_right, bottom_left, bottom_right].some(v => v !== undefined);
+    if (!hasAny) throw new Error(JSON.stringify({ code: "missing_parameter", message: "Provide uniform_radius or per-corner values", details: {} }));
+
+    const modified = [];
+    const notFoundIds = [];
+    const lockedNodes = [];
+    const unsupportedNodes = [];
+    for (const id of node_ids) {
+      try {
+        const node = await figma.getNodeByIdAsync(id);
+        if (!node) { notFoundIds.push(id); continue; }
+        if (node.locked) { lockedNodes.push(id); continue; }
+        const supportsUniform = ("cornerRadius" in node);
+        const supportsIndividual = ("topLeftRadius" in node) && ("topRightRadius" in node) && ("bottomLeftRadius" in node) && ("bottomRightRadius" in node);
+        if (!supportsUniform && !supportsIndividual) { unsupportedNodes.push(id); continue; }
+        const original = supportsUniform ? node.cornerRadius : null;
+        const oTL = supportsIndividual ? node.topLeftRadius : null;
+        const oTR = supportsIndividual ? node.topRightRadius : null;
+        const oBL = supportsIndividual ? node.bottomLeftRadius : null;
+        const oBR = supportsIndividual ? node.bottomRightRadius : null;
+        try {
+          if (typeof uniform_radius === "number") {
+            if (supportsUniform) node.cornerRadius = uniform_radius;
+            if (supportsIndividual) { node.topLeftRadius = uniform_radius; node.topRightRadius = uniform_radius; node.bottomLeftRadius = uniform_radius; node.bottomRightRadius = uniform_radius; }
+          }
+          if (supportsIndividual) {
+            if (typeof top_left === "number") node.topLeftRadius = top_left;
+            if (typeof top_right === "number") node.topRightRadius = top_right;
+            if (typeof bottom_left === "number") node.bottomLeftRadius = bottom_left;
+            if (typeof bottom_right === "number") node.bottomRightRadius = bottom_right;
+          }
+          modified.push(id);
+        } catch (e) {
+          try {
+            if (supportsUniform && original !== null) node.cornerRadius = original;
+            if (supportsIndividual) { node.topLeftRadius = oTL; node.topRightRadius = oTR; node.bottomLeftRadius = oBL; node.bottomRightRadius = oBR; }
+          } catch (_) {}
+        }
+      } catch (_) { notFoundIds.push(id); }
+    }
+    if (modified.length === 0) {
+      const payload = { code: "set_corner_radius_failed", message: "No nodes were updated", details: { notFoundIds, lockedNodes, unsupportedNodes } };
+      logger.error("❌ set_corner_radius failed", payload);
+      throw new Error(JSON.stringify(payload));
+    }
+    const summary = `Updated corner radius on ${modified.length} node(s)`;
+    logger.info("✅ set_corner_radius succeeded", { modified_node_ids: modified });
+    const unresolved = Array.from(new Set([...notFoundIds, ...lockedNodes, ...unsupportedNodes]));
+    return { success: true, modified_node_ids: modified, unresolved_node_ids: unresolved, summary, details: { not_found_node_ids: notFoundIds, locked_node_ids: lockedNodes, unsupported_node_ids: unsupportedNodes } };
+  } catch (error) {
+    try { const maybe = JSON.parse(error && error.message ? error.message : "{}"); if (maybe && maybe.code) throw error; } catch (_) {}
+    const payload = { code: "unknown_plugin_error", message: (error && error.message) || String(error), details: { command: "set_corner_radius" } };
+    logger.error("❌ set_corner_radius failed", payload);
+    throw new Error(JSON.stringify(payload));
+  }
+}
+
+// -------- TOOL : set_size --------
+async function set_size(params) {
+  logger.info("📏 set_size called", params);
+  try {
+    const { node_ids, width, height } = params || {};
+    if (!Array.isArray(node_ids) || node_ids.length === 0) throw new Error(JSON.stringify({ code: "missing_parameter", message: "Provide node_ids array", details: {} }));
+    if (width === undefined && height === undefined) throw new Error(JSON.stringify({ code: "missing_parameter", message: "Provide width and/or height", details: {} }));
+    const modified = [];
+    const notFoundIds = [];
+    const lockedNodes = [];
+    const unsupportedNodes = [];
+    for (const id of node_ids) {
+      try {
+        const node = await figma.getNodeByIdAsync(id);
+        if (!node) { notFoundIds.push(id); continue; }
+        if (node.locked) { lockedNodes.push(id); continue; }
+        const canResize = typeof node.resize === "function";
+        if (!canResize) { unsupportedNodes.push(id); continue; }
+        const targetW = typeof width === "number" ? width : node.width;
+        const targetH = typeof height === "number" ? height : node.height;
+        try { node.resize(targetW, targetH); modified.push(id); } catch (_) { /* skip */ }
+      } catch (_) { notFoundIds.push(id); }
+    }
+    if (modified.length === 0) {
+      const payload = { code: "set_size_failed", message: "No nodes were updated", details: { notFoundIds, lockedNodes, unsupportedNodes } };
+      logger.error("❌ set_size failed", payload);
+      throw new Error(JSON.stringify(payload));
+    }
+    const summary = `Resized ${modified.length} node(s)`;
+    logger.info("✅ set_size succeeded", { modified_node_ids: modified });
+    const unresolved = Array.from(new Set([...notFoundIds, ...lockedNodes, ...unsupportedNodes]));
+    return { success: true, modified_node_ids: modified, unresolved_node_ids: unresolved, summary, details: { not_found_node_ids: notFoundIds, locked_node_ids: lockedNodes, unsupported_node_ids: unsupportedNodes } };
+  } catch (error) {
+    try { const maybe = JSON.parse(error && error.message ? error.message : "{}"); if (maybe && maybe.code) throw error; } catch (_) {}
+    const payload = { code: "unknown_plugin_error", message: (error && error.message) || String(error), details: { command: "set_size" } };
+    logger.error("❌ set_size failed", payload);
+    throw new Error(JSON.stringify(payload));
+  }
+}
+
+// -------- TOOL : set_position --------
+async function setPosition(params) {
+  logger.info("📍 set_position called", params);
+  try {
+    const { node_ids, x, y } = params || {};
+    if (!Array.isArray(node_ids) || node_ids.length === 0) throw new Error(JSON.stringify({ code: "missing_parameter", message: "Provide node_ids array", details: {} }));
+    if (typeof x !== "number" || typeof y !== "number") throw new Error(JSON.stringify({ code: "missing_parameter", message: "Provide numeric x and y", details: {} }));
+    const modified = [];
+    const notFoundIds = [];
+    const lockedNodes = [];
+    const unsupportedNodes = [];
+    for (const id of node_ids) {
+      try {
+        const node = await figma.getNodeByIdAsync(id);
+        if (!node) { notFoundIds.push(id); continue; }
+        if (node.locked) { lockedNodes.push(id); continue; }
+        if (!("x" in node) || !("y" in node)) { unsupportedNodes.push(id); continue; }
+        try { node.x = x; node.y = y; modified.push(id); } catch (_) { /* skip */ }
+      } catch (_) { notFoundIds.push(id); }
+    }
+    if (modified.length === 0) {
+      const payload = { code: "set_position_failed", message: "No nodes were updated", details: { notFoundIds, lockedNodes, unsupportedNodes } };
+      logger.error("❌ set_position failed", payload);
+      throw new Error(JSON.stringify(payload));
+    }
+    const summary = `Moved ${modified.length} node(s)`;
+    logger.info("✅ set_position succeeded", { modified_node_ids: modified });
+    return { success: true, modified_node_ids: modified, summary };
+  } catch (error) {
+    try { const maybe = JSON.parse(error && error.message ? error.message : "{}"); if (maybe && maybe.code) throw error; } catch (_) {}
+    const payload = { code: "unknown_plugin_error", message: (error && error.message) || String(error), details: { command: "set_position" } };
+    logger.error("❌ set_position failed", payload);
+    throw new Error(JSON.stringify(payload));
+  }
+}
+
+
+
+// -------- TOOL : set_layer_properties --------
+async function set_layer_properties(params) {
+  logger.info("🧱 set_layer_properties called", params);
+  try {
+    const { node_ids, name, opacity, visible, locked, blend_mode } = params || {};
+    if (!Array.isArray(node_ids) || node_ids.length === 0) throw new Error(JSON.stringify({ code: "missing_parameter", message: "Provide node_ids array", details: {} }));
+    if (name === undefined && opacity === undefined && visible === undefined && locked === undefined && blend_mode === undefined) {
+      throw new Error(JSON.stringify({ code: "missing_parameter", message: "Provide at least one property to change", details: {} }));
+    }
+    const modified = [];
+    const notFoundIds = [];
+    const lockedNodes = [];
+    const unsupportedNodes = [];
+    for (const id of node_ids) {
+      try {
+        const node = await figma.getNodeByIdAsync(id);
+        if (!node) { notFoundIds.push(id); continue; }
+        if (node.locked) { lockedNodes.push(id); continue; }
+        const before = { name: node.name, opacity: node.opacity, visible: node.visible, locked: node.locked, blendMode: node.blendMode };
+        try {
+          if (typeof name === "string") node.name = name;
+          if (typeof opacity === "number") node.opacity = Math.max(0, Math.min(1, opacity));
+          if (typeof visible === "boolean") node.visible = visible;
+          if (typeof locked === "boolean") node.locked = locked;
+          if (typeof blend_mode === "string") node.blendMode = blend_mode;
+          modified.push(id);
+        } catch (_) {
+          try { node.name = before.name; node.opacity = before.opacity; node.visible = before.visible; node.locked = before.locked; node.blendMode = before.blendMode; } catch (_) {}
+        }
+      } catch (_) { notFoundIds.push(id); }
+    }
+    if (modified.length === 0) {
+      const payload = { code: "set_layer_properties_failed", message: "No nodes were updated", details: { notFoundIds, lockedNodes, unsupportedNodes } };
+      logger.error("❌ set_layer_properties failed", payload);
+      throw new Error(JSON.stringify(payload));
+    }
+    const summary = `Updated layer properties on ${modified.length} node(s)`;
+    logger.info("✅ set_layer_properties succeeded", { modified_node_ids: modified });
+    const unresolved = Array.from(new Set([...notFoundIds, ...lockedNodes, ...unsupportedNodes]));
+    return { success: true, modified_node_ids: modified, unresolved_node_ids: unresolved, summary, details: { not_found_node_ids: notFoundIds, locked_node_ids: lockedNodes, unsupported_node_ids: unsupportedNodes } };
+  } catch (error) {
+    try { const maybe = JSON.parse(error && error.message ? error.message : "{}"); if (maybe && maybe.code) throw error; } catch (_) {}
+    const payload = { code: "unknown_plugin_error", message: (error && error.message) || String(error), details: { command: "set_layer_properties" } };
+    logger.error("❌ set_layer_properties failed", payload);
+    throw new Error(JSON.stringify(payload));
+  }
+}
+
+// -------- TOOL : set_effects --------
+async function set_effects(params) {
+  logger.info("✨ set_effects called", params);
+  try {
+    const { node_ids, effects } = params || {};
+    if (!Array.isArray(node_ids) || node_ids.length === 0) throw new Error(JSON.stringify({ code: "missing_parameter", message: "Provide node_ids array", details: {} }));
+    if (!Array.isArray(effects)) throw new Error(JSON.stringify({ code: "invalid_parameter", message: "effects must be an array (use [] to remove)", details: {} }));
+    // Basic per-item validation to fail fast with actionable details
+    for (let i = 0; i < effects.length; i++) {
+      const fx = effects[i];
+      if (typeof fx !== "object" || fx === null || typeof fx.type !== "string") {
+        const payload = { code: "invalid_parameter", message: "Each effect must be an object with a 'type' field", details: { index: i, received: fx } };
+        logger.error("❌ set_effects failed", payload);
+        throw new Error(JSON.stringify(payload));
+      }
+    }
+    const modified = [];
+    const notFoundIds = [];
+    const lockedNodes = [];
+    const unsupportedNodes = [];
+    const failed_node_ids = [];
+    const node_types = {};
+    const failure_reasons = {};
+    const capability_summary = {};
+    
+    // Helper: find or create an EffectStyle matching the desired effects (used for dynamic-page fallback)
+    async function get_or_create_effect_style_for(effects_target) {
+      try {
+        const locals = await figma.getLocalEffectStylesAsync();
+        for (const s of locals) {
+          try { if (JSON.stringify(s.effects) === JSON.stringify(effects_target)) return s; } catch (_) {}
+        }
+        const style = figma.createEffectStyle();
+        const signature = (JSON.stringify(effects_target) || "[]").slice(0, 40);
+        style.name = `FRAY/Effects Auto (${signature})`;
+        style.effects = effects_target;
+        return style;
+      } catch (_) {
+        return null;
+      }
+    }
+    for (const id of node_ids) {
+      try {
+        const node = await figma.getNodeByIdAsync(id);
+        if (!node) { notFoundIds.push(id); continue; }
+        if (node.locked) { lockedNodes.push(id); continue; }
+        if (!("effects" in node)) { unsupportedNodes.push(id); continue; }
+        node_types[id] = (node && node.type) ? String(node.type) : "unknown";
+        const hasSetEffectStyleIdAsync = ("setEffectStyleIdAsync" in node) && typeof node.setEffectStyleIdAsync === "function";
+        const hasEffectStyleIdProp = ("effectStyleId" in node);
+        const hadStyle = hasEffectStyleIdProp ? (node.effectStyleId || "") !== "" : false;
+        capability_summary[id] = { hasSetEffectStyleIdAsync, hasEffectStyleIdProp, hadStyle };
+        const original = node.effects;
+        let updated = false;
+        try {
+          node.effects = effects;
+          updated = true;
+        } catch (_) {
+          // Fallback for environments where direct assignment is read-only (e.g., dynamic-page)
+          try {
+            // Try to detach existing style, then retry direct assignment
+            try {
+              if (hasSetEffectStyleIdAsync) {
+                await node.setEffectStyleIdAsync("");
+              } else if (hasEffectStyleIdProp) {
+                try { node.effectStyleId = ""; } catch (_) {}
+              }
+            } catch (_) {}
+            if (!updated) {
+              try { node.effects = effects; updated = true; } catch (_) {}
+            }
+            const style = await get_or_create_effect_style_for(effects);
+            if (style) {
+              const can_set_async = ("setEffectStyleIdAsync" in node) && typeof node.setEffectStyleIdAsync === "function";
+              if (can_set_async) {
+                await node.setEffectStyleIdAsync(style.id);
+                updated = true;
+              } else if ("effectStyleId" in node) {
+                try { node.effectStyleId = style.id; updated = true; } catch (_) {}
+              }
+            }
+          } catch (_) {}
+          if (!updated) { try { node.effects = original; } catch (_) {} }
+        }
+        if (updated) { modified.push(id); } else { failed_node_ids.push(id); failure_reasons[id] = hadStyle ? "detached_and_apply_failed" : "apply_failed"; }
+      } catch (_) { notFoundIds.push(id); }
+    }
+    if (modified.length === 0) {
+      const payload = { code: "set_effects_failed", message: "No nodes were updated", details: { notFoundIds, lockedNodes, unsupportedNodes, failed_node_ids, node_types, failure_reasons, capability_summary } };
+      logger.error("❌ set_effects failed", payload);
+      throw new Error(JSON.stringify(payload));
+    }
+    const summary = effects.length === 0 ? `Removed effects from ${modified.length} node(s)` : `Applied effects to ${modified.length} node(s)`;
+    logger.info("✅ set_effects succeeded", { modified_node_ids: modified });
+    const unresolved = Array.from(new Set([...notFoundIds, ...lockedNodes, ...unsupportedNodes, ...failed_node_ids]));
+    return { success: true, modified_node_ids: modified, unresolved_node_ids: unresolved, summary, details: { not_found_node_ids: notFoundIds, locked_node_ids: lockedNodes, unsupported_node_ids: unsupportedNodes, failed_node_ids, node_types, failure_reasons, capability_summary } };
+  } catch (error) {
+    try { const maybe = JSON.parse(error && error.message ? error.message : "{}"); if (maybe && maybe.code) throw error; } catch (_) {}
+    const payload = { code: "unknown_plugin_error", message: (error && error.message) || String(error), details: { command: "set_effects" } };
+    logger.error("❌ set_effects failed", payload);
+    throw new Error(JSON.stringify(payload));
+  }
+}
+
+
+// ---------------------------------------------------
+// -------- Sub-Category 3.3: Modify (Layout) --------
+// ---------------------------------------------------
+
+
+// -------- TOOL : set_auto_layout --------
+async function set_auto_layout(params) {
+  logger.info("📐 set_auto_layout called", params);
+  try {
+    const { node_ids } = params || {};
+    if (!Array.isArray(node_ids) || node_ids.length === 0) {
+      const payload = { code: "missing_parameter", message: "Provide node_ids array", details: { received: params || {} } };
+      logger.error("❌ set_auto_layout failed", payload);
+      throw new Error(JSON.stringify(payload));
+    }
+
+    const {
+      layout_mode,
+      padding_left,
+      padding_right,
+      padding_top,
+      padding_bottom,
+      item_spacing,
+      primary_axis_align_items,
+      counter_axis_align_items,
+      primary_axis_sizing_mode,
+      counter_axis_sizing_mode,
+    } = params || {};
+
+    const modified = [];
+    const notFoundIds = [];
+    const lockedNodes = [];
+    const unsupportedNodes = [];
+
+    for (const id of node_ids) {
+      try {
+        const node = await figma.getNodeByIdAsync(id);
+        if (!node) { notFoundIds.push(id); continue; }
+        if (node.locked) { lockedNodes.push(id); continue; }
+        if (!("layoutMode" in node)) { unsupportedNodes.push(id); continue; }
+
+        const before = {
+          layoutMode: node.layoutMode,
+          paddingLeft: node.paddingLeft,
+          paddingRight: node.paddingRight,
+          paddingTop: node.paddingTop,
+          paddingBottom: node.paddingBottom,
+          itemSpacing: node.itemSpacing,
+          primaryAxisAlignItems: node.primaryAxisAlignItems,
+          counterAxisAlignItems: node.counterAxisAlignItems,
+          primaryAxisSizingMode: node.primaryAxisSizingMode,
+          counterAxisSizingMode: node.counterAxisSizingMode,
+        };
+
+        try {
+          if (typeof layout_mode === "string") node.layoutMode = layout_mode;
+          if (typeof padding_left === "number") node.paddingLeft = padding_left;
+          if (typeof padding_right === "number") node.paddingRight = padding_right;
+          if (typeof padding_top === "number") node.paddingTop = padding_top;
+          if (typeof padding_bottom === "number") node.paddingBottom = padding_bottom;
+          if (typeof item_spacing === "number") node.itemSpacing = item_spacing;
+          if (typeof primary_axis_align_items === "string") node.primaryAxisAlignItems = primary_axis_align_items;
+          if (typeof counter_axis_align_items === "string") node.counterAxisAlignItems = counter_axis_align_items;
+          if (typeof primary_axis_sizing_mode === "string") node.primaryAxisSizingMode = primary_axis_sizing_mode;
+          if (typeof counter_axis_sizing_mode === "string") node.counterAxisSizingMode = counter_axis_sizing_mode;
+          modified.push(id);
+        } catch (e) {
+          try {
+            node.layoutMode = before.layoutMode;
+            node.paddingLeft = before.paddingLeft;
+            node.paddingRight = before.paddingRight;
+            node.paddingTop = before.paddingTop;
+            node.paddingBottom = before.paddingBottom;
+            node.itemSpacing = before.itemSpacing;
+            node.primaryAxisAlignItems = before.primaryAxisAlignItems;
+            node.counterAxisAlignItems = before.counterAxisAlignItems;
+            node.primaryAxisSizingMode = before.primaryAxisSizingMode;
+            node.counterAxisSizingMode = before.counterAxisSizingMode;
+          } catch (_) {}
+        }
+      } catch (_) { notFoundIds.push(id); }
+    }
+
+    if (modified.length === 0) {
+      const payload = { code: "set_auto_layout_failed", message: "No nodes were updated", details: { notFoundIds, lockedNodes, unsupportedNodes } };
+      logger.error("❌ set_auto_layout failed", payload);
+      throw new Error(JSON.stringify(payload));
+    }
+    const summary = `Updated auto layout on ${modified.length} node(s)`;
+    logger.info("✅ set_auto_layout succeeded", { modified_node_ids: modified });
+    return { success: true, modified_node_ids: modified, summary };
+  } catch (error) {
+    try { const maybe = JSON.parse(error && error.message ? error.message : "{}"); if (maybe && maybe.code) throw error; } catch (_) {}
+    const payload = { code: "unknown_plugin_error", message: (error && error.message) || String(error), details: { command: "set_auto_layout" } };
+    logger.error("❌ set_auto_layout failed", payload);
+    throw new Error(JSON.stringify(payload));
+  }
+}
+
+// -------- TOOL : set_child_index --------
+async function set_child_index(params) {
+  const logger = (globalThis.logger && typeof globalThis.logger.info === 'function') ? globalThis.logger : console;
+  logger.info("↕️ set_child_index called", params);
+  try {
+    const { node_id, new_index } = params || {};
+    if (typeof node_id !== 'string' || node_id.length === 0) {
+      const payload = { code: "missing_parameter", message: "'node_id' is required and must be a string", details: { node_id } };
+      logger.error("❌ set_child_index failed", { code: payload.code, originalError: payload.message, details: payload.details });
+      throw new Error(JSON.stringify(payload));
+    }
+    if (typeof new_index !== 'number' || !Number.isInteger(new_index)) {
+      const payload = { code: "invalid_parameter", message: "'new_index' must be an integer", details: { new_index } };
+      logger.error("❌ set_child_index failed", { code: payload.code, originalError: payload.message, details: payload.details });
+      throw new Error(JSON.stringify(payload));
+    }
+
+    const node = await figma.getNodeByIdAsync(node_id);
+    if (!node) {
+      const payload = { code: "node_not_found", message: `Node not found: ${node_id}`, details: { node_id } };
+      logger.error("❌ set_child_index failed", { code: payload.code, originalError: payload.message, details: payload.details });
+      throw new Error(JSON.stringify(payload));
+    }
+    const parent = node.parent;
+    if (!parent || !("insertChild" in parent) || !Array.isArray(parent.children)) {
+      const payload = { code: "invalid_parent_container", message: "Parent is not a container with children", details: { node_id, parent_type: parent ? parent.type : null } };
+      logger.error("❌ set_child_index failed", { code: payload.code, originalError: payload.message, details: payload.details });
+      throw new Error(JSON.stringify(payload));
+    }
+    const currentIndex = parent.children.indexOf(node);
+    if (currentIndex === -1) {
+      const payload = { code: "not_a_child", message: "Node is not a child of its reported parent", details: { node_id } };
+      logger.error("❌ set_child_index failed", { code: payload.code, originalError: payload.message, details: payload.details });
+      throw new Error(JSON.stringify(payload));
+    }
+
+    // Clamp new index to valid bounds
+    const maxIndex = Math.max(0, parent.children.length - 1);
+    const clampedIndex = Math.min(Math.max(0, new_index), maxIndex);
+
+    // No-op if index is same
+    if (clampedIndex === currentIndex) {
+      const summaryNoop = `Child already at index ${clampedIndex}`;
+      logger.info("✅ set_child_index no-op", { node_id, index: clampedIndex });
+      return { success: true, modified_node_ids: [node_id], summary: summaryNoop };
+    }
+
+    try {
+      parent.insertChild(clampedIndex, node);
+    } catch (e) {
+      const originalError = (e && e.message) || String(e);
+      const payload = { code: "set_child_index_failed", message: `Failed to set child index for ${node_id}`, details: { node_id, new_index: clampedIndex, originalError } };
+      logger.error("❌ set_child_index failed", { code: payload.code, originalError: payload.details.originalError, details: payload.details });
+      throw new Error(JSON.stringify(payload));
+    }
+
+    const summary = `Moved child to index ${clampedIndex}`;
+    logger.info("✅ set_child_index succeeded", { node_id, new_index: clampedIndex });
+    return { success: true, modified_node_ids: [node_id], summary };
+  } catch (error) {
+    if (error && typeof error.message === 'string') {
+      try { JSON.parse(error.message); throw error; } catch (_) {}
+    }
+    const payload = { code: "unknown_plugin_error", message: (error && error.message) || String(error), details: { command: "set_child_index" } };
+    logger.error("❌ set_child_index failed", { code: payload.code, originalError: payload.message, details: payload.details });
+    throw new Error(JSON.stringify(payload));
+  }
+}
+
+// -------- TOOL : set_auto_layout_child --------
+async function set_auto_layout_child(params) {
+  logger.info("📐 set_auto_layout_child called", params);
+  try {
+    const { node_ids } = params || {};
+    if (!Array.isArray(node_ids) || node_ids.length === 0) throw new Error(JSON.stringify({ code: "missing_parameter", message: "Provide node_ids array", details: {} }));
+
+    const { layout_align, layout_grow, layout_positioning } = params || {};
+
+    const modified = [];
+    const notFoundIds = [];
+    const lockedNodes = [];
+    const unsupportedNodes = [];
+
+    for (const id of node_ids) {
+      try {
+        const node = await figma.getNodeByIdAsync(id);
+        if (!node) { notFoundIds.push(id); continue; }
+        if (node.locked) { lockedNodes.push(id); continue; }
+        const supports = ("layoutAlign" in node) || ("layoutGrow" in node) || ("layoutPositioning" in node);
+        if (!supports) { unsupportedNodes.push(id); continue; }
+        const before = {
+          layoutAlign: ("layoutAlign" in node) ? node.layoutAlign : undefined,
+          layoutGrow: ("layoutGrow" in node) ? node.layoutGrow : undefined,
+          layoutPositioning: ("layoutPositioning" in node) ? node.layoutPositioning : undefined,
+        };
+        try {
+          if (typeof layout_align === "string" && ("layoutAlign" in node)) node.layoutAlign = layout_align;
+          if ((layout_grow === 0 || layout_grow === 1) && ("layoutGrow" in node)) node.layoutGrow = layout_grow;
+          if (typeof layout_positioning === "string" && ("layoutPositioning" in node)) node.layoutPositioning = layout_positioning;
+          modified.push(id);
+        } catch (e) {
+          try {
+            if ("layoutAlign" in node && before.layoutAlign !== undefined) node.layoutAlign = before.layoutAlign;
+            if ("layoutGrow" in node && before.layoutGrow !== undefined) node.layoutGrow = before.layoutGrow;
+            if ("layoutPositioning" in node && before.layoutPositioning !== undefined) node.layoutPositioning = before.layoutPositioning;
+          } catch (_) {}
+        }
+      } catch (_) { notFoundIds.push(id); }
+    }
+
+    if (modified.length === 0) {
+      const payload = { code: "set_auto_layout_child_failed", message: "No nodes were updated", details: { notFoundIds, lockedNodes, unsupportedNodes } };
+      logger.error("❌ set_auto_layout_child failed", payload);
+      throw new Error(JSON.stringify(payload));
+    }
+    const summary = `Updated auto layout child props on ${modified.length} node(s)`;
+    logger.info("✅ set_auto_layout_child succeeded", { modified_node_ids: modified });
+    return { success: true, modified_node_ids: modified, summary };
+  } catch (error) {
+    try { const maybe = JSON.parse(error && error.message ? error.message : "{}"); if (maybe && maybe.code) throw error; } catch (_) {}
+    const payload = { code: "unknown_plugin_error", message: (error && error.message) || String(error), details: { command: "set_auto_layout_child" } };
+    logger.error("❌ set_auto_layout_child failed", payload);
+    throw new Error(JSON.stringify(payload));
+  }
+}
+
+// -------- TOOL : set_constraints --------
+async function set_constraints(params) {
+  logger.info("📐 set_constraints called", params);
+  try {
+    const { node_ids, horizontal, vertical } = params || {};
+    if (!Array.isArray(node_ids) || node_ids.length === 0) throw new Error(JSON.stringify({ code: "missing_parameter", message: "Provide node_ids array", details: {} }));
+    if (typeof horizontal !== "string" || typeof vertical !== "string") throw new Error(JSON.stringify({ code: "missing_parameter", message: "Provide horizontal and vertical", details: {} }));
+
+    const modified = [];
+    const notFoundIds = [];
+    const lockedNodes = [];
+    const unsupportedNodes = [];
+
+    for (const id of node_ids) {
+      try {
+        const node = await figma.getNodeByIdAsync(id);
+        if (!node) { notFoundIds.push(id); continue; }
+        if (node.locked) { lockedNodes.push(id); continue; }
+        if (!("constraints" in node)) { unsupportedNodes.push(id); continue; }
+        const before = node.constraints;
+        try {
+          node.constraints = { horizontal, vertical };
+          modified.push(id);
+        } catch (e) {
+          try { node.constraints = before; } catch (_) {}
+        }
+      } catch (_) { notFoundIds.push(id); }
+    }
+
+    if (modified.length === 0) {
+      const payload = { code: "set_constraints_failed", message: "No nodes were updated", details: { notFoundIds, lockedNodes, unsupportedNodes } };
+      logger.error("❌ set_constraints failed", payload);
+      throw new Error(JSON.stringify(payload));
+    }
+    const summary = `Updated constraints on ${modified.length} node(s)`;
+    logger.info("✅ set_constraints succeeded", { modified_node_ids: modified });
+    return { success: true, modified_node_ids: modified, summary };
+  } catch (error) {
+    try { const maybe = JSON.parse(error && error.message ? error.message : "{}"); if (maybe && maybe.code) throw error; } catch (_) {}
+    const payload = { code: "unknown_plugin_error", message: (error && error.message) || String(error), details: { command: "set_constraints" } };
+    logger.error("❌ set_constraints failed", payload);
+    throw new Error(JSON.stringify(payload));
+  }
+}
+
+
+
+// -------------------------------------------------
+// -------- Sub-Category 3.4: Modify (Text) --------
+// -------------------------------------------------
+
+
+// -------- TOOL : set_text_characters --------
+async function setTextCharacters(params) {
+  const { node_id, new_characters } = params || {};
+  try {
+    if (!node_id || typeof node_id !== "string") throw new Error(JSON.stringify({ code: "missing_parameter", message: "Provide node_id", details: {} }));
+    if (typeof new_characters !== "string") throw new Error(JSON.stringify({ code: "missing_parameter", message: "Provide new_characters string", details: {} }));
+
+    const node = await figma.getNodeByIdAsync(node_id);
+    if (!node) throw new Error(JSON.stringify({ code: "node_not_found", message: `Node not found: ${node_id}`, details: { node_id } }));
+    if (node.type !== 'TEXT') throw new Error(JSON.stringify({ code: "invalid_node_type", message: "Node is not a TEXT node", details: { node_id, node_type: node.type } }));
+    if (node.locked) throw new Error(JSON.stringify({ code: "node_locked", message: "Node is locked", details: { node_id } }));
+
+    // Load a font before changing characters
+    try {
+      if (node.fontName !== figma.mixed) {
+        await figma.loadFontAsync(node.fontName);
+      } else {
+        // Use first character font as baseline when mixed
+        if (node.characters && node.characters.length > 0) {
+          const first = node.getRangeFontName(0, 1);
+          await figma.loadFontAsync(first);
+          node.fontName = first;
+        }
+      }
+    } catch (_) {}
+
+    node.characters = new_characters;
+    logger.info("✅ set_text_characters succeeded", { node_id });
+    return { success: true, modified_node_ids: [node_id], summary: `Updated text on '${node.name}'` };
+  } catch (error) {
+    try { const parsed = JSON.parse(error && error.message ? error.message : "{}"); if (parsed && parsed.code) throw error; } catch (_) {}
+    const payload = { code: "set_text_characters_failed", message: (error && error.message) || String(error), details: { node_id } };
+    logger.error("❌ set_text_characters failed", payload);
+    throw new Error(JSON.stringify(payload));
+  }
+}
+
+// -------- TOOL : set_text_style --------
+async function setTextStyle(params) {
+  const { node_ids, font_size, font_name, text_align_horizontal, text_auto_resize, line_height_percent, letter_spacing_percent, text_case, text_decoration } = params || {};
+  logger.info("🅰️ set_text_style called", params);
+  try {
+    if (!Array.isArray(node_ids) || node_ids.length === 0) throw new Error(JSON.stringify({ code: "missing_parameter", message: "Provide node_ids array", details: {} }));
+    const modified = [];
+    const notFoundIds = [];
+    const lockedNodes = [];
+    const nonTextNodes = [];
+
+    const needFontLoad = !!(font_name);
+    const requestedFont = font_name ? { family: font_name.family, style: font_name.style } : null;
+    if (requestedFont) {
+      try { await figma.loadFontAsync(requestedFont); } catch (e) { throw new Error(JSON.stringify({ code: "font_load_failed", message: "Failed to load requested font", details: { font_name } })); }
+    }
+
+    for (const id of node_ids) {
+      try {
+        const node = await figma.getNodeByIdAsync(id);
+        if (!node) { notFoundIds.push(id); continue; }
+        if (node.locked) { lockedNodes.push(id); continue; }
+        if (node.type !== 'TEXT') { nonTextNodes.push(id); continue; }
+
+        // Ensure some font is loaded before setting style properties which may require it
+        try {
+          if (node.fontName !== figma.mixed) {
+            await figma.loadFontAsync(node.fontName);
+          } else if (requestedFont) {
+            await figma.loadFontAsync(requestedFont);
+            node.fontName = requestedFont;
+          }
+        } catch (_) {}
+
+        if (requestedFont) {
+          node.fontName = requestedFont;
+        }
+        if (typeof font_size === 'number') node.fontSize = font_size;
+        if (typeof line_height_percent === 'number') node.lineHeight = { unit: 'PERCENT', value: line_height_percent };
+        if (typeof letter_spacing_percent === 'number') node.letterSpacing = { unit: 'PERCENT', value: letter_spacing_percent };
+        if (typeof text_align_horizontal === 'string') node.textAlignHorizontal = text_align_horizontal;
+        if (typeof text_auto_resize === 'string') node.textAutoResize = text_auto_resize;
+        if (typeof text_case === 'string') node.textCase = text_case;
+        if (typeof text_decoration === 'string') node.textDecoration = text_decoration;
+
+        modified.push(id);
+      } catch (e) {
+        notFoundIds.push(id);
+      }
+    }
+
+    if (modified.length === 0) {
+      const payload = { code: "set_text_style_failed", message: "No nodes were updated", details: { notFoundIds, lockedNodes, nonTextNodes } };
+      logger.error("❌ set_text_style failed", payload);
+      throw new Error(JSON.stringify(payload));
+    }
+    const summary = `Updated text style on ${modified.length} node(s)`;
+    logger.info("✅ set_text_style succeeded", { modified_node_ids: modified });
+    return { success: true, modified_node_ids: modified, summary };
+  } catch (error) {
+    try { const parsed = JSON.parse(error && error.message ? error.message : "{}"); if (parsed && parsed.code) throw error; } catch (_) {}
+    const payload = { code: "unknown_plugin_error", message: (error && error.message) || String(error), details: { command: "set_text_style" } };
+    logger.error("❌ set_text_style failed", payload);
+    throw new Error(JSON.stringify(payload));
+  }
+}
+
+
+// ---------------------------------------------------------
+// -------- Sub-Category 3.5: Hierarchy & Structure --------
+// ---------------------------------------------------------
+
+
+// -------- TOOL : clone_nodes --------
+async function clone_nodes(params) {
+  const logger = (globalThis.logger && typeof globalThis.logger.info === 'function') ? globalThis.logger : console;
+  try {
+    const { node_ids } = params || {};
+
+    if (!Array.isArray(node_ids)) {
+      const payload = { code: "invalid_parameter", message: "'node_ids' must be an array of strings", details: { node_ids } };
+      logger.error("❌ clone_nodes failed", { code: payload.code, originalError: payload.message, details: payload.details });
+      throw new Error(JSON.stringify(payload));
+    }
+
+    const uniqueIds = Array.from(new Set(node_ids)).filter((id) => typeof id === "string" && id.length > 0);
+    if (uniqueIds.length === 0) {
+      const payload = { code: "missing_required_parameter", message: "Parameter 'node_ids' must include at least one ID.", details: { missing: ["node_ids"] } };
+      logger.error("❌ clone_nodes failed", { code: payload.code, originalError: payload.message, details: payload.details });
+      throw new Error(JSON.stringify(payload));
+    }
+
+    const created_node_ids = [];
+    const unresolved_node_ids = [];
+
+    for (const nodeId of uniqueIds) {
+      try {
+        const node = await figma.getNodeByIdAsync(nodeId);
+        if (!node) { unresolved_node_ids.push(nodeId); continue; }
+        if (!("clone" in node) || typeof node.clone !== "function") {
+          const payload = { code: "node_not_supported", message: "Node does not support clone()", details: { nodeId, type: node.type } };
+          logger.error("❌ clone_nodes failed", { code: payload.code, originalError: payload.message, details: payload.details });
+          throw new Error(JSON.stringify(payload));
+        }
+        let clone;
+        try { clone = node.clone(); } catch (e) {
+          const originalError = (e && e.message) || String(e);
+          const payload = { code: "clone_failed", message: `Failed to clone node ${nodeId}`, details: { nodeId, originalError } };
+          logger.error("❌ clone_nodes failed", { code: payload.code, originalError: payload.details.originalError, details: payload.details });
+          throw new Error(JSON.stringify(payload));
+        }
+        // Place clone next to original when possible
+        try {
+          const parent = node.parent;
+          if (parent && "insertChild" in parent && Array.isArray(parent.children)) {
+            const index = parent.children.indexOf(node);
+            const targetIndex = index >= 0 ? index + 1 : parent.children.length;
+            parent.insertChild(targetIndex, clone);
+          } else if (parent && "appendChild" in parent) {
+            parent.appendChild(clone);
+          } else {
+            figma.currentPage.appendChild(clone);
+          }
+        } catch (_) {
+          // best-effort placement
+        }
+        created_node_ids.push(clone.id);
+      } catch (_) {
+        if (!unresolved_node_ids.includes(nodeId)) unresolved_node_ids.push(nodeId);
+      }
+    }
+
+    if (created_node_ids.length === 0) {
+      const payload = { code: "no_nodes_cloned", message: "No nodes were cloned.", details: { node_ids: uniqueIds, unresolved_node_ids } };
+      logger.error("❌ clone_nodes failed", { code: payload.code, originalError: payload.message, details: payload.details });
+      throw new Error(JSON.stringify(payload));
+    }
+
+    const summary = `Cloned ${created_node_ids.length} node(s).`;
+    logger.info("✅ clone_nodes succeeded", { created: created_node_ids.length, unresolved: unresolved_node_ids.length });
+    return { success: true, created_node_ids, summary, unresolved_node_ids };
+  } catch (error) {
+    if (error && typeof error.message === "string") {
+      try { JSON.parse(error.message); throw error; } catch (_) {}
+    }
+    const payload = { code: "unknown_plugin_error", message: (error && error.message) || String(error), details: { command: "clone_nodes" } };
+    logger.error("❌ clone_nodes failed", { code: payload.code, originalError: payload.message, details: payload.details });
+    throw new Error(JSON.stringify(payload));
+  }
+}
+
+
+// -------- TOOL : reparent_nodes --------
+async function reparent_nodes(params) {
+  const logger = (globalThis.logger && typeof globalThis.logger.info === 'function') ? globalThis.logger : console;
+  try {
+    const { node_ids_to_move, new_parent_id } = params || {};
+    if (!Array.isArray(node_ids_to_move) || node_ids_to_move.length === 0) {
+      const payload = { code: "missing_required_parameter", message: "'node_ids_to_move' must be a non-empty array", details: { node_ids_to_move } };
+      logger.error("❌ reparent_nodes failed", { code: payload.code, originalError: payload.message, details: payload.details });
+      throw new Error(JSON.stringify(payload));
+    }
+    if (typeof new_parent_id !== 'string' || new_parent_id.length === 0) {
+      const payload = { code: "missing_required_parameter", message: "'new_parent_id' is required and must be a string", details: { new_parent_id } };
+      logger.error("❌ reparent_nodes failed", { code: payload.code, originalError: payload.message, details: payload.details });
+      throw new Error(JSON.stringify(payload));
+    }
+
+    const newParent = await figma.getNodeByIdAsync(new_parent_id);
+    if (!newParent) {
+      const payload = { code: "parent_not_found", message: "New parent node not found", details: { new_parent_id } };
+      logger.error("❌ reparent_nodes failed", { code: payload.code, originalError: payload.message, details: payload.details });
+      throw new Error(JSON.stringify(payload));
+    }
+    if (!("appendChild" in newParent)) {
+      const payload = { code: "invalid_parent_container", message: "New parent is not a container", details: { new_parent_id, type: newParent.type } };
+      logger.error("❌ reparent_nodes failed", { code: payload.code, originalError: payload.message, details: payload.details });
+      throw new Error(JSON.stringify(payload));
+    }
+
+    const moved_node_ids = [];
+    const unresolved_node_ids = [];
+    for (const id of node_ids_to_move) {
+      try {
+        const node = await figma.getNodeByIdAsync(id);
+        if (!node) { unresolved_node_ids.push(id); continue; }
+        try {
+          // Best-effort remove/append
+          if ("remove" in node && typeof newParent.appendChild === 'function') {
+            newParent.appendChild(node);
+          } else if ("parent" in node && node.parent) {
+            // try simple move
+            newParent.appendChild(node);
+          }
+          moved_node_ids.push(id);
+        } catch (e) {
+          const originalError = (e && e.message) || String(e);
+          const payload = { code: "reparent_failed", message: `Failed to reparent node ${id}`, details: { nodeId: id, originalError } };
+          logger.error("❌ reparent_nodes failed", { code: payload.code, originalError: payload.details.originalError, details: payload.details });
+          throw new Error(JSON.stringify(payload));
+        }
+      } catch (_) {
+        if (!unresolved_node_ids.includes(id)) unresolved_node_ids.push(id);
+      }
+    }
+
+    if (moved_node_ids.length === 0) {
+      const payload = { code: "no_nodes_moved", message: "No nodes were reparented.", details: { node_ids_to_move, unresolved_node_ids } };
+      logger.error("❌ reparent_nodes failed", { code: payload.code, originalError: payload.message, details: payload.details });
+      throw new Error(JSON.stringify(payload));
+    }
+
+    const summary = `Reparented ${moved_node_ids.length} node(s) to ${new_parent_id}.`;
+    logger.info("✅ reparent_nodes succeeded", { moved: moved_node_ids.length, unresolved: unresolved_node_ids.length });
+    return { success: true, moved_node_ids, summary, unresolved_node_ids };
+  } catch (error) {
+    if (error && typeof error.message === "string") {
+      try { JSON.parse(error.message); throw error; } catch (_) {}
+    }
+    const payload = { code: "unknown_plugin_error", message: (error && error.message) || String(error), details: { command: "reparent_nodes" } };
+    logger.error("❌ reparent_nodes failed", { code: payload.code, originalError: payload.message, details: payload.details });
+    throw new Error(JSON.stringify(payload));
+  }
+}
+
+// -------- TOOL : reorder_nodes --------
+async function reorder_nodes(params) {
+  const logger = (globalThis.logger && typeof globalThis.logger.info === 'function') ? globalThis.logger : console;
+  try {
+    const { node_ids, mode } = params || {};
+    const allowed = new Set(["BRING_FORWARD", "SEND_BACKWARD", "BRING_TO_FRONT", "SEND_TO_BACK"]);
+    if (!Array.isArray(node_ids) || node_ids.length === 0) {
+      const payload = { code: "missing_required_parameter", message: "'node_ids' must be a non-empty array", details: { node_ids } };
+      logger.error("❌ reorder_nodes failed", { code: payload.code, originalError: payload.message, details: payload.details });
+      throw new Error(JSON.stringify(payload));
+    }
+    if (typeof mode !== "string" || !allowed.has(mode)) {
+      const payload = { code: "invalid_parameter", message: "'mode' must be one of BRING_FORWARD|SEND_BACKWARD|BRING_TO_FRONT|SEND_TO_BACK", details: { mode } };
+      logger.error("❌ reorder_nodes failed", { code: payload.code, originalError: payload.message, details: payload.details });
+      throw new Error(JSON.stringify(payload));
+    }
+
+    const modified_node_ids = [];
+    const unresolved_node_ids = [];
+
+    for (const id of node_ids) {
+      try {
+        const node = await figma.getNodeByIdAsync(id);
+        if (!node) { unresolved_node_ids.push(id); continue; }
+        try {
+          switch (mode) {
+            case "BRING_FORWARD":
+              if ("bringForward" in node) node.bringForward();
+              break;
+            case "SEND_BACKWARD":
+              if ("sendBackward" in node) node.sendBackward();
+              break;
+            case "BRING_TO_FRONT":
+              if ("bringToFront" in node) node.bringToFront();
+              break;
+            case "SEND_TO_BACK":
+              if ("sendToBack" in node) node.sendToBack();
+              break;
+          }
+          modified_node_ids.push(id);
+        } catch (e) {
+          const originalError = (e && e.message) || String(e);
+          const payload = { code: "reorder_failed", message: `Failed to reorder node ${id}`, details: { nodeId: id, mode, originalError } };
+          logger.error("❌ reorder_nodes failed", { code: payload.code, originalError: payload.details.originalError, details: payload.details });
+          throw new Error(JSON.stringify(payload));
+        }
+      } catch (_) {
+        if (!unresolved_node_ids.includes(id)) unresolved_node_ids.push(id);
+      }
+    }
+
+    if (modified_node_ids.length === 0) {
+      const payload = { code: "no_nodes_modified", message: "No nodes were reordered.", details: { node_ids, unresolved_node_ids } };
+      logger.error("❌ reorder_nodes failed", { code: payload.code, originalError: payload.message, details: payload.details });
+      throw new Error(JSON.stringify(payload));
+    }
+
+    const summary = `Reordered ${modified_node_ids.length} node(s) with mode ${mode}.`;
+    logger.info("✅ reorder_nodes succeeded", { modified: modified_node_ids.length, mode, unresolved: unresolved_node_ids.length });
+    return { success: true, modified_node_ids, summary, unresolved_node_ids };
+  } catch (error) {
+    if (error && typeof error.message === "string") {
+      try { JSON.parse(error.message); throw error; } catch (_) {}
+    }
+    const payload = { code: "unknown_plugin_error", message: (error && error.message) || String(error), details: { command: "reorder_nodes" } };
+    logger.error("❌ reorder_nodes failed", { code: payload.code, originalError: payload.message, details: payload.details });
+    throw new Error(JSON.stringify(payload));
+  }
+}
+
+
+
+
+// ----------------------------------------------------
+// -------- Sub-Category Sub-Category 3.7: Components & Styles --------
+// ----------------------------------------------------
+
+
+// -------- TOOL : create_component_from_node --------
+async function createComponentFromNode(params) {
+  try {
+    const { node_id, name } = params || {};
+    if (!node_id || typeof node_id !== "string") {
+      const payload = { code: "missing_parameter", message: "'node_id' is required and must be a string", details: { node_id } };
+      logger.error("❌ create_component_from_node failed", { code: payload.code, originalError: payload.message, details: payload.details });
+      throw new Error(JSON.stringify(payload));
+    }
+
+    const node = await figma.getNodeByIdAsync(node_id);
+  if (!node) {
+      const payload = { code: "node_not_found", message: `Node not found: ${node_id}` , details: { node_id } };
+      logger.error("❌ create_component_from_node failed", { code: payload.code, originalError: payload.message, details: payload.details });
+      throw new Error(JSON.stringify(payload));
+    }
+
+    // Use Figma API to create a component directly from the node (per docs)
+    let component;
+    try {
+      component = figma.createComponentFromNode(node);
+      if (typeof name === "string" && name.trim().length > 0) {
+        component.name = name;
+      }
+    } catch (e) {
+      const originalError = (e && e.message) || String(e);
+      const payload = { code: "creation_failed", message: `Failed to create component from node: ${originalError}`, details: { node_id } };
+      logger.error("❌ create_component_from_node failed", { code: payload.code, originalError: payload.message, details: payload.details });
+      throw new Error(JSON.stringify(payload));
+    }
+
+    const result = { success: true, summary: `Created component '${component.name}' from node ${node_id}` , created_component_id: component.id, modified_node_ids: [component.id] };
+    logger.info("✅ create_component_from_node succeeded", { componentId: component.id, name: component.name });
+    return result;
+  } catch (error) {
+    try {
+      const maybe = JSON.parse((error && error.message) || String(error));
+      if (maybe && maybe.code) {
+        logger.error("❌ create_component_from_node failed", { code: maybe.code, originalError: (error && error.message) || String(error), details: maybe.details || {} });
+        throw new Error(JSON.stringify(maybe));
+      }
+    } catch (_) {}
+    const payload = { code: "unknown_plugin_error", message: (error && error.message) || String(error), details: {} };
+    logger.error("❌ create_component_from_node failed", { code: payload.code, originalError: payload.message, details: payload.details });
+    throw new Error(JSON.stringify(payload));
+  }
+}
+
+// -------- TOOL : create_component_instance --------
+async function createComponentInstance(params) {
+  const { component_key, component_id, x = 0, y = 0, parent_id } = params || {};
+
+  // Validate required parameter
+  if ((!component_key || typeof component_key !== "string") && (!component_id || typeof component_id !== "string")) {
+    logger.error("❌ create_component_instance failed", { code: "missing_parameter", originalError: "Provide component_key or component_id", details: { component_key, component_id } });
+    throw new Error(JSON.stringify({ code: "missing_parameter", message: "Provide 'component_key' or 'component_id'", details: { component_key, component_id } }));
+  }
+
+  // Validate optional params
+  if (x !== undefined && typeof x !== "number") {
+    logger.error("❌ create_component_instance failed", { code: "invalid_parameter", originalError: "x must be a number", details: { x } });
+    throw new Error(JSON.stringify({ code: "invalid_parameter", message: "'x' must be a number", details: { x } }));
+  }
+  if (y !== undefined && typeof y !== "number") {
+    logger.error("❌ create_component_instance failed", { code: "invalid_parameter", originalError: "y must be a number", details: { y } });
+    throw new Error(JSON.stringify({ code: "invalid_parameter", message: "'y' must be a number", details: { y } }));
+  }
+  if (parent_id !== undefined && typeof parent_id !== "string") {
+    logger.error("❌ create_component_instance failed", { code: "invalid_parameter", originalError: "parent_id must be a string", details: { parent_id } });
+    throw new Error(JSON.stringify({ code: "invalid_parameter", message: "'parent_id' must be a string", details: { parent_id } }));
+  }
+
+  try {
+    logger.info("🧩 Creating component instance", { component_key, component_id, x, y, parent_id });
+
+    // Resolve component by key or id
+    let component;
+    try {
+      if (component_key) {
+        component = await figma.importComponentByKeyAsync(component_key);
+      } else {
+        const byId = await figma.getNodeByIdAsync(component_id);
+        if (!byId || (byId.type !== "COMPONENT" && byId.type !== "COMPONENT_SET")) {
+          logger.error("❌ create_component_instance failed", { code: "component_not_found", originalError: "Component node not found by id", details: { component_id } });
+          throw new Error(JSON.stringify({ code: "component_not_found", message: `Component not found: ${component_id}`, details: { component_id } }));
+        }
+        component = byId;
+      }
+    } catch (e) {
+      const originalError = (e && e.message) || String(e);
+      const isPermission = /permission|access/i.test(originalError);
+      const isMissing = /no published component|not found|404/i.test(originalError);
+      const code = isMissing ? "component_not_found" : (isPermission ? "permission_denied" : "component_import_failed");
+      logger.error("❌ create_component_instance failed", { code, originalError, details: { component_key, component_id } });
+      throw new Error(JSON.stringify({ code, message: `Failed to resolve component: ${originalError}`, details: { component_key, component_id } }));
+    }
+
+    // Create instance
+    let instance;
+    try {
+      instance = component.createInstance();
+    } catch (e) {
+      const originalError = (e && e.message) || String(e);
+      logger.error("❌ create_component_instance failed", { code: "instance_creation_failed", originalError, details: { component_key, component_id } });
+      throw new Error(JSON.stringify({ code: "instance_creation_failed", message: `Failed to create instance: ${originalError}`, details: { component_key, component_id } }));
+    }
+
+    // Initial positioning (may be ignored in auto-layout parents)
+    try {
+      instance.x = x;
+      instance.y = y;
+    } catch (_) {}
+
+    // Parent placement
+    if (parent_id) {
+      const parentNode = await figma.getNodeByIdAsync(parent_id);
+      if (!parentNode) {
+        logger.error("❌ create_component_instance failed", { code: "parent_not_found", originalError: "Parent node not found", details: { parent_id } });
+        throw new Error(JSON.stringify({ code: "parent_not_found", message: `Parent node not found with ID: ${parent_id}` , details: { parent_id } }));
+      }
+      if (!("appendChild" in parentNode)) {
+        logger.error("❌ create_component_instance failed", { code: "invalid_parent", originalError: "Parent cannot accept children", details: { parent_id, parentType: parentNode.type } });
+        throw new Error(JSON.stringify({ code: "invalid_parent", message: `Parent node does not support children`, details: { parent_id, parentType: parentNode.type } }));
+      }
+      try {
+        parentNode.appendChild(instance);
+      } catch (e) {
+        const originalError = (e && e.message) || String(e);
+        const isLocked = /lock/i.test(originalError);
+        const code = isLocked ? "locked_parent" : "append_failed";
+        logger.error("❌ create_component_instance failed", { code, originalError, details: { parent_id } });
+        throw new Error(JSON.stringify({ code, message: `Failed to append instance to parent ${parent_id}: ${originalError}`, details: { parent_id } }));
+      }
+    } else {
+      figma.currentPage.appendChild(instance);
+    }
+
+    const result = {
+      success: true,
+      summary: `Placed instance '${instance.name}' at (${"x" in instance ? instance.x : x}, ${"y" in instance ? instance.y : y})`,
+      modified_node_ids: [instance.id],
+      node: {
+        id: instance.id,
+        name: instance.name,
+        x: "x" in instance ? instance.x : x,
+        y: "y" in instance ? instance.y : y,
+        width: "width" in instance ? instance.width : undefined,
+        height: "height" in instance ? instance.height : undefined,
+        component_id: instance.componentId,
+        parent_id: instance.parent ? instance.parent.id : undefined,
+      },
+      created_node_id: instance.id,
+    };
+    logger.info("✅ create_component_instance succeeded", { id: instance.id, name: instance.name });
+    return result;
+  } catch (error) {
+    // Pass through structured errors when possible
+    try {
+      const payload = JSON.parse(error && error.message ? error.message : String(error));
+      if (payload && payload.code) {
+        logger.error("❌ create_component_instance failed", { code: payload.code, originalError: (error && error.message) || String(error), details: payload.details || {} });
+        throw new Error(JSON.stringify(payload));
+      }
+    } catch (_) {}
+    const originalError = (error && error.message) || String(error);
+    logger.error("❌ create_component_instance failed", { code: "create_component_instance_failed", originalError, details: { component_key, component_id, x, y, parent_id } });
+    throw new Error(JSON.stringify({ code: "create_component_instance_failed", message: `Error creating component instance: ${originalError}`, details: { component_key, component_id, x, y, parent_id } }));
+  }
+}
+
+// -------- TOOL : set_instance_properties --------
+async function setInstanceProperties(params) {
+  try {
+    const { node_ids, properties } = params || {};
+    if (!Array.isArray(node_ids) || node_ids.length === 0) {
+      const payload = { code: "missing_parameter", message: "'node_ids' must be a non-empty array of strings", details: { node_ids } };
+      logger.error("❌ set_instance_properties failed", { code: payload.code, originalError: payload.message, details: payload.details });
+      throw new Error(JSON.stringify(payload));
+    }
+    if (!properties || typeof properties !== "object") {
+      const payload = { code: "missing_parameter", message: "'properties' must be provided as an object", details: {} };
+      logger.error("❌ set_instance_properties failed", { code: payload.code, originalError: payload.message, details: payload.details });
+      throw new Error(JSON.stringify(payload));
+    }
+
+    const modified_node_ids = [];
+    for (const id of node_ids) {
+      try {
+        const n = await figma.getNodeByIdAsync(id);
+        if (!n || n.type !== "INSTANCE") continue;
+        if (typeof n.setProperties === "function") {
+          // Respect Figma API semantics; property keys should include '#id' where required
+          n.setProperties(properties);
+          modified_node_ids.push(id);
+        }
+      } catch (_) {}
+    }
+
+    if (modified_node_ids.length === 0) {
+      const payload = { code: "no_instances_modified", message: "No instance nodes were modified", details: { node_ids } };
+      logger.error("❌ set_instance_properties failed", { code: payload.code, originalError: payload.message, details: payload.details });
+      throw new Error(JSON.stringify(payload));
+    }
+
+    const summary = `Updated properties on ${modified_node_ids.length} instance(s)`;
+    logger.info("✅ set_instance_properties succeeded", { count: modified_node_ids.length });
+    return { success: true, modified_node_ids, summary };
+  } catch (error) {
+    try {
+      const maybe = JSON.parse((error && error.message) || String(error));
+      if (maybe && maybe.code) {
+        logger.error("❌ set_instance_properties failed", { code: maybe.code, originalError: (error && error.message) || String(error), details: maybe.details || {} });
+        throw new Error(JSON.stringify(maybe));
+      }
+    } catch (_) {}
+    const payload = { code: "unknown_plugin_error", message: (error && error.message) || String(error), details: {} };
+    logger.error("❌ set_instance_properties failed", { code: payload.code, originalError: payload.message, details: payload.details });
+        throw new Error(JSON.stringify(payload));
+      }
+}
+
+// -------- TOOL : detach_instance --------
+async function detachInstance(params) {
+  try {
+    const { node_ids } = params || {};
+    if (!Array.isArray(node_ids) || node_ids.length === 0) {
+      const payload = { code: "missing_parameter", message: "'node_ids' must be a non-empty array of strings", details: { node_ids } };
+      logger.error("❌ detach_instance failed", { code: payload.code, originalError: payload.message, details: payload.details });
+      throw new Error(JSON.stringify(payload));
+    }
+
+    const created_frame_ids = [];
+    for (const id of node_ids) {
+      try {
+        const n = await figma.getNodeByIdAsync(id);
+        if (!n || n.type !== "INSTANCE") continue;
+        const frame = n.detachInstance();
+        if (frame && frame.id) created_frame_ids.push(frame.id);
+      } catch (_) {}
+    }
+
+    if (created_frame_ids.length === 0) {
+      const payload = { code: "no_instances_detached", message: "No instances were detached", details: { node_ids } };
+      logger.error("❌ detach_instance failed", { code: payload.code, originalError: payload.message, details: payload.details });
+      throw new Error(JSON.stringify(payload));
+    }
+
+    const summary = `Detached ${created_frame_ids.length} instance(s)`;
+    logger.info("✅ detach_instance succeeded", { count: created_frame_ids.length });
+    return { success: true, created_frame_ids, summary };
+  } catch (error) {
+    try {
+      const maybe = JSON.parse((error && error.message) || String(error));
+      if (maybe && maybe.code) {
+        logger.error("❌ detach_instance failed", { code: maybe.code, originalError: (error && error.message) || String(error), details: maybe.details || {} });
+        throw new Error(JSON.stringify(maybe));
+      }
+    } catch (_) {}
+    const payload = { code: "unknown_plugin_error", message: (error && error.message) || String(error), details: {} };
+    logger.error("❌ detach_instance failed", { code: payload.code, originalError: payload.message, details: payload.details });
+    throw new Error(JSON.stringify(payload));
+  }
+}
+
+// -------- TOOL : create_style --------
+async function createStyle(params) {
+  try {
+    const { name, type, style_properties } = params || {};
+    if (typeof name !== 'string' || name.trim().length === 0) {
+      const payload = { code: 'missing_parameter', message: "'name' is required and must be a non-empty string", details: { name } };
+      logger.error('❌ create_style failed', { code: payload.code, originalError: payload.message, details: payload.details });
+      throw new Error(JSON.stringify(payload));
+    }
+    const t = String(type || '').toUpperCase();
+    if (!t || !['PAINT','TEXT','EFFECT','GRID'].includes(t)) {
+      const payload = { code: 'invalid_parameter', message: "'type' must be one of PAINT|TEXT|EFFECT|GRID", details: { type } };
+      logger.error('❌ create_style failed', { code: payload.code, originalError: payload.message, details: payload.details });
+      throw new Error(JSON.stringify(payload));
+    }
+    const sp = style_properties && typeof style_properties === 'object' ? style_properties : {};
+    if (t === 'PAINT') {
+      const paints = Array.isArray(sp.paints) ? sp.paints : null;
+      if (!paints) {
+        const payload = { code: 'invalid_parameter', message: "For PAINT, style_properties.paints must be an array", details: {} };
+        logger.error('❌ create_style failed', { code: payload.code, originalError: payload.message, details: payload.details });
+        throw new Error(JSON.stringify(payload));
+      }
+      const r = await createPaintStyle({ name, paints });
+      return { success: true, summary: `Created paint style '${name}'`, created_style_id: r.created_style_id };
+    }
+    if (t === 'TEXT') {
+      const style = typeof sp === 'object' ? sp : {};
+      const r = await createTextStyle({ name, style });
+      return { success: true, summary: `Created text style '${name}'`, created_style_id: r.created_style_id };
+    }
+    if (t === 'EFFECT') {
+      const effects = Array.isArray(sp.effects) ? sp.effects : null;
+      if (!effects) {
+        const payload = { code: 'invalid_parameter', message: "For EFFECT, style_properties.effects must be an array", details: {} };
+        logger.error('❌ create_style failed', { code: payload.code, originalError: payload.message, details: payload.details });
+        throw new Error(JSON.stringify(payload));
+      }
+      const r = await createEffectStyle({ name, effects });
+      return { success: true, summary: `Created effect style '${name}'`, created_style_id: r.created_style_id };
+    }
+    // GRID
+    const layoutGrids = Array.isArray(sp.layoutGrids) ? sp.layoutGrids : null;
+    if (!layoutGrids) {
+      const payload = { code: 'invalid_parameter', message: "For GRID, style_properties.layoutGrids must be an array", details: {} };
+      logger.error('❌ create_style failed', { code: payload.code, originalError: payload.message, details: payload.details });
+      throw new Error(JSON.stringify(payload));
+    }
+    const r = await createGridStyle({ name, layoutGrids });
+    return { success: true, summary: `Created grid style '${name}'`, created_style_id: r.created_style_id };
+  } catch (error) {
+    try {
+      const maybe = JSON.parse((error && error.message) || String(error));
+      if (maybe && maybe.code) {
+        logger.error('❌ create_style failed', { code: maybe.code, originalError: (error && error.message) || String(error), details: maybe.details || {} });
+        throw new Error(JSON.stringify(maybe));
+      }
+    } catch (_) {}
+    const payload = { code: 'unknown_plugin_error', message: (error && error.message) || String(error), details: {} };
+    logger.error('❌ create_style failed', { code: payload.code, originalError: payload.message, details: payload.details });
+    throw new Error(JSON.stringify(payload));
+  }
+}
+
+// -------- TOOL : apply_style --------
+async function applyStyle(params) {
+  try {
+    const { node_ids, style_id, style_type } = params || {};
+    if (!Array.isArray(node_ids) || node_ids.length === 0) {
+      const payload = { code: 'missing_parameter', message: "'node_ids' must be a non-empty array of strings", details: { node_ids } };
+      logger.error('❌ apply_style failed', { code: payload.code, originalError: payload.message, details: payload.details });
+      throw new Error(JSON.stringify(payload));
+    }
+    if (!style_id || typeof style_id !== 'string') {
+      const payload = { code: 'missing_parameter', message: "'style_id' is required and must be a string", details: { style_id } };
+      logger.error('❌ apply_style failed', { code: payload.code, originalError: payload.message, details: payload.details });
+      throw new Error(JSON.stringify(payload));
+    }
+    const t = String(style_type || '').toUpperCase();
+    if (!['FILL','STROKE','TEXT','EFFECT','GRID'].includes(t)) {
+      const payload = { code: 'invalid_parameter', message: "'style_type' must be one of FILL|STROKE|TEXT|EFFECT|GRID", details: { style_type } };
+      logger.error('❌ apply_style failed', { code: payload.code, originalError: payload.message, details: payload.details });
+      throw new Error(JSON.stringify(payload));
+    }
+
+    const modified_node_ids = [];
+    for (const id of node_ids) {
+      try {
+        const n = await figma.getNodeByIdAsync(id);
+        if (!n) continue;
+
+        // Prefer async setter methods when available (required for documentAccess: dynamic-page)
+        try {
+          if (t === 'FILL' && typeof n.setFillStyleIdAsync === 'function') { await n.setFillStyleIdAsync(style_id); modified_node_ids.push(id); continue; }
+          if (t === 'STROKE' && typeof n.setStrokeStyleIdAsync === 'function') { await n.setStrokeStyleIdAsync(style_id); modified_node_ids.push(id); continue; }
+          if (t === 'EFFECT' && typeof n.setEffectStyleIdAsync === 'function') { await n.setEffectStyleIdAsync(style_id); modified_node_ids.push(id); continue; }
+          if (t === 'GRID' && typeof n.setGridStyleIdAsync === 'function') { await n.setGridStyleIdAsync(style_id); modified_node_ids.push(id); continue; }
+          if (t === 'TEXT' && n.type === 'TEXT' && typeof n.setTextStyleIdAsync === 'function') { await n.setTextStyleIdAsync(style_id); modified_node_ids.push(id); continue; }
+        } catch (_) {}
+
+        // Fallback to direct property assignment for environments that support it
+        try { if (t === 'FILL' && 'fillStyleId' in n) { n.fillStyleId = style_id; modified_node_ids.push(id); continue; } } catch (_) {}
+        try { if (t === 'STROKE' && 'strokeStyleId' in n) { n.strokeStyleId = style_id; modified_node_ids.push(id); continue; } } catch (_) {}
+        try { if (t === 'EFFECT' && 'effectStyleId' in n) { n.effectStyleId = style_id; modified_node_ids.push(id); continue; } } catch (_) {}
+        try { if (t === 'GRID' && 'gridStyleId' in n) { n.gridStyleId = style_id; modified_node_ids.push(id); continue; } } catch (_) {}
+        try { if (t === 'TEXT' && n.type === 'TEXT' && 'textStyleId' in n) { n.textStyleId = style_id; modified_node_ids.push(id); continue; } } catch (_) {}
+
+      } catch (_) {}
+    }
+
+    if (modified_node_ids.length === 0) {
+      const payload = { code: 'no_nodes_modified', message: 'No nodes were updated with the given style', details: { node_ids, style_id, style_type: t } };
+      logger.error('❌ apply_style failed', { code: payload.code, originalError: payload.message, details: payload.details });
+      throw new Error(JSON.stringify(payload));
+    }
+
+    const summary = `Applied ${t} style to ${modified_node_ids.length} node(s)`;
+    logger.info('✅ apply_style succeeded', { count: modified_node_ids.length, style_type: t });
+    return { success: true, modified_node_ids, summary };
+  } catch (error) {
+    try {
+      const maybe = JSON.parse((error && error.message) || String(error));
+      if (maybe && maybe.code) {
+        logger.error('❌ apply_style failed', { code: maybe.code, originalError: (error && error.message) || String(error), details: maybe.details || {} });
+        throw new Error(JSON.stringify(maybe));
+      }
+    } catch (_) {}
+    const payload = { code: 'unknown_plugin_error', message: (error && error.message) || String(error), details: {} };
+    logger.error('❌ apply_style failed', { code: payload.code, originalError: payload.message, details: payload.details });
+    throw new Error(JSON.stringify(payload));
+  }
+}
+
+
+// ----------------------------------------------------
+// -------- Sub-Category 3.8: Variables --------
+// ----------------------------------------------------
+
+
+async function createVariableCollection(params) {
+  try {
+    const name = params && typeof params.name === 'string' ? params.name : null;
+    const initialModeName = params && typeof params.initial_mode_name === 'string' ? params.initial_mode_name : null;
+
+    if (!name || name.trim().length === 0) {
+      const payload = { code: 'missing_parameter', message: "'name' is required and must be a non-empty string", details: { name } };
+      logger.error('❌ create_variable_collection failed', { code: payload.code, originalError: payload.message, details: payload.details });
+      throw new Error(JSON.stringify(payload));
+    }
+
+    if (!(figma && figma.variables && typeof figma.variables.createVariableCollection === 'function')) {
+      const payload = { code: 'variables_api_unavailable', message: 'Variables API not available in this environment', details: { editorType: figma && figma.editorType } };
+      logger.error('❌ create_variable_collection failed', { code: payload.code, originalError: payload.message, details: payload.details });
+      throw new Error(JSON.stringify(payload));
+    }
+
+    const collection = figma.variables.createVariableCollection(name);
+    try {
+      if (initialModeName && Array.isArray(collection.modes) && collection.modes.length > 0) {
+        // Prefer official API if available
+        if (typeof collection.renameMode === 'function') {
+          try { collection.renameMode(collection.modes[0].modeId || collection.modes[0].id, initialModeName); } catch (_) {}
+        } else if (collection.modes[0] && typeof collection.modes[0] === 'object') {
+          try { collection.modes[0].name = initialModeName; } catch (_) {}
+        }
+      }
+    } catch (_) { /* best-effort rename of initial mode */ }
+
+    const initialModeId = (collection && Array.isArray(collection.modes) && collection.modes[0]) ? (collection.modes[0].modeId || collection.modes[0].id) : null;
+    logger.info('✅ create_variable_collection succeeded', { collectionId: collection.id, name });
+    return { success: true, summary: `Created variable collection '${name}'`, collection_id: collection.id, initial_mode_id: initialModeId };
+  } catch (error) {
+    try { const maybe = JSON.parse((error && error.message) || String(error)); if (maybe && maybe.code) throw error; } catch (_) {}
+    const payload = { code: 'unknown_plugin_error', message: (error && error.message) || 'Failed to create variable collection', details: {} };
+    logger.error('❌ create_variable_collection failed', { code: payload.code, originalError: payload.message, details: payload.details });
+    throw new Error(JSON.stringify(payload));
+  }
+}
+
+async function createVariable(params) {
+  try {
+    const name = params && typeof params.name === 'string' ? params.name : null;
+    const collectionId = params && typeof params.collection_id === 'string' ? params.collection_id : null;
+    const resolvedType = params && typeof params.resolved_type === 'string' ? params.resolved_type : null;
+
+    if (!name || !collectionId || !resolvedType) {
+      const payload = { code: 'missing_parameter', message: "'name', 'collection_id', and 'resolved_type' are required", details: { name, collection_id: collectionId, resolved_type: resolvedType } };
+      logger.error('❌ create_variable failed', { code: payload.code, originalError: payload.message, details: payload.details });
+      throw new Error(JSON.stringify(payload));
+    }
+    const validTypes = new Set(['COLOR','FLOAT','STRING','BOOLEAN']);
+    if (!validTypes.has(resolvedType)) {
+      const payload = { code: 'invalid_parameter', message: "'resolved_type' must be one of COLOR|FLOAT|STRING|BOOLEAN", details: { resolved_type: resolvedType } };
+      logger.error('❌ create_variable failed', { code: payload.code, originalError: payload.message, details: payload.details });
+      throw new Error(JSON.stringify(payload));
+    }
+    if (!(figma && figma.variables)) {
+      const payload = { code: 'variables_api_unavailable', message: 'Variables API not available in this environment', details: { editorType: figma && figma.editorType } };
+      logger.error('❌ create_variable failed', { code: payload.code, originalError: payload.message, details: payload.details });
+      throw new Error(JSON.stringify(payload));
+    }
+
+    const collection = await figma.variables.getVariableCollectionByIdAsync(collectionId);
+    if (!collection) {
+      const payload = { code: 'collection_not_found', message: `Variable collection not found: ${collectionId}` , details: { collection_id: collectionId } };
+      logger.error('❌ create_variable failed', { code: payload.code, originalError: payload.message, details: payload.details });
+      throw new Error(JSON.stringify(payload));
+    }
+
+    let variable = null;
+    let creationError = null;
+    try {
+      variable = figma.variables.createVariable(name, collection, resolvedType);
+    } catch (e1) {
+      creationError = e1;
+      try {
+        variable = figma.variables.createVariable(name, collection.id || collectionId, resolvedType);
+      } catch (e2) {
+        const originalError = (e2 && e2.message) || (creationError && creationError.message) || String(e2 || creationError);
+        const payload = { code: 'create_variable_failed', message: originalError, details: { name, collection_id: collectionId, resolved_type: resolvedType } };
+        logger.error('❌ create_variable failed', { code: payload.code, originalError: payload.message, details: payload.details });
+        throw new Error(JSON.stringify(payload));
+      }
+    }
+
+    logger.info('✅ create_variable succeeded', { variableId: variable.id, name, resolvedType });
+    return { success: true, summary: `Created variable '${name}' in collection ${collectionId}` , variable_id: variable.id };
+  } catch (error) {
+    try { const maybe = JSON.parse((error && error.message) || String(error)); if (maybe && maybe.code) throw error; } catch (_) {}
+    const payload = { code: 'unknown_plugin_error', message: (error && error.message) || 'Failed to create variable', details: {} };
+    logger.error('❌ create_variable failed', { code: payload.code, originalError: payload.message, details: payload.details });
+    throw new Error(JSON.stringify(payload));
+  }
+}
+
+async function setVariableValue(params) {
+  try {
+    const variableId = params && typeof params.variable_id === 'string' ? params.variable_id : null;
+    const modeId = params && typeof params.mode_id === 'string' ? params.mode_id : null;
+    const value = params && 'value' in params ? params.value : undefined;
+
+    if (!variableId || !modeId) {
+      const payload = { code: 'missing_parameter', message: "'variable_id' and 'mode_id' are required", details: { variable_id: variableId, mode_id: modeId } };
+      logger.error('❌ set_variable_value failed', { code: payload.code, originalError: payload.message, details: payload.details });
+      throw new Error(JSON.stringify(payload));
+    }
+    if (!(figma && figma.variables)) {
+      const payload = { code: 'variables_api_unavailable', message: 'Variables API not available in this environment', details: { editorType: figma && figma.editorType } };
+      logger.error('❌ set_variable_value failed', { code: payload.code, originalError: payload.message, details: payload.details });
+      throw new Error(JSON.stringify(payload));
+    }
+
+    const variable = await figma.variables.getVariableByIdAsync(variableId);
+    if (!variable) {
+      const payload = { code: 'variable_not_found', message: `Variable not found: ${variableId}`, details: { variable_id: variableId } };
+      logger.error('❌ set_variable_value failed', { code: payload.code, originalError: payload.message, details: payload.details });
+      throw new Error(JSON.stringify(payload));
+    }
+
+    try {
+      variable.setValueForMode(modeId, value);
+    } catch (e) {
+      const payload = { code: 'set_value_failed', message: (e && e.message) || 'Failed to set variable value', details: { variable_id: variableId, mode_id: modeId } };
+      logger.error('❌ set_variable_value failed', { code: payload.code, originalError: payload.message, details: payload.details });
+      throw new Error(JSON.stringify(payload));
+    }
+
+    const summary = `Set variable '${variable.name}' value for mode ${modeId}`;
+    logger.info('✅ set_variable_value succeeded', { variableId, modeId });
+    return { success: true, modified_variable_id: variableId, summary };
+  } catch (error) {
+    try { const maybe = JSON.parse((error && error.message) || String(error)); if (maybe && maybe.code) throw error; } catch (_) {}
+    const payload = { code: 'unknown_plugin_error', message: (error && error.message) || 'Failed to set variable value', details: {} };
+    logger.error('❌ set_variable_value failed', { code: payload.code, originalError: payload.message, details: payload.details });
+    throw new Error(JSON.stringify(payload));
+  }
+}
+
+async function bindVariableToProperty(params) {
+  try {
+    const nodeId = params && typeof params.node_id === 'string' ? params.node_id : null;
+    const property = params && typeof params.property === 'string' ? params.property : null;
+    const variableId = params && typeof params.variable_id === 'string' ? params.variable_id : null;
+
+    if (!nodeId || !property || !variableId) {
+      const payload = { code: 'missing_parameter', message: "'node_id', 'property', and 'variable_id' are required", details: { node_id: nodeId, property, variable_id: variableId } };
+      logger.error('❌ bind_variable_to_property failed', { code: payload.code, originalError: payload.message, details: payload.details });
+      throw new Error(JSON.stringify(payload));
+    }
+    const node = await figma.getNodeByIdAsync(nodeId);
+    if (!node) {
+      const payload = { code: 'node_not_found', message: `Node not found: ${nodeId}`, details: { node_id: nodeId } };
+      logger.error('❌ bind_variable_to_property failed', { code: payload.code, originalError: payload.message, details: payload.details });
+      throw new Error(JSON.stringify(payload));
+    }
+    if (!(figma && figma.variables)) {
+      const payload = { code: 'variables_api_unavailable', message: 'Variables API not available in this environment', details: { editorType: figma && figma.editorType } };
+      logger.error('❌ bind_variable_to_property failed', { code: payload.code, originalError: payload.message, details: payload.details });
+      throw new Error(JSON.stringify(payload));
+    }
+    const variable = await figma.variables.getVariableByIdAsync(variableId);
+    if (!variable) {
+      const payload = { code: 'variable_not_found', message: `Variable not found: ${variableId}`, details: { variable_id: variableId } };
+      logger.error('❌ bind_variable_to_property failed', { code: payload.code, originalError: payload.message, details: payload.details });
+      throw new Error(JSON.stringify(payload));
+    }
+
+    // Attempt generic API if available
+    if ('setBoundVariable' in node && typeof node.setBoundVariable === 'function') {
+      try {
+        node.setBoundVariable(property, variable);
+      } catch (e) {
+        // Fallbacks for paint color bindings like fills[0].color
+        const m = property.match(/^fills\[(\d+)\]\.color$/);
+        const m2 = property.match(/^strokes\[(\d+)\]\.color$/);
+        if (m || m2) {
+          const index = parseInt((m ? m[1] : m2[1]), 10);
+          const key = m ? 'fills' : 'strokes';
+          if (Array.isArray(node[key])) {
+            const paints = node[key].slice();
+            if (index < 0 || index >= paints.length) {
+              const payload = { code: 'index_out_of_range', message: `Index ${index} out of range for ${key}`, details: { length: paints.length } };
+              logger.error('❌ bind_variable_to_property failed', { code: payload.code, originalError: payload.message, details: payload.details });
+              throw new Error(JSON.stringify(payload));
+            }
+            const paint = Object.assign({}, paints[index]);
+            const existingBV = (paint && typeof paint === 'object' && paint.boundVariables) ? paint.boundVariables : {};
+            const newBV = Object.assign({}, existingBV, { color: variable });
+            paint.boundVariables = newBV;
+            paints[index] = paint;
+            try { node[key] = paints; } catch (e2) {
+              const payload = { code: 'bind_failed', message: (e2 && e2.message) || `Failed to bind variable to ${property}`, details: { property } };
+              logger.error('❌ bind_variable_to_property failed', { code: payload.code, originalError: payload.message, details: payload.details });
+              throw new Error(JSON.stringify(payload));
+            }
+          }
+        } else {
+          const payload = { code: 'bind_failed', message: (e && e.message) || `Failed to bind variable to ${property}`, details: { property } };
+          logger.error('❌ bind_variable_to_property failed', { code: payload.code, originalError: payload.message, details: payload.details });
+          throw new Error(JSON.stringify(payload));
+        }
+      }
+    } else {
+      // Directly manipulate paints for common cases when setBoundVariable is not available
+      const m = property.match(/^fills\[(\d+)\]\.color$/);
+      const m2 = property.match(/^strokes\[(\d+)\]\.color$/);
+      if (m || m2) {
+        const index = parseInt((m ? m[1] : m2[1]), 10);
+        const key = m ? 'fills' : 'strokes';
+        if (!Array.isArray(node[key])) {
+          const payload = { code: 'invalid_property', message: `${key} is not an array on this node`, details: { nodeType: node.type } };
+          logger.error('❌ bind_variable_to_property failed', { code: payload.code, originalError: payload.message, details: payload.details });
+          throw new Error(JSON.stringify(payload));
+        }
+        const paints = node[key].slice();
+        if (index < 0 || index >= paints.length) {
+          const payload = { code: 'index_out_of_range', message: `Index ${index} out of range for ${key}`, details: { length: paints.length } };
+          logger.error('❌ bind_variable_to_property failed', { code: payload.code, originalError: payload.message, details: payload.details });
+          throw new Error(JSON.stringify(payload));
+        }
+        const paint = Object.assign({}, paints[index]);
+        const existingBV = (paint && typeof paint === 'object' && paint.boundVariables) ? paint.boundVariables : {};
+        const newBV = Object.assign({}, existingBV, { color: variable });
+        paint.boundVariables = newBV;
+        paints[index] = paint;
+        try { node[key] = paints; } catch (e2) {
+          const payload = { code: 'bind_failed', message: (e2 && e2.message) || `Failed to bind variable to ${property}`, details: { property } };
+          logger.error('❌ bind_variable_to_property failed', { code: payload.code, originalError: payload.message, details: payload.details });
+          throw new Error(JSON.stringify(payload));
+        }
+      } else {
+        const payload = { code: 'unsupported_property', message: `Unsupported property path for variable binding: ${property}`, details: { property } };
+        logger.error('❌ bind_variable_to_property failed', { code: payload.code, originalError: payload.message, details: payload.details });
+        throw new Error(JSON.stringify(payload));
+      }
+    }
+
+    logger.info('✅ bind_variable_to_property succeeded', { nodeId, property, variableId });
+    return { success: true, modified_node_ids: [nodeId], summary: `Bound variable ${variableId} to ${property}` };
+  } catch (error) {
+    try { const maybe = JSON.parse((error && error.message) || String(error)); if (maybe && maybe.code) throw error; } catch (_) {}
+    const payload = { code: 'unknown_plugin_error', message: (error && error.message) || 'Failed to bind variable to property', details: {} };
+    logger.error('❌ bind_variable_to_property failed', { code: payload.code, originalError: payload.message, details: payload.details });
+    throw new Error(JSON.stringify(payload));
+  }
+}
+
+
+// ----------------------------------------------------
+// -------- Sub-Category 3.9: Prototyping --------
+// ----------------------------------------------------
+
+
+
+
+
+
+
+// ============================================
+// ======= Category 4: Meta & Utility =========
+// ============================================
+
+// -------- TOOL : scroll_and_zoom_into_view --------
+async function scroll_and_zoom_into_view(params) {
+  const logger = (globalThis.logger && typeof globalThis.logger.info === 'function') ? globalThis.logger : console;
+  try {
+      const { node_ids } = params || {};
+
+      if (!Array.isArray(node_ids)) {
+          const payload = { code: "invalid_node_ids", message: "Parameter 'node_ids' must be a non-empty string array.", details: { node_ids } };
+          logger.error("❌ scroll_and_zoom_into_view failed", { code: payload.code, originalError: payload.message, details: payload.details });
+          throw new Error(JSON.stringify(payload));
+      }
+
+      const uniqueIds = Array.from(new Set(node_ids)).filter((id) => typeof id === "string" && id.length > 0);
+      if (uniqueIds.length === 0) {
+          const payload = { code: "missing_required_parameter", message: "Parameter 'node_ids' is required and must include at least one ID.", details: { missing: ["node_ids"] } };
+          logger.error("❌ scroll_and_zoom_into_view failed", { code: payload.code, originalError: payload.message, details: payload.details });
+          throw new Error(JSON.stringify(payload));
+      }
+
+      const nodes = [];
+      const resolved_node_ids = [];
+      const unresolved_node_ids = [];
+      for (const nodeId of uniqueIds) {
+          try {
+              const node = await figma.getNodeByIdAsync(nodeId);
+              if (node) {
+                  nodes.push(node);
+                  resolved_node_ids.push(nodeId);
+              } else {
+                  unresolved_node_ids.push(nodeId);
+              }
+          } catch (_) {
+              unresolved_node_ids.push(nodeId);
+          }
+      }
+
+      if (nodes.length === 0) {
+          const payload = { code: "nodes_not_found", message: "None of the provided nodes exist.", details: { node_ids: uniqueIds } };
+          logger.error("❌ scroll_and_zoom_into_view failed", { code: payload.code, originalError: payload.message, details: payload.details });
+          throw new Error(JSON.stringify(payload));
+      }
+
+      figma.viewport.scrollAndZoomIntoView(nodes);
+      const result = {
+          success: true,
+          summary: `Brought ${nodes.length} node(s) into view.${unresolved_node_ids.length ? ` ${unresolved_node_ids.length} unresolved.` : ''}`,
+          resolved_node_ids,
+          unresolved_node_ids,
+          zoom: figma.viewport.zoom,
+          center: figma.viewport.center,
+      };
+      logger.info("✅ scroll_and_zoom_into_view succeeded", { resolved: resolved_node_ids.length, unresolved: unresolved_node_ids.length, zoom: result.zoom, center: result.center });
+      return result;
+  } catch (error) {
+      if (error && typeof error.message === "string") {
+          try { JSON.parse(error.message); throw error; } catch (_) {}
+      }
+      const payload = { code: "figma_api_error", message: "Failed to scroll and zoom into view.", details: { originalError: String((error && error.message) || error) } };
+      logger.error("❌ scroll_and_zoom_into_view failed", { code: payload.code, originalError: payload.details.originalError });
+      throw new Error(JSON.stringify(payload));
+  }
+}
+
+// -------- TOOL : delete_nodes --------
+async function delete_nodes(params) {
+const logger = (globalThis.logger && typeof globalThis.logger.info === 'function') ? globalThis.logger : console;
+try {
+  const { node_ids } = params || {};
+
+  if (!Array.isArray(node_ids)) {
+    const payload = { code: "invalid_node_ids", message: "Parameter 'node_ids' must be an array of strings.", details: { node_ids } };
+    logger.error("❌ delete_nodes failed", { code: payload.code, originalError: payload.message, details: payload.details });
+    throw new Error(JSON.stringify(payload));
+  }
+
+  const uniqueIds = Array.from(new Set(node_ids)).filter((id) => typeof id === "string" && id.length > 0);
+  if (uniqueIds.length === 0) {
+    const payload = { code: "missing_required_parameter", message: "Parameter 'node_ids' is required and must include at least one ID.", details: { missing: ["node_ids"] } };
+    logger.error("❌ delete_nodes failed", { code: payload.code, originalError: payload.message, details: payload.details });
+    throw new Error(JSON.stringify(payload));
+  }
+
+  const deleted_node_ids = [];
+  const unresolved_node_ids = [];
+  const locked_node_ids = [];
+  const non_deletable_node_ids = [];
+
+  for (const nodeId of uniqueIds) {
+    try {
+      const node = await figma.getNodeByIdAsync(nodeId);
+      if (!node) { unresolved_node_ids.push(nodeId); continue; }
+      if (node.type === "DOCUMENT" || node.type === "PAGE") { non_deletable_node_ids.push(nodeId); continue; }
+      if ("locked" in node && node.locked) { locked_node_ids.push(nodeId); continue; }
+      try { node.remove(); deleted_node_ids.push(nodeId); } catch (e) {
+        const originalError = (e && e.message) || String(e);
+        const payload = { code: "delete_failed", message: `Failed to delete node ${nodeId}`, details: { nodeId, originalError } };
+        logger.error("❌ delete_nodes failed", { code: payload.code, originalError: payload.details.originalError, details: payload.details });
+        throw new Error(JSON.stringify(payload));
+      }
+    } catch (_) {
+      if (!unresolved_node_ids.includes(nodeId)) unresolved_node_ids.push(nodeId);
+    }
+  }
+
+  if (deleted_node_ids.length === 0) {
+    const payload = { code: "no_nodes_deleted", message: "No nodes were deleted.", details: { node_ids: uniqueIds, unresolved_node_ids, locked_node_ids, non_deletable_node_ids } };
+    logger.error("❌ delete_nodes failed", { code: payload.code, originalError: payload.message, details: payload.details });
+    throw new Error(JSON.stringify(payload));
+  }
+
+  const parts = [];
+  parts.push(`Deleted ${deleted_node_ids.length} node(s).`);
+  if (locked_node_ids.length) parts.push(`${locked_node_ids.length} locked.`);
+  if (unresolved_node_ids.length) parts.push(`${unresolved_node_ids.length} not found.`);
+  if (non_deletable_node_ids.length) parts.push(`${non_deletable_node_ids.length} non-deletable.`);
+  const summary = parts.join(' ');
+
+  const result = { success: true, deleted_node_ids, summary, unresolved_node_ids, locked_node_ids, non_deletable_node_ids };
+  logger.info("✅ delete_nodes succeeded", { deleted: deleted_node_ids.length, locked: locked_node_ids.length, unresolved: unresolved_node_ids.length, nonDeletable: non_deletable_node_ids.length });
+  return result;
+} catch (error) {
+  if (error && typeof error.message === "string") {
+    try { JSON.parse(error.message); throw error; } catch (_) {}
+  }
+  const payload = { code: "unknown_plugin_error", message: "Failed to delete nodes.", details: { originalError: String((error && error.message) || error) } };
+  logger.error("❌ delete_nodes failed", { code: payload.code, originalError: payload.details.originalError });
+  throw new Error(JSON.stringify(payload));
+}
+}
+
+// -------- TOOL : show_notification --------
+async function show_notification(params) {
+try {
+  const { message, is_error } = params || {};
+  if (typeof message !== "string" || message.length === 0) {
+    const payload = { code: "missing_parameter", message: "'message' must be a non-empty string", details: { message } };
+    logger.error("❌ show_notification failed", { code: payload.code, originalError: payload.message, details: payload.details });
+    throw new Error(JSON.stringify(payload));
+  }
+  try {
+    if (typeof figma.notify === "function") {
+      if (typeof is_error === "boolean") {
+        figma.notify(message, { error: !!is_error });
+      } else {
+        figma.notify(message);
+      }
+    }
+  } catch (e) {
+    const originalError = (e && e.message) || String(e);
+    const payload = { code: "figma_api_error", message: `Failed to show notification: ${originalError}`, details: {} };
+    logger.error("❌ show_notification failed", { code: payload.code, originalError: payload.message, details: payload.details });
+    throw new Error(JSON.stringify(payload));
+  }
+  logger.info("✅ show_notification succeeded", { message, is_error: !!is_error });
+  return { success: true };
+} catch (error) {
+  try {
+    const maybe = JSON.parse(error && error.message ? error.message : String(error));
+    if (maybe && maybe.code) {
+      logger.error("❌ show_notification failed", { code: maybe.code, originalError: (error && error.message) || String(error), details: maybe.details || {} });
+      throw new Error(JSON.stringify(maybe));
+    }
+  } catch (_) {}
+  const payload = { code: "unknown_plugin_error", message: (error && error.message) || String(error), details: {} };
+  logger.error("❌ show_notification failed", { code: payload.code, originalError: payload.message, details: payload.details });
+  throw new Error(JSON.stringify(payload));
+}
+}
+
+// -------- TOOL : commit_undo_step --------
+async function commit_undo_step() {
+try {
+  if (typeof figma.commitUndo === "function") {
+    figma.commitUndo();
+  }
+  logger.info("✅ commit_undo_step succeeded");
+  return { success: true };
+} catch (error) {
+  try {
+    const maybe = JSON.parse(error && error.message ? error.message : String(error));
+    if (maybe && maybe.code) {
+      logger.error("❌ commit_undo_step failed", { code: maybe.code, originalError: (error && error.message) || String(error), details: maybe.details || {} });
+      throw new Error(JSON.stringify(maybe));
+    }
+  } catch (_) {}
+  const payload = { code: "unknown_plugin_error", message: (error && error.message) || String(error), details: {} };
+  logger.error("❌ commit_undo_step failed", { code: payload.code, originalError: payload.message, details: payload.details });
+  throw new Error(JSON.stringify(payload));
+}
+}
+
+
+
+
+
+// -----------------------------------------------
+// ---------------  HELPERS SECTION --------------
+// ------------------------------------------------
+
+
+// Helpers index (usage-oriented overview)
+// - Canvas/Node summaries: _computeAbsoluteBoundingBox, _toBasicNodeSummary, _toRichNodeSummary
+// - Node introspection: isInstanceNode, getTextNodeMeta, getComponentInfo, getAutoLayoutInfo, getStyleRefs
+// - Node details export: rgbaToHex, filterFigmaNode, customBase64Encode, buildNodeDetailsInternal
+// - Text helpers: setCharacters
+// - Selection snapshot: selectionSummaryState, debounce, nodeHasVariants, collectNodeSummary, computeSelectionSignature, buildSelectionSummary, postDocumentInfo, handleSelectionChange
+// - Elsewhere in file: style management commands (createEffectStyle, createGridStyle), and utility wrapper (withUndoGroup)
+
+
+
+function _computeAbsoluteBoundingBox(node) {
+  try {
+    if ("absoluteRenderBounds" in node && node.absoluteRenderBounds) {
+      const b = node.absoluteRenderBounds;
+      return { x: Math.round(b.x), y: Math.round(b.y), width: Math.round(b.width), height: Math.round(b.height) };
+    }
+  } catch (_) {}
+  try {
+    const t = ("absoluteTransform" in node && Array.isArray(node.absoluteTransform)) ? node.absoluteTransform : [[1,0,0],[0,1,0]];
+    const x = t[0][2];
+    const y = t[1][2];
+    const w = ("width" in node) ? node.width : 0;
+    const h = ("height" in node) ? node.height : 0;
+    return { x: Math.round(x), y: Math.round(y), width: Math.round(w), height: Math.round(h) };
+  } catch (_) {
+    return { x: 0, y: 0, width: 0, height: 0 };
+  }
+}
+
+/**
+ * Produce a minimal summary for any Figma node.
+ * Includes id, name, type, and boolean flag for children presence.
+ * Used for lightweight listings where geometry is not required.
+ * @param {SceneNode} node
+ * @returns {{id:string,name:string,type:string,has_children:boolean}}
+ */
+function _toBasicNodeSummary(node) {
+  return {
+    id: node.id,
+    name: node.name,
+    type: node.type,
+    has_children: Array.isArray(node.children) && node.children.length > 0,
   };
 }
 
-function phase1ColorToHex(paint) {
-  try {
-    if (!paint || paint.type !== "SOLID" || !paint.color) return null;
-    const r = Math.round((paint.color.r || 0) * 255);
-    const g = Math.round((paint.color.g || 0) * 255);
-    const b = Math.round((paint.color.b || 0) * 255);
-    const toHex = (v) => v.toString(16).padStart(2, "0");
-    return `#${toHex(r)}${toHex(g)}${toHex(b)}`.toUpperCase();
-  } catch (_) {
-    return null;
-  }
+/**
+ * Produce an enriched summary for a node including absolute bounding box
+ * and auto layout mode where available.
+ * @param {SceneNode} node
+ * @returns {{id:string,name:string,type:string,absolute_bounding_box:{x:number,y:number,width:number,height:number},auto_layout_mode:("NONE"|"HORIZONTAL"|"VERTICAL"|null),has_children:boolean}}
+ */
+function _toRichNodeSummary(node) {
+  const bbox = _computeAbsoluteBoundingBox(node);
+  const autoLayoutMode = ("layoutMode" in node && node.layoutMode) ? node.layoutMode : null;
+  return {
+    id: node.id,
+    name: node.name,
+    type: node.type,
+    absolute_bounding_box: bbox,
+    auto_layout_mode: autoLayoutMode || null,
+    has_children: Array.isArray(node.children) && node.children.length > 0,
+  };
 }
 
-function phase1PrimaryFillHex(node) {
-  try {
-    const fills = (node.fills && Array.isArray(node.fills)) ? node.fills : [];
-    for (const paint of fills) {
-      if (paint.type === "SOLID") {
-        const hex = phase1ColorToHex(paint);
-        if (hex) return hex;
-      }
-    }
-  } catch (_) { /* noop */ }
-  return null;
-}
-
-function phase1StrokeInfo(node) {
-  try {
-    const strokes = (node.strokes && Array.isArray(node.strokes)) ? node.strokes : [];
-    let hex = null;
-    for (const paint of strokes) {
-      if (paint.type === "SOLID") {
-        hex = phase1ColorToHex(paint);
-        if (hex) break;
-      }
-    }
-    const weight = ("strokeWeight" in node) ? node.strokeWeight : undefined;
-    return hex ? { hex, weight } : null;
-  } catch (_) {
-    return null;
-  }
-}
-
-function phase1EffectsInfo(node) {
-  try {
-    const effects = (node.effects && Array.isArray(node.effects)) ? node.effects : [];
-    const shadows = effects.filter(e => e && (e.type === "DROP_SHADOW" || e.type === "INNER_SHADOW"));
-    return { hasShadows: shadows.length > 0, shadowCount: shadows.length };
-  } catch (_) {
-    return { hasShadows: false, shadowCount: 0 };
-  }
-}
-
-function phase1LayoutGridInfo(node) {
-  try {
-    const grids = (node.layoutGrids && Array.isArray(node.layoutGrids)) ? node.layoutGrids : [];
-    const types = Array.from(new Set(grids.map(g => g.type))).filter(Boolean);
-    return { count: grids.length, types };
-  } catch (_) {
-    return { count: 0, types: [] };
-  }
-}
-
-function phase1IsInstance(node) {
+// ======================================================
+// Section: Node Introspection Helpers (shared)
+// ======================================================
+/**
+ * Returns true if the node is an INSTANCE.
+ * @param {SceneNode} node
+ * @returns {boolean}
+ */
+function isInstanceNode(node) {
   return node.type === "INSTANCE";
 }
 
-function phase1HasVariants(node) {
-  try {
-    if (node.type === "COMPONENT_SET") return true;
-    if (node.type === "COMPONENT" && node.parent && node.parent.type === "COMPONENT_SET") return true;
-    if (node.type === "INSTANCE" && node.mainComponent) {
-      const mc = node.mainComponent;
-      if (mc && mc.parent && mc.parent.type === "COMPONENT_SET") return true;
-      if ("variantProperties" in mc && mc.variantProperties && Object.keys(mc.variantProperties).length > 0) return true;
-    }
-    return false;
-  } catch (_) { return false; }
-}
-
-function phase1GetTextMeta(node) {
+/**
+ * Extract text content and typography metadata from a TEXT node.
+ * Gracefully handles mixed/unavailable properties.
+ * @param {TextNode} node
+ * @returns {{textLength:number,text?:string,typography?:{fontFamily?:string,fontSize?:number,fontWeight?:string,lineHeightPx?:number,letterSpacing?:number}}|null}
+ */
+function getTextNodeMeta(node) {
   if (node.type !== "TEXT") return null;
   try {
     const text = node.characters || "";
@@ -185,20 +3168,31 @@ function phase1GetTextMeta(node) {
   }
 }
 
-function phase1ComponentInfo(node) {
+/**
+ * Get component/instance metadata in a compact form.
+ * @param {SceneNode} node
+ * @returns {{role:string,isInstance:boolean,mainComponent?:{id:string,name:string}}}
+ */
+function getComponentInfo(node) {
   try {
-    const isInstance = phase1IsInstance(node);
+    const isInstance = isInstanceNode(node);
     const info = { role: node.type, isInstance };
     if (isInstance && node.mainComponent) {
       info.mainComponent = { id: node.mainComponent.id, name: node.mainComponent.name };
     }
     return info;
   } catch (_) {
-    return { role: node.type, isInstance: phase1IsInstance(node) };
+    return { role: node.type, isInstance: isInstanceNode(node) };
   }
 }
 
-function phase1AutoLayoutInfo(node) {
+/**
+ * Extract auto layout settings from FRAME/COMPONENT/COMPONENT_SET.
+ * Returns undefined for nodes without auto layout.
+ * @param {SceneNode} node
+ * @returns {object|undefined}
+ */
+function getAutoLayoutInfo(node) {
   try {
     if (!(node.type === "FRAME" || node.type === "COMPONENT" || node.type === "COMPONENT_SET")) return undefined;
     const layoutMode = ("layoutMode" in node) ? node.layoutMode : "NONE";
@@ -221,7 +3215,12 @@ function phase1AutoLayoutInfo(node) {
   }
 }
 
-function phase1StyleRefs(node) {
+/**
+ * Collect applied style references on a node (fill/stroke/effect/text style ids).
+ * @param {SceneNode} node
+ * @returns {{fillStyleId?:string,strokeStyleId?:string,effectStyleId?:string,textStyleId?:string}}
+ */
+function getStyleRefs(node) {
   const refs = {};
   if ("fillStyleId" in node) refs.fillStyleId = node.fillStyleId;
   if ("strokeStyleId" in node) refs.strokeStyleId = node.strokeStyleId;
@@ -230,119 +3229,461 @@ function phase1StyleRefs(node) {
   return refs;
 }
 
-function phase1TokensPresence(node) {
-  try {
-    const bound = node.boundVariables || {};
-    const hasFillVariables = !!bound.fills;
-    const hasTextVariables = node.type === "TEXT" && (
-      !!bound.characters || !!bound.fills || !!bound.fontSize || !!bound.lineHeight || !!bound.letterSpacing
+
+// ======================================================
+// Section: Node Details Builder
+// ======================================================
+// Node Details: color helper for JSON export
+/**
+ * Convert an RGBA color object to a hex string. When alpha is 1, returns #RRGGBB,
+ * otherwise returns #RRGGBBAA.
+ * @param {{r:number,g:number,b:number,a?:number}} color
+ * @returns {string}
+ */
+function rgbaToHex(color) {
+  var r = Math.round(color.r * 255);
+  var g = Math.round(color.g * 255);
+  var b = Math.round(color.b * 255);
+  var a = color.a !== undefined ? Math.round(color.a * 255) : 255;
+
+  if (a === 255) {
+    return (
+      "#" +
+      [r, g, b]
+        .map((x) => {
+          return x.toString(16).padStart(2, "0");
+        })
+        .join("")
     );
-    return { hasFillVariables: !!hasFillVariables, hasTextVariables: !!hasTextVariables };
-  } catch (_) { return { hasFillVariables: false, hasTextVariables: false }; }
-}
-
-function phase1HierarchyInfo(node) {
-  try {
-    const parent = node.parent;
-    const index = parent && parent.children ? parent.children.indexOf(node) : -1;
-    const childCount = ("children" in node && Array.isArray(node.children)) ? node.children.length : 0;
-    const parentType = parent ? parent.type : "PAGE";
-    const parentName = parent ? parent.name : figma.currentPage.name;
-    const parentId = parent ? parent.id : figma.currentPage.id;
-    return { parentId, parentType, parentName, index, childCount };
-  } catch (_) {
-    return { parentId: figma.currentPage.id, parentType: "PAGE", parentName: figma.currentPage.name, index: -1, childCount: 0 };
   }
+
+  return (
+    "#" +
+    [r, g, b, a]
+      .map((x) => {
+        return x.toString(16).padStart(2, "0");
+      })
+      .join("")
+  );
 }
 
-function phase1GeometryInfo(node) {
-  try {
-    const rotation = ("rotation" in node) ? node.rotation : 0;
-    return { x: node.x, y: node.y, width: node.width, height: node.height, rotation };
-  } catch (_) {
-    return { x: 0, y: 0, width: 0, height: 0, rotation: 0 };
+// Internal: sanitize exported node JSON for node-details
+/**
+ * Sanitize a node payload produced by exportAsync({ format: "JSON_REST_V1" }) by
+ * converting RGBA colors to hex and removing non-serializable/bound properties.
+ * VECTOR nodes are skipped (null) to reduce payload size.
+ * @param {any} node
+ * @returns {any}
+ */
+function filterFigmaNode(node) {
+  if (node.type === "VECTOR") {
+    return null;
   }
-}
 
-function phase1ConstraintsInfo(node) {
-  try {
-    const c = ("constraints" in node) ? node.constraints : undefined;
-    if (!c) return undefined;
-    return { horizontal: c.horizontal, vertical: c.vertical };
-  } catch (_) { return undefined; }
-}
-
-function phase1SampleChildren(node) {
-  try {
-    if (!("children" in node) || !Array.isArray(node.children)) return [];
-    const samples = [];
-    for (let i = 0; i < Math.min(12, node.children.length); i++) {
-      const child = node.children[i];
-      const entry = { id: child.id, type: child.type, width: child.width, height: child.height };
-      if (child.type === "TEXT") entry.hasText = !!child.characters && child.characters.length > 0;
-      samples.push(entry);
-    }
-    return samples;
-  } catch (_) { return []; }
-}
-
-function phase1CollectNodeSummary(node) {
-  const identity = { id: node.id, name: node.name, type: node.type, visible: node.visible !== false, locked: !!node.locked };
-  const geometry = phase1GeometryInfo(node);
-  const hierarchy = phase1HierarchyInfo(node);
-  const constraints = phase1ConstraintsInfo(node);
-  const autoLayout = phase1AutoLayoutInfo(node);
-  const component = phase1ComponentInfo(node);
-  const fills = phase1PrimaryFillHex(node) ? [{ hex: phase1PrimaryFillHex(node) }] : [];
-  const stroke = phase1StrokeInfo(node);
-  const effects = phase1EffectsInfo(node);
-  const styleRefs = phase1StyleRefs(node);
-  const tokensPresence = phase1TokensPresence(node);
-  const layoutGrids = phase1LayoutGridInfo(node);
-  const sampleChildren = phase1SampleChildren(node);
-
-  let out = {
-    id: identity.id,
-    name: identity.name,
-    type: identity.type,
-    visible: identity.visible,
-    locked: identity.locked,
-    geometry: geometry,
-    hierarchy: hierarchy,
-    constraints: constraints,
-    autoLayout: autoLayout,
-    component: component,
-    fills: fills,
-    stroke: stroke,
-    effects: effects,
-    styleRefs: styleRefs,
-    tokensPresence: tokensPresence,
-    layoutGrids: layoutGrids,
-    sampleChildren: sampleChildren,
+  var filtered = {
+    id: node.id,
+    name: node.name,
+    type: node.type,
   };
 
-  if (node.type === "TEXT") {
-    const textMeta = phase1GetTextMeta(node);
-    out.textMeta = { textLength: (textMeta && textMeta.textLength) || 0 };
-    if (textMeta && typeof textMeta.text === "string") {
-      const totalLength = textMeta.text.length;
-      const cap = 1200;
-      if (totalLength <= cap) {
-        out.text = textMeta.text;
-      } else {
-        const headLen = Math.floor(cap * 0.8);
-        const tailLen = cap - headLen;
-        out.text = textMeta.text.slice(0, headLen) + "…" + textMeta.text.slice(-tailLen);
-        out.textTruncation = { truncated: true, totalLength };
+  if (node.fills && node.fills.length > 0) {
+    filtered.fills = node.fills.map((fill) => {
+      var processedFill = Object.assign({}, fill);
+      delete processedFill.boundVariables;
+      delete processedFill.imageRef;
+
+      if (processedFill.gradientStops) {
+        processedFill.gradient_stops = processedFill.gradientStops.map((stop) => {
+          var processedStop = Object.assign({}, stop);
+          if (processedStop.color) {
+            processedStop.color = rgbaToHex(processedStop.color);
+          }
+          delete processedStop.boundVariables;
+          return processedStop;
+        });
+        delete processedFill.gradientStops;
       }
-      if (textMeta.typography) out.typography = textMeta.typography;
-    }
+
+      if (processedFill.color) {
+        processedFill.color = rgbaToHex(processedFill.color);
+      }
+
+      // Normalize fill keys to snake_case where reasonable
+      if (processedFill.gradient_stops) {
+        processedFill.gradient_stops = processedFill.gradient_stops;
+      }
+
+      return processedFill;
+    });
   }
 
-  return out;
+  if (node.strokes && node.strokes.length > 0) {
+    filtered.strokes = node.strokes.map((stroke) => {
+      var processedStroke = Object.assign({}, stroke);
+      delete processedStroke.boundVariables;
+      if (processedStroke.color) {
+        processedStroke.color = rgbaToHex(processedStroke.color);
+      }
+      return processedStroke;
+    });
+  }
+
+  if (node.cornerRadius !== undefined) {
+    filtered.corner_radius = node.cornerRadius;
+  }
+
+  if (node.absoluteBoundingBox) {
+    filtered.absolute_bounding_box = node.absoluteBoundingBox;
+  }
+
+  if (node.characters) {
+    filtered.characters = node.characters;
+  }
+
+  if (node.style) {
+    filtered.style = {
+      font_family: node.style.fontFamily,
+      font_style: node.style.fontStyle,
+      font_weight: node.style.fontWeight,
+      font_size: node.style.fontSize,
+      text_align_horizontal: node.style.textAlignHorizontal,
+      letter_spacing: node.style.letterSpacing,
+      line_height_px: node.style.lineHeightPx,
+    };
+  }
+
+  if (node.children) {
+    filtered.children = node.children
+      .map((child) => {
+        return filterFigmaNode(child);
+      })
+      .filter((child) => {
+        return child !== null;
+      });
+  }
+
+  return filtered;
+}
+// Node Details: base64 helper for PNG export
+/**
+ * Efficiently encode a Uint8Array to base64. Avoids atob/btoa limitations in plugin runtime.
+ * @param {Uint8Array} bytes
+ * @returns {string}
+ */
+function customBase64Encode(bytes) {
+  const chars =
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+  let base64 = "";
+
+  const byteLength = bytes.byteLength;
+  const byteRemainder = byteLength % 3;
+  const mainLength = byteLength - byteRemainder;
+
+  let a, b, c, d;
+  let chunk;
+
+  for (let i = 0; i < mainLength; i = i + 3) {
+    chunk = (bytes[i] << 16) | (bytes[i + 1] << 8) | bytes[i + 2];
+    a = (chunk & 16515072) >> 18;
+    b = (chunk & 258048) >> 12;
+    c = (chunk & 4032) >> 6;
+    d = chunk & 63;
+    base64 += chars[a] + chars[b] + chars[c] + chars[d];
+  }
+
+  if (byteRemainder === 1) {
+    chunk = bytes[mainLength];
+    a = (chunk & 252) >> 2;
+    b = (chunk & 3) << 4;
+    base64 += chars[a] + chars[b] + "==";
+  } else if (byteRemainder === 2) {
+    chunk = (bytes[mainLength] << 8) | bytes[mainLength + 1];
+    a = (chunk & 64512) >> 10;
+    b = (chunk & 1008) >> 4;
+    c = (chunk & 15) << 2;
+    base64 += chars[a] + chars[b] + chars[c] + "=";
+  }
+
+  return base64;
+}
+async function buildNodeDetailsInternal(nodeId, highlight = false) {
+  try {
+    // Validate params
+    if (!nodeId || typeof nodeId !== "string") {
+      const payload = { code: "missing_parameter", message: "Parameter 'nodeId' is required and must be a string", details: { nodeId } };
+      logger.error("❌ get_node_details failed", { code: payload.code, originalError: payload.message, details: payload.details });
+      throw new Error(JSON.stringify(payload));
+    }
+
+    // Best-effort page preload (non-fatal if unavailable)
+    try {
+      if (typeof figma.loadAllPagesAsync === "function") {
+        await figma.loadAllPagesAsync();
+      }
+      if (figma.currentPage && typeof figma.currentPage.loadAsync === "function") {
+        await figma.currentPage.loadAsync();
+      }
+    } catch (e) {
+      try {
+        logger.error("⚠️ get_node_details page preload failed (continuing)", { code: "page_preload_failed", originalError: (e && e.message) || String(e), details: {} });
+      } catch (_) {}
+      // continue without throwing
+    }
+
+    // Resolve node
+    const node = await figma.getNodeByIdAsync(nodeId);
+    if (!node) {
+      const payload = { code: "node_not_found", message: `Node not found: ${nodeId}`, details: { nodeId } };
+      logger.error("❌ get_node_details failed", { code: payload.code, originalError: payload.message, details: payload.details });
+      throw new Error(JSON.stringify(payload));
+    }
+
+    // Parent context
+    let parentContext = null;
+    try {
+      const parent = node.parent || null;
+      if (parent) {
+        parentContext = {
+          id: parent.id,
+          name: parent.name,
+          type: parent.type,
+          autoLayout: getAutoLayoutInfo(parent) || undefined,
+        };
+      }
+    } catch (_) { parentContext = null; }
+
+    // Children context (direct only)
+    let childrenContext = [];
+    try {
+      if ("children" in node && Array.isArray(node.children)) {
+        const parentChildren = node.children;
+        childrenContext = parentChildren.map((child, index) => ({ id: child.id, name: child.name, type: child.type, index }));
+      }
+    } catch (_) { childrenContext = []; }
+
+    // Export and sanitize node JSON
+    let target_node = { id: node.id, name: node.name, type: node.type };
+    try {
+      const response = await node.exportAsync({ format: "JSON_REST_V1" });
+      const filtered = filterFigmaNode(response.document);
+      if (filtered && typeof filtered === "object") {
+        target_node = Object.assign({}, filtered);
+      }
+    } catch (exportErr) {
+      // Keep going; we'll still provide live properties below
+      logger.error("❌ get_node_details JSON export failed", { code: "export_failed", originalError: (exportErr && exportErr.message) || String(exportErr), details: { nodeId } });
+    }
+
+    // Enrich with live properties to approach the Unified Node Data Model (snake_case)
+    try {
+      // Identity & hierarchy
+      const parent = node.parent || null;
+      const indexInParent = parent && parent.children ? parent.children.indexOf(node) : -1;
+      target_node.parent_id = parent ? parent.id : figma.currentPage.id;
+      target_node.index = indexInParent;
+
+      // Core state & geometry
+      target_node.visible = node.visible !== false;
+      target_node.locked = !!node.locked;
+      target_node.is_mask = ("isMask" in node) ? node.isMask : false;
+      target_node.opacity = ("opacity" in node) ? node.opacity : 1;
+      target_node.width = node.width;
+      target_node.height = node.height;
+      target_node.rotation = ("rotation" in node) ? node.rotation : 0;
+
+      // Layout
+      if (("clipsContent" in node)) target_node.clips_content = node.clipsContent;
+      target_node.auto_layout = getAutoLayoutInfo(node) || target_node.auto_layout;
+      if (("layoutSizingHorizontal" in node)) target_node.layout_sizing_horizontal = node.layoutSizingHorizontal;
+      if (("layoutSizingVertical" in node)) target_node.layout_sizing_vertical = node.layoutSizingVertical;
+
+      // Styling
+      if (Array.isArray(node.strokes) && !target_node.strokes) target_node.strokes = node.strokes;
+      if (("strokeWeight" in node)) target_node.stroke_weight = node.strokeWeight;
+      if (("strokeAlign" in node)) target_node.stroke_align = node.strokeAlign;
+      if (Array.isArray(node.effects) && !target_node.effects) target_node.effects = node.effects;
+
+      // Design system & prototyping
+      const styleRefs = getStyleRefs(node);
+      Object.assign(target_node, styleRefs);
+      if (Array.isArray(node.reactions)) target_node.reactions = node.reactions;
+      if (node.boundVariables) target_node.bound_variables = node.boundVariables;
+
+      // Type-specific
+      if (node.type === "TEXT") {
+        const textMeta = getTextNodeMeta(node);
+        if (textMeta) target_node.text_meta = textMeta;
+      }
+      const compInfo = getComponentInfo(node);
+      if (compInfo) target_node.component_meta = compInfo;
+    } catch (_) { /* best-effort enrichment */ }
+
+    // Export PNG 2x image preview of the target node
+    let exported_image = null;
+    try {
+      if (("exportAsync" in node)) {
+        const bytes = await node.exportAsync({ format: "PNG", constraint: { type: "SCALE", value: 2 }, useAbsoluteBounds: true });
+        exported_image = customBase64Encode(bytes);
+      }
+    } catch (_) { exported_image = null; }
+
+    // Optional brief highlight on the target (post-export to avoid affecting image)
+    if (highlight) {
+      try {
+        const originalFills = JSON.parse(JSON.stringify(node.fills));
+        node.fills = [{ type: "SOLID", color: { r: 1, g: 0.5, b: 0 }, opacity: 0.3 }];
+        await delay(100);
+        try { node.fills = originalFills; }
+        catch (err) { logger.error("get_node_details highlight reset failed", { code: "highlight_reset_failed", originalError: (err && err.message) || String(err) }); }
+      } catch (highlightErr) {
+        logger.error("get_node_details highlight failed", { code: "highlight_failed", originalError: (highlightErr && highlightErr.message) || String(highlightErr) });
+      }
+    }
+
+    const payload = { target_node, exported_image, parent_context: parentContext, children_context: childrenContext };
+    logger.info("✅ build_node_details_internal succeeded", { nodeId: node.id, hasParent: !!parentContext, children: (childrenContext && childrenContext.length) || 0, hasImage: !!exported_image });
+    return payload;
+  } catch (error) {
+    // If already structured JSON, rethrow; else normalize
+    try {
+      const parsed = JSON.parse(error && error.message ? error.message : "{}");
+      if (parsed && parsed.code) {
+        logger.error("❌ get_node_details failed", { code: parsed.code, originalError: (error && error.message) || String(error), details: parsed.details || {} });
+        throw new Error(JSON.stringify(parsed));
+      }
+    } catch (_) {
+      // fall-through
+    }
+    logger.error("❌ build_node_details_internal failed", { code: "unknown_plugin_error", originalError: (error && error.message) || String(error), details: {} });
+    throw new Error(JSON.stringify({ code: "unknown_plugin_error", message: (error && error.message) || "Unknown error in build_node_details_internal", details: {} }));
+  }
 }
 
-function phase1ComputeSelectionSignature(nodes) {
+
+ 
+// ======================================================
+// Section: Text Helpers (Font loading and character utilities)
+// ======================================================
+// Text Helpers: general utilities used by text font matching
+/**
+ * Return unique items from an array based on a predicate or key.
+ * @template T
+ * @param {T[]} arr
+ * @param {(item:T)=>any | keyof T} predicate
+ * @returns {T[]}
+ */
+/**
+ * Safely set text characters on a TEXT node, attempting to preserve fonts for simple cases.
+ * Mixed-font runs are not strictly preserved; the first character's font is used when mixed.
+ * @param {TextNode} node
+ * @param {string} characters
+ * @param {{fallbackFont?:{family:string,style:string}}} [options]
+ * @returns {Promise<boolean>}
+ */
+const setCharacters = async (node, characters, options) => {
+  const fallbackFont = (options && options.fallbackFont) || {
+    family: "Inter",
+    style: "Regular",
+  };
+  try {
+    if (node.fontName === figma.mixed) {
+      const firstCharFont = node.getRangeFontName(0, 1);
+      await figma.loadFontAsync(firstCharFont);
+      node.fontName = firstCharFont;
+    } else {
+      await figma.loadFontAsync({
+        family: node.fontName.family,
+        style: node.fontName.style,
+      });
+    }
+  } catch (err) {
+    console.warn(
+      `⚠️ Failed to load "${node.fontName["family"]} ${node.fontName["style"]}" font; replaced with fallback "${fallbackFont.family} ${fallbackFont.style}"`,
+      err
+    );
+    await figma.loadFontAsync(fallbackFont);
+    node.fontName = fallbackFont;
+  }
+  try {
+    node.characters = characters;
+    return true;
+  } catch (err) {
+    console.warn(`⚠️ Failed to set characters. Skipped.`, err);
+    return false;
+  }
+};
+
+
+
+
+
+
+// ======================================================
+// Section: Selection Snapshot Utilities 
+// ======================================================
+// Selection: state and debounce utility
+const selectionSummaryState = {
+  lastSelectionSignature: "",
+  lastDocumentInfo: null,
+};
+
+
+/**
+ * Simple debounce utility used by selection change handler.
+ * @template {Function} F
+ * @param {F} fn
+ * @param {number} wait
+ * @returns {F}
+ */
+function debounce(fn, wait) {
+  let t = null;
+  return function() {
+    const args = Array.prototype.slice.call(arguments);
+    if (t) clearTimeout(t);
+    t = setTimeout(() => fn.apply(null, args), wait);
+  };
+}
+
+
+// Selection: variant helper
+/**
+ * Check whether a node participates in a variant system (component set or instance).
+ * @param {SceneNode} node
+ * @returns {boolean}
+ */
+function nodeHasVariants(node) {
+  try {
+    if (node.type === "COMPONENT_SET") return true;
+    if (node.type === "COMPONENT" && node.parent && node.parent.type === "COMPONENT_SET") return true;
+    if (node.type === "INSTANCE" && node.mainComponent) {
+      const mc = node.mainComponent;
+      if (mc && mc.parent && mc.parent.type === "COMPONENT_SET") return true;
+      if ("variantProperties" in mc && mc.variantProperties && Object.keys(mc.variantProperties).length > 0) return true;
+    }
+    return false;
+  } catch (_) { return false; }
+}
+
+ 
+
+// Selection: summary builders
+/**
+ * Build a minimal node summary for selection snapshots.
+ * Only includes identity fields to keep payloads light.
+ * @param {SceneNode} node
+ * @returns {{id:string,name:string,type:string}}
+ */
+function collectNodeSummary(node) {
+  return { id: node.id, name: node.name, type: node.type };
+}
+
+/**
+ * Compute a stable signature string for the current selection set to detect changes.
+ * Based on node identity, geometry and type.
+ * @param {SceneNode[]} nodes
+ * @returns {string}
+ */
+function computeSelectionSignature(nodes) {
   try {
     const tuples = nodes.map((n) => {
       const isInstance = n.type === "INSTANCE";
@@ -364,67 +3705,83 @@ function phase1ComputeSelectionSignature(nodes) {
   }
 }
 
-function phase1BuildSelectionSummary(selectedNodes) {
-  const nodes = selectedNodes.map(phase1CollectNodeSummary);
-  const typesCount = {};
-  let hasInstances = false;
-  let hasVariants = false;
-  let hasAutoLayout = false;
-  let stickyNoteCount = 0;
-  let totalTextChars = 0;
+/**
+ * Build a selection summary suitable for UI consumption.
+ * Includes counts, hints and per-node summaries.
+ * @param {SceneNode[]} selectedNodes
+ * @returns {{selectionCount:number,typesCount:Record<string,number>,hints:object,nodes:object[]}}
+ */
+function buildSelectionSummary(selectedNodes) {
+  const nodes = selectedNodes.map(collectNodeSummary);
+  const types_count = {};
+  let has_instances = false;
+  let has_variants = false;
+  let has_auto_layout = false;
+  let sticky_note_count = 0;
+  let total_text_chars = 0;
   for (const n of selectedNodes) {
-    typesCount[n.type] = (typesCount[n.type] || 0) + 1;
-    if (n.type === "INSTANCE") hasInstances = true;
-    if (phase1HasVariants(n)) hasVariants = true;
-    if (("layoutMode" in n) && n.layoutMode && n.layoutMode !== "NONE") hasAutoLayout = true;
-    if (n.type === "STICKY") stickyNoteCount += 1;
-    if (n.type === "TEXT") totalTextChars += (n.characters ? n.characters.length : 0);
+    types_count[n.type] = (types_count[n.type] || 0) + 1;
+    if (n.type === "INSTANCE") has_instances = true;
+    if (nodeHasVariants(n)) has_variants = true;
+    if (("layoutMode" in n) && n.layoutMode && n.layoutMode !== "NONE") has_auto_layout = true;
+    if (n.type === "STICKY") sticky_note_count += 1;
+    if (n.type === "TEXT") total_text_chars += (n.characters ? n.characters.length : 0);
   }
   return {
-    selectionCount: selectedNodes.length,
-    typesCount,
-    hints: { hasInstances, hasVariants, hasAutoLayout, stickyNoteCount, totalTextChars },
+    selection_count: selectedNodes.length,
+    types_count,
+    hints: { has_instances, has_variants, has_auto_layout, sticky_note_count, total_text_chars },
     nodes,
   };
 }
 
-function phase1PostDocumentInfo() {
+// Selection: document info dispatch
+function postDocumentInfo() {
   const pageId = figma.currentPage.id;
   const pageName = figma.currentPage.name;
-  phase1State.lastDocumentInfo = { pageId, pageName };
+  selectionSummaryState.lastDocumentInfo = { pageId, pageName };
   figma.ui.postMessage({ type: "document_info", pageId, pageName });
 }
 
-const phase1HandleSelectionChange = phase1Debounce(() => {
+// Selection: selection change handler (debounced)
+const handleSelectionChange = debounce(() => {
   try {
     const sel = figma.currentPage.selection || [];
-    const selectionSignature = phase1ComputeSelectionSignature(sel);
-    const selectionSummary = phase1BuildSelectionSummary(sel);
-    const document = phase1State.lastDocumentInfo || { pageId: figma.currentPage.id, pageName: figma.currentPage.name };
-    phase1State.lastSelectionSignature = selectionSignature;
+    const selectionSignature = computeSelectionSignature(sel);
+    const selectionSummary = buildSelectionSummary(sel);
+    const document = selectionSummaryState.lastDocumentInfo || { pageId: figma.currentPage.id, pageName: figma.currentPage.name };
+    selectionSummaryState.lastSelectionSignature = selectionSignature;
     figma.ui.postMessage({
       type: "selection_summary",
       document,
-      selectionSignature,
-      selectionSummary,
+      selection_signature: selectionSignature,
+      selection_summary: selectionSummary,
     });
     // Emoji log per user preference
-    console.log(`🧩 Selection summary sent (${selectionSummary.selectionCount} nodes)`);
+    console.log(`🧩 Selection summary sent (${selectionSummary.selection_count} nodes)`);
   } catch (e) {
     console.warn("Failed to build selection summary", e);
   }
 }, 200);
 
+// Selection: event wiring
 figma.on("run", () => {
-  phase1PostDocumentInfo();
-  // Emit initial selection summary on run as a convenience
-  phase1HandleSelectionChange();
+  postDocumentInfo();
+  // On run, post document info and request UI auto-connect.
+  // Selection summaries will be sent on selection/current page changes.
+  try { figma.ui.postMessage({ type: "auto-connect" }); } catch (_) {}
 });
 
-figma.on("selectionchange", () => {
-  phase1HandleSelectionChange();
+// Re-enable lightweight selection summary broadcasting so UI can invalidate cache
+figma.on("selectionchange", handleSelectionChange);
+figma.on("currentpagechange", () => {
+  try { postDocumentInfo(); } catch (_) {}
+  try { handleSelectionChange(); } catch (_) {}
 });
 
+// ======================================================
+// Section: UI Message Handling
+// ======================================================
 // Plugin commands from UI
 figma.ui.onmessage = async (msg) => {
   switch (msg.type) {
@@ -459,81 +3816,39 @@ figma.ui.onmessage = async (msg) => {
     case "ui_ready":
       // UI loaded and ready to receive snapshot → resend immediately
       try {
-        phase1PostDocumentInfo();
-        phase1HandleSelectionChange();
+        postDocumentInfo();
       } catch (e) {
         console.warn("Failed to send initial snapshot on ui_ready", e);
       }
       break;
-
-    case "request_selection_summary":
-      // UI explicitly asks for the latest selection summary
+    
+    
+      
+    case "request_selections_context":
       try {
-        phase1PostDocumentInfo();
-        phase1HandleSelectionChange();
-      } catch (e) {
-        console.warn("Failed to send selection summary on request", e);
-      }
-      break;
-
-    case "build_phase1_snapshot": {
-      // Build a Phase‑1 snapshot (Tier‑A) on demand and return it to UI
-      try {
-        const pageId = figma.currentPage.id;
-        const pageName = figma.currentPage.name;
+        
         const selection = figma.currentPage.selection || [];
-        const selectionSignature = phase1ComputeSelectionSignature(selection);
-        const selectionSummary = phase1BuildSelectionSummary(selection);
-        // Capture sticky guidance separately (safe, truncated)
-        const stickyGuidance = [];
-        try {
-          for (const n of selection) {
-            if (n && n.type === "STICKY") {
-              let content = "";
-              try {
-                // FigJam STICKY may expose text via .text; fallback to .characters if available
-                if (typeof n.text === 'string') content = n.text;
-                else if (typeof n.characters === 'string') content = n.characters;
-              } catch (_) { /* noop */ }
-              const cap = 500;
-              if (typeof content === 'string' && content.length > cap) {
-                content = content.slice(0, cap - 1) + "…";
-              }
-              stickyGuidance.push({ id: n.id, name: n.name, content: content || "" });
-            }
-          }
-        } catch (_) { /* noop */ }
-        const snapshot = {
-          version: 'phase1-snapshot@1',
-          document: { pageId, pageName },
-          selectionSignature,
-          selectionSummary,
-          stickyGuidance,
-        };
-        figma.ui.postMessage({ type: 'phase1_snapshot', snapshot });
+        const include_images = !!(selection && selection.length > 0); // only export when there is selection
+        const snapshot = await getCanvasSnapshot({ include_images });
+        figma.ui.postMessage({ type: 'selections_context', result: snapshot });
       } catch (e) {
-        figma.ui.postMessage({ type: 'phase1_snapshot_error', error: (e && e.message) || String(e) });
+        try {
+          const payload = JSON.parse(e && e.message ? e.message : String(e));
+          if (payload && payload.code) {
+            logger.error("❌ request_selections_context failed", { code: payload.code, originalError: payload.message, details: payload.details || {} });
+            figma.ui.postMessage({ type: 'selections_context_error', error: JSON.stringify(payload) });
+            break;
+          }
+        } catch (_) {}
+        const err = { code: 'unknown_plugin_error', message: (e && e.message) || String(e), details: {} };
+        logger.error("❌ request_selections_context failed", { code: err.code, originalError: err.message, details: err.details });
+        figma.ui.postMessage({ type: 'selections_context_error', error: JSON.stringify(err) });
       }
       break;
-    }
-      
-    // Phase 1: Handle chat messages  
-    case "user_prompt":
-      // Phase 1: Plugin acknowledges user prompt
-      // The agent will handle the actual LLM response
-      console.log("Phase 1 user prompt received:", msg.prompt);
-      figma.notify(`Processing: "${msg.prompt}"`);
-      break;
-      
-    case "agent_response":
-      // Phase 1: Plugin acknowledges agent response
-      // The UI displays the response
-      console.log("Phase 1 agent response received:", msg.prompt);
-      break;
-      
-    // Phase 2+: Tool execution using existing infrastructure
+
+    // Tool execution using existing command registry infrastructure
     case "tool_call":
-      // Reuse existing execute-command infrastructure for Phase 2+
+      // Reuse existing execute-command infrastructure
       try {
         const result = await handleCommand(msg.command, msg.params);
         figma.ui.postMessage({
@@ -549,5251 +3864,349 @@ figma.ui.onmessage = async (msg) => {
         });
       }
       break;
-    case "create_connections":
-      return await createConnections(params);
-    case "zoom":
-      return await zoom(params);
-    case "center":
-      return await center(params);
-    case "scroll_and_zoom_into_view":
-      return await scrollAndZoomIntoView(params);
-    case "group":
-        return await group(params);
-    case "ungroup":
-        return await ungroup(params);
-    case "create_slice":
-        return await createSlice(params);
-    case "create_polygon":
-        return await createPolygon(params);
-    case "create_star":
-        return await createStar(params);
-    case "create_line":
-        return await createLine(params);
-    case "create_ellipse":
-        return await createEllipse(params);
-    case "create_boolean_operation":
-        return await createBooleanOperation(params);
-    case "flatten":
-        return await flatten(params);
-    case "mask":
-        return await mask(params);
-    case "reparent":
-        return await reparent(params);
-    case "insert_child":
-        return await insertChild(params);
-    case "create_paint_style":
-        return await createPaintStyle(params);
-    case "create_text_style":
-        return await createTextStyle(params);
-    case "create_effect_style":
-        return await createEffectStyle(params);
-    case "create_grid_style":
-        return await createGridStyle(params);
-    case "create_component":
-        return await createComponent(params);
-    case "publish_components":
-        return await publishComponents(params);
-    case "vector_paths":
-        return await vectorPaths(params);
-    case "vector_network":
-        return await vectorNetwork(params);
-    case "outline_stroke":
-        return await outlineStroke(params);
-    case "create_image":
-        return await createImage(params);
-    case "get_image_by_hash":
-        return await getImageByHash(params);
-    case "set_gradient_fill":
-        return await setGradientFill(params);
-    case "set_range_text_style":
-        return await setRangeTextStyle(params);
-    case "list_available_fonts":
-        return await listAvailableFonts(params);
-    case "get_flow_starting_points":
-        return await getFlowStartingPoints(params);
-    case "find_related_nodes":
-        return await findRelatedNodes(params);
-    case "create_comment":
-        return await createComment(params);
-    case "get_comments":
-        return await getComments(params);
-    case "delete_comment":
-        return await deleteComment(params);
-    case "get_current_user":
-        return await getCurrentUser(params);
-    case "get_active_users":
-        return await getActiveUsers(params);
-    case "codegen":
-        return await codegen(params);
-    case "notify_vscode":
-        return await notifyVSCode(params);
+    
     default:
-      throw new Error(`Unknown command: ${command}`);
+      // ignore unknown UI messages
+      break;
   }
 };
 
-// Listen for plugin commands from menu
-figma.on("run", ({ command }) => {
-  figma.ui.postMessage({ type: "auto-connect" });
-});
+ 
 
-// Update plugin settings
-function updateSettings(settings) {
-  if (settings.serverPort) {
-    state.serverPort = settings.serverPort;
-  }
 
-  figma.clientStorage.setAsync("settings", {
-    serverPort: state.serverPort,
-  });
-}
+// ======================================================
+// Section: Styles Management Commands
+// ======================================================
+async function createPaintStyle(params) {
+    try {
+        const { name, paints, onConflict } = params || {};
 
-// Handle commands from UI
-async function handleCommand(command, params) {
-  switch (command) {
-    case "get_document_info":
-      return await getDocumentInfo();
-    case "get_selection":
-      return await getSelection();
-    case "get_node_info":
-      if (!params || !params.nodeId) {
-        throw new Error("Missing nodeId parameter");
-      }
-      return await getNodeInfo(params.nodeId);
-    case "get_nodes_info":
-      if (!params || !params.nodeIds || !Array.isArray(params.nodeIds)) {
-        throw new Error("Missing or invalid nodeIds parameter");
-      }
-      return await getNodesInfo(params.nodeIds);
-    case "read_my_design":
-      return await readMyDesign();
-    case "create_rectangle":
-      return await createRectangle(params);
-    case "create_frame":
-      return await createFrame(params);
-    case "create_text":
-      return await createText(params);
-    case "set_fill_color":
-      return await setFillColor(params);
-    case "set_stroke_color":
-      return await setStrokeColor(params);
-    case "move_node":
-      return await moveNode(params);
-    case "resize_node":
-      return await resizeNode(params);
-    case "delete_node":
-      return await deleteNode(params);
-    case "delete_multiple_nodes":
-      return await deleteMultipleNodes(params);
-    case "get_styles":
-      return await getStyles();
-    case "get_local_components":
-      return await getLocalComponents();
-    // case "get_team_components":
-    //   return await getTeamComponents();
-    case "create_component_instance":
-      return await createComponentInstance(params);
-    case "export_node_as_image":
-      return await exportNodeAsImage(params);
-    case "set_corner_radius":
-      return await setCornerRadius(params);
-    case "set_text_content":
-      return await setTextContent(params);
-    case "clone_node":
-      return await cloneNode(params);
-    case "scan_text_nodes":
-      return await scanTextNodes(params);
-    case "set_multiple_text_contents":
-      return await setMultipleTextContents(params);
-    case "get_annotations":
-      return await getAnnotations(params);
-    case "set_annotation":
-      return await setAnnotation(params);
-    case "scan_nodes_by_types":
-      return await scanNodesByTypes(params);
-    case "set_multiple_annotations":
-      return await setMultipleAnnotations(params);
-    case "get_instance_overrides":
-      // Check if instanceNode parameter is provided
-      if (params && params.instanceNodeId) {
-        // Get the instance node by ID
-        const instanceNode = await figma.getNodeByIdAsync(params.instanceNodeId);
-        if (!instanceNode) {
-          throw new Error(`Instance node not found with ID: ${params.instanceNodeId}`);
+        if (figma.editorType !== 'figma') {
+            const payload = { code: "unsupported_editor_type", message: "Style APIs are only available in Figma Design", details: { editorType: figma.editorType } };
+            logger.error("❌ create_paint_style failed", { code: payload.code, originalError: payload.message, details: payload.details });
+            throw new Error(JSON.stringify(payload));
         }
-        return await getInstanceOverrides(instanceNode);
-      }
-      // Call without instance node if not provided
-      return await getInstanceOverrides();
-
-    case "set_instance_overrides":
-      // Check if instanceNodeIds parameter is provided
-      if (params && params.targetNodeIds) {
-        // Validate that targetNodeIds is an array
-        if (!Array.isArray(params.targetNodeIds)) {
-          throw new Error("targetNodeIds must be an array");
+        if (typeof name !== 'string' || name.trim().length === 0) {
+            const payload = { code: "missing_parameter", message: "'name' is required and must be a non-empty string", details: { name } };
+            logger.error("❌ create_paint_style failed", { code: payload.code, originalError: payload.message, details: payload.details });
+            throw new Error(JSON.stringify(payload));
+        }
+        if (!Array.isArray(paints) || paints.length === 0) {
+            const payload = { code: "invalid_parameter", message: "'paints' must be a non-empty array of Paint objects", details: { paintsType: Array.isArray(paints) ? 'array' : typeof paints } };
+            logger.error("❌ create_paint_style failed", { code: payload.code, originalError: payload.message, details: payload.details });
+            throw new Error(JSON.stringify(payload));
         }
 
-        // Get the instance nodes by IDs
-        const targetNodes = await getValidTargetInstances(params.targetNodeIds);
-        if (!targetNodes.success) {
-          figma.notify(targetNodes.message);
-          return { success: false, message: targetNodes.message };
-        }
-
-        if (params.sourceInstanceId) {
-
-          // get source instance data
-          let sourceInstanceData = null;
-          sourceInstanceData = await getSourceInstanceData(params.sourceInstanceId);
-
-          if (!sourceInstanceData.success) {
-            figma.notify(sourceInstanceData.message);
-            return { success: false, message: sourceInstanceData.message };
-          }
-          return await setInstanceOverrides(targetNodes.targetInstances, sourceInstanceData);
-        } else {
-          throw new Error("Missing sourceInstanceId parameter");
-        }
-      }
-    case "set_layout_mode":
-      return await setLayoutMode(params);
-    case "set_padding":
-      return await setPadding(params);
-    case "set_axis_align":
-      return await setAxisAlign(params);
-    case "set_layout_sizing":
-      return await setLayoutSizing(params);
-    case "set_item_spacing":
-      return await setItemSpacing(params);
-    case "get_reactions":
-      if (!params || !params.nodeIds || !Array.isArray(params.nodeIds)) {
-        throw new Error("Missing or invalid nodeIds parameter");
-      }
-      return await getReactions(params.nodeIds, params.silent === true);  
-    case "set_default_connector":
-      return await setDefaultConnector(params);
-    case "create_connections":
-      return await createConnections(params);
-    case "zoom":
-      return await zoom(params);
-    case "center":
-      return await center(params);
-    case "scroll_and_zoom_into_view":
-      return await scrollAndZoomIntoView(params);
-    case "group":
-        return await group(params);
-    case "ungroup":
-        return await ungroup(params);
-    case "create_slice":
-        return await createSlice(params);
-    case "create_polygon":
-        return await createPolygon(params);
-    case "create_star":
-        return await createStar(params);
-    case "create_line":
-        return await createLine(params);
-    case "create_ellipse":
-        return await createEllipse(params);
-    case "create_boolean_operation":
-        return await createBooleanOperation(params);
-    case "flatten":
-        return await flatten(params);
-    case "mask":
-        return await mask(params);
-    case "reparent":
-        return await reparent(params);
-    case "insert_child":
-        return await insertChild(params);
-    case "create_paint_style":
-        return await createPaintStyle(params);
-    case "create_text_style":
-        return await createTextStyle(params);
-    case "create_effect_style":
-        return await createEffectStyle(params);
-    case "create_grid_style":
-        return await createGridStyle(params);
-    case "create_component":
-        return await createComponent(params);
-    case "publish_components":
-        return await publishComponents(params);
-    case "vector_paths":
-        return await vectorPaths(params);
-    case "vector_network":
-        return await vectorNetwork(params);
-    case "outline_stroke":
-        return await outlineStroke(params);
-    case "create_image":
-        return await createImage(params);
-    case "get_image_by_hash":
-        return await getImageByHash(params);
-    case "set_gradient_fill":
-        return await setGradientFill(params);
-    case "set_range_text_style":
-        return await setRangeTextStyle(params);
-    case "list_available_fonts":
-        return await listAvailableFonts(params);
-    case "get_flow_starting_points":
-        return await getFlowStartingPoints(params);
-    case "find_related_nodes":
-        return await findRelatedNodes(params);
-    case "create_comment":
-        return await createComment(params);
-    case "get_comments":
-        return await getComments(params);
-    case "delete_comment":
-        return await deleteComment(params);
-    case "get_current_user":
-        return await getCurrentUser(params);
-    case "get_active_users":
-        return await getActiveUsers(params);
-    case "codegen":
-        return await codegen(params);
-    case "notify_vscode":
-        return await notifyVSCode(params);
-    case "gather_full_context":
-      return await gatherFullContext(params);
-    default:
-      throw new Error(`Unknown command: ${command}`);
-  }
-}
-
-// Command implementations
-
-async function getDocumentInfo() {
-  await figma.currentPage.loadAsync();
-  const page = figma.currentPage;
-  return {
-    name: page.name,
-    id: page.id,
-    type: page.type,
-    children: page.children.map((node) => ({
-      id: node.id,
-      name: node.name,
-      type: node.type,
-    })),
-    currentPage: {
-      id: page.id,
-      name: page.name,
-      childCount: page.children.length,
-    },
-    pages: [
-      {
-        id: page.id,
-        name: page.name,
-        childCount: page.children.length,
-      },
-    ],
-  };
-}
-
-async function getSelection() {
-  return {
-    selectionCount: figma.currentPage.selection.length,
-    selection: figma.currentPage.selection.map((node) => ({
-      id: node.id,
-      name: node.name,
-      type: node.type,
-      visible: node.visible,
-    })),
-  };
-}
-
-function rgbaToHex(color) {
-  var r = Math.round(color.r * 255);
-  var g = Math.round(color.g * 255);
-  var b = Math.round(color.b * 255);
-  var a = color.a !== undefined ? Math.round(color.a * 255) : 255;
-
-  if (a === 255) {
-    return (
-      "#" +
-      [r, g, b]
-        .map((x) => {
-          return x.toString(16).padStart(2, "0");
-        })
-        .join("")
-    );
-  }
-
-  return (
-    "#" +
-    [r, g, b, a]
-      .map((x) => {
-        return x.toString(16).padStart(2, "0");
-      })
-      .join("")
-  );
-}
-
-function filterFigmaNode(node) {
-  if (node.type === "VECTOR") {
-    return null;
-  }
-
-  var filtered = {
-    id: node.id,
-    name: node.name,
-    type: node.type,
-  };
-
-  if (node.fills && node.fills.length > 0) {
-    filtered.fills = node.fills.map((fill) => {
-      var processedFill = Object.assign({}, fill);
-      delete processedFill.boundVariables;
-      delete processedFill.imageRef;
-
-      if (processedFill.gradientStops) {
-        processedFill.gradientStops = processedFill.gradientStops.map(
-          (stop) => {
-            var processedStop = Object.assign({}, stop);
-            if (processedStop.color) {
-              processedStop.color = rgbaToHex(processedStop.color);
+        const conflictMode = (onConflict === 'skip' || onConflict === 'suffix' || onConflict === 'error') ? onConflict : 'error';
+        const existing = await figma.getLocalPaintStylesAsync();
+        const exact = existing.find(s => String(s.name) === name);
+        if (exact) {
+            if (conflictMode === 'skip') {
+            logger.info("✅ create_paint_style skipped (name exists)", { styleId: exact.id, name: exact.name });
+            return { success: true, summary: `Skipped: paint style '${name}' already exists`, modified_node_ids: [], created_style_id: exact.id, name: exact.name, type: 'paint', skipped: true };
             }
-            delete processedStop.boundVariables;
-            return processedStop;
-          }
-        );
-      }
-
-      if (processedFill.color) {
-        processedFill.color = rgbaToHex(processedFill.color);
-      }
-
-      return processedFill;
-    });
-  }
-
-  if (node.strokes && node.strokes.length > 0) {
-    filtered.strokes = node.strokes.map((stroke) => {
-      var processedStroke = Object.assign({}, stroke);
-      delete processedStroke.boundVariables;
-      if (processedStroke.color) {
-        processedStroke.color = rgbaToHex(processedStroke.color);
-      }
-      return processedStroke;
-    });
-  }
-
-  if (node.cornerRadius !== undefined) {
-    filtered.cornerRadius = node.cornerRadius;
-  }
-
-  if (node.absoluteBoundingBox) {
-    filtered.absoluteBoundingBox = node.absoluteBoundingBox;
-  }
-
-  if (node.characters) {
-    filtered.characters = node.characters;
-  }
-
-  if (node.style) {
-    filtered.style = {
-      fontFamily: node.style.fontFamily,
-      fontStyle: node.style.fontStyle,
-      fontWeight: node.style.fontWeight,
-      fontSize: node.style.fontSize,
-      textAlignHorizontal: node.style.textAlignHorizontal,
-      letterSpacing: node.style.letterSpacing,
-      lineHeightPx: node.style.lineHeightPx,
-    };
-  }
-
-  if (node.children) {
-    filtered.children = node.children
-      .map((child) => {
-        return filterFigmaNode(child);
-      })
-      .filter((child) => {
-        return child !== null;
-      });
-  }
-
-  return filtered;
-}
-
-async function getNodeInfo(nodeId) {
-  const node = await figma.getNodeByIdAsync(nodeId);
-
-  if (!node) {
-    throw new Error(`Node not found with ID: ${nodeId}`);
-  }
-
-  const response = await node.exportAsync({
-    format: "JSON_REST_V1",
-  });
-
-  return filterFigmaNode(response.document);
-}
-
-async function getNodesInfo(nodeIds) {
-  try {
-    // Load all nodes in parallel
-    const nodes = await Promise.all(
-      nodeIds.map((id) => figma.getNodeByIdAsync(id))
-    );
-
-    // Filter out any null values (nodes that weren't found)
-    const validNodes = nodes.filter((node) => node !== null);
-
-    // Export all valid nodes in parallel
-    const responses = await Promise.all(
-      validNodes.map(async (node) => {
-        const response = await node.exportAsync({
-          format: "JSON_REST_V1",
-        });
-        return {
-          nodeId: node.id,
-          document: filterFigmaNode(response.document),
-        };
-      })
-    );
-
-    return responses;
-  } catch (error) {
-    throw new Error(`Error getting nodes info: ${error.message}`);
-  }
-}
-
-async function getReactions(nodeIds, silent = false) {
-  try {
-    const commandId = generateCommandId();
-    sendProgressUpdate(
-      commandId,
-      "get_reactions",
-      "started",
-      0,
-      nodeIds.length,
-      0,
-      `Starting deep search for reactions in ${nodeIds.length} nodes and their children`
-    );
-
-    // Function to find nodes with reactions from the node and all its children
-    async function findNodesWithReactions(node, processedNodes = new Set(), depth = 0, results = []) {
-      // Skip already processed nodes (prevent circular references)
-      if (processedNodes.has(node.id)) {
-        return results;
-      }
-      
-      processedNodes.add(node.id);
-      
-      // Check if the current node has reactions
-      let filteredReactions = [];
-      if (node.reactions && node.reactions.length > 0) {
-        // Filter out reactions with navigation === 'CHANGE_TO'
-        filteredReactions = node.reactions.filter(r => {
-          // Some reactions may have action or actions array
-          if (r.action && r.action.navigation === 'CHANGE_TO') return false;
-          if (Array.isArray(r.actions)) {
-            // If any action in actions array is CHANGE_TO, exclude
-            return !r.actions.some(a => a.navigation === 'CHANGE_TO');
-          }
-          return true;
-        });
-      }
-      const hasFilteredReactions = filteredReactions.length > 0;
-      
-      // If the node has filtered reactions, add it to results and apply highlight effect
-      if (hasFilteredReactions) {
-        results.push({
-          id: node.id,
-          name: node.name,
-          type: node.type,
-          depth: depth,
-          hasReactions: true,
-          reactions: filteredReactions,
-          path: getNodePath(node)
-        });
-        // Apply highlight effect (orange border) unless running in silent mode
-        if (!silent) {
-          await highlightNodeWithAnimation(node);
+            if (conflictMode === 'error') {
+                const payload = { code: "conflict_style_name", message: `A paint style named '${name}' already exists`, details: { name, existingStyleId: exact.id } };
+                logger.error("❌ create_paint_style failed", { code: payload.code, originalError: payload.message, details: payload.details });
+                throw new Error(JSON.stringify(payload));
+            }
         }
-      }
-      
-      // If node has children, recursively search them
-      if (node.children) {
-        for (const child of node.children) {
-          await findNodesWithReactions(child, processedNodes, depth + 1, results);
-        }
-      }
-      
-      return results;
-    }
-    
-    // Function to apply animated highlight effect to a node
-    async function highlightNodeWithAnimation(node) {
-      // Save original stroke properties
-      const originalStrokeWeight = node.strokeWeight;
-      const originalStrokes = node.strokes ? [...node.strokes] : [];
-      
-      try {
-        // Apply orange border stroke
-        node.strokeWeight = 4;
-        node.strokes = [{
-          type: 'SOLID',
-          color: { r: 1, g: 0.5, b: 0 }, // Orange color
-          opacity: 0.8
-        }];
-        
-        // Set timeout for animation effect (restore to original after 1.5 seconds)
-        setTimeout(() => {
-          try {
-            // Restore original stroke properties
-            node.strokeWeight = originalStrokeWeight;
-            node.strokes = originalStrokes;
-          } catch (restoreError) {
-            console.error(`Error restoring node stroke: ${restoreError.message}`);
-          }
-        }, 1500);
-      } catch (highlightError) {
-        console.error(`Error highlighting node: ${highlightError.message}`);
-        // Continue even if highlighting fails
-      }
-    }
-    
-    // Get node hierarchy path as a string
-    function getNodePath(node) {
-      const path = [];
-      let current = node;
-      
-      while (current && current.parent) {
-        path.unshift(current.name);
-        current = current.parent;
-      }
-      
-      return path.join(' > ');
-    }
 
-    // Array to store all results
-    let allResults = [];
-    let processedCount = 0;
-    const totalCount = nodeIds.length;
-    
-    // Iterate through each node and its children to search for reactions
-    for (let i = 0; i < nodeIds.length; i++) {
-      try {
-        const nodeId = nodeIds[i];
-        const node = await figma.getNodeByIdAsync(nodeId);
-        
-        if (!node) {
-          processedCount++;
-          sendProgressUpdate(
-            commandId,
-            "get_reactions",
-            "in_progress",
-            processedCount / totalCount,
-            totalCount,
-            processedCount,
-            `Node not found: ${nodeId}`
-          );
-          continue;
-        }
-        
-        // Search for reactions in the node and its children
-        const processedNodes = new Set();
-        const nodeResults = await findNodesWithReactions(node, processedNodes);
-        
-        // Add results
-        allResults = allResults.concat(nodeResults);
-        
-        // Update progress
-        processedCount++;
-        sendProgressUpdate(
-          commandId,
-          "get_reactions",
-          "in_progress",
-          processedCount / totalCount,
-          totalCount,
-          processedCount,
-          `Processed node ${processedCount}/${totalCount}, found ${nodeResults.length} nodes with reactions`
-        );
-      } catch (error) {
-        processedCount++;
-        sendProgressUpdate(
-          commandId,
-          "get_reactions",
-          "in_progress",
-          processedCount / totalCount,
-          totalCount,
-          processedCount,
-          `Error processing node: ${error.message}`
-        );
-      }
-    }
-
-    // Completion update
-    sendProgressUpdate(
-      commandId,
-      "get_reactions",
-      "completed",
-      1,
-      totalCount,
-      totalCount,
-      `Completed deep search: found ${allResults.length} nodes with reactions.`
-    );
-
-    return {
-      nodesCount: nodeIds.length,
-      nodesWithReactions: allResults.length,
-      nodes: allResults
-    };
-  } catch (error) {
-    throw new Error(`Failed to get reactions: ${error.message}`);
-  }
-}
-
-async function readMyDesign() {
-  try {
-    // Load all selected nodes in parallel
-    const nodes = await Promise.all(
-      figma.currentPage.selection.map((node) => figma.getNodeByIdAsync(node.id))
-    );
-
-    // Filter out any null values (nodes that weren't found)
-    const validNodes = nodes.filter((node) => node !== null);
-
-    // Export all valid nodes in parallel
-    const responses = await Promise.all(
-      validNodes.map(async (node) => {
-        const response = await node.exportAsync({
-          format: "JSON_REST_V1",
-        });
-        return {
-          nodeId: node.id,
-          document: filterFigmaNode(response.document),
-        };
-      })
-    );
-
-    return responses;
-  } catch (error) {
-    throw new Error(`Error getting nodes info: ${error.message}`);
-  }
-}
-
-async function createRectangle(params) {
-  const {
-    x = 0,
-    y = 0,
-    width = 100,
-    height = 100,
-    name = "Rectangle",
-    parentId,
-  } = params || {};
-
-  const rect = figma.createRectangle();
-  rect.x = x;
-  rect.y = y;
-  rect.resize(width, height);
-  rect.name = name;
-
-  // If parentId is provided, append to that node, otherwise append to current page
-  if (parentId) {
-    const parentNode = await figma.getNodeByIdAsync(parentId);
-    if (!parentNode) {
-      throw new Error(`Parent node not found with ID: ${parentId}`);
-    }
-    if (!("appendChild" in parentNode)) {
-      throw new Error(`Parent node does not support children: ${parentId}`);
-    }
-    parentNode.appendChild(rect);
-  } else {
-    figma.currentPage.appendChild(rect);
-  }
-
-  return {
-    id: rect.id,
-    name: rect.name,
-    x: rect.x,
-    y: rect.y,
-    width: rect.width,
-    height: rect.height,
-    parentId: rect.parent ? rect.parent.id : undefined,
-  };
-}
-
-async function createFrame(params) {
-  const {
-    x = 0,
-    y = 0,
-    width = 100,
-    height = 100,
-    name = "Frame",
-    parentId,
-    fillColor,
-    strokeColor,
-    strokeWeight,
-    layoutMode = "NONE",
-    layoutWrap = "NO_WRAP",
-    paddingTop = 10,
-    paddingRight = 10,
-    paddingBottom = 10,
-    paddingLeft = 10,
-    primaryAxisAlignItems = "MIN",
-    counterAxisAlignItems = "MIN",
-    layoutSizingHorizontal = "FIXED",
-    layoutSizingVertical = "FIXED",
-    itemSpacing = 0,
-  } = params || {};
-
-  const frame = figma.createFrame();
-  frame.x = x;
-  frame.y = y;
-  frame.resize(width, height);
-  frame.name = name;
-
-  // Set layout mode if provided
-  if (layoutMode !== "NONE") {
-    frame.layoutMode = layoutMode;
-    frame.layoutWrap = layoutWrap;
-
-    // Set padding values only when layoutMode is not NONE
-    frame.paddingTop = paddingTop;
-    frame.paddingRight = paddingRight;
-    frame.paddingBottom = paddingBottom;
-    frame.paddingLeft = paddingLeft;
-
-    // Set axis alignment only when layoutMode is not NONE
-    frame.primaryAxisAlignItems = primaryAxisAlignItems;
-    frame.counterAxisAlignItems = counterAxisAlignItems;
-
-    // Set layout sizing only when layoutMode is not NONE
-    frame.layoutSizingHorizontal = layoutSizingHorizontal;
-    frame.layoutSizingVertical = layoutSizingVertical;
-
-    // Set item spacing only when layoutMode is not NONE
-    frame.itemSpacing = itemSpacing;
-  }
-
-  // Set fill color if provided
-  if (fillColor) {
-    const paintStyle = {
-      type: "SOLID",
-      color: {
-        r: parseFloat(fillColor.r) || 0,
-        g: parseFloat(fillColor.g) || 0,
-        b: parseFloat(fillColor.b) || 0,
-      },
-      opacity: parseFloat(fillColor.a) || 1,
-    };
-    frame.fills = [paintStyle];
-  }
-
-  // Set stroke color and weight if provided
-  if (strokeColor) {
-    const strokeStyle = {
-      type: "SOLID",
-      color: {
-        r: parseFloat(strokeColor.r) || 0,
-        g: parseFloat(strokeColor.g) || 0,
-        b: parseFloat(strokeColor.b) || 0,
-      },
-      opacity: parseFloat(strokeColor.a) || 1,
-    };
-    frame.strokes = [strokeStyle];
-  }
-
-  // Set stroke weight if provided
-  if (strokeWeight !== undefined) {
-    frame.strokeWeight = strokeWeight;
-  }
-
-  // If parentId is provided, append to that node, otherwise append to current page
-  if (parentId) {
-    const parentNode = await figma.getNodeByIdAsync(parentId);
-    if (!parentNode) {
-      throw new Error(`Parent node not found with ID: ${parentId}`);
-    }
-    if (!("appendChild" in parentNode)) {
-      throw new Error(`Parent node does not support children: ${parentId}`);
-    }
-    parentNode.appendChild(frame);
-  } else {
-    figma.currentPage.appendChild(frame);
-  }
-
-  return {
-    id: frame.id,
-    name: frame.name,
-    x: frame.x,
-    y: frame.y,
-    width: frame.width,
-    height: frame.height,
-    fills: frame.fills,
-    strokes: frame.strokes,
-    strokeWeight: frame.strokeWeight,
-    layoutMode: frame.layoutMode,
-    layoutWrap: frame.layoutWrap,
-    parentId: frame.parent ? frame.parent.id : undefined,
-  };
-}
-
-async function createText(params) {
-  const {
-    x = 0,
-    y = 0,
-    text = "Text",
-    fontSize = 14,
-    fontWeight = 400,
-    fontColor = { r: 0, g: 0, b: 0, a: 1 }, // Default to black
-    name = "",
-    parentId,
-  } = params || {};
-
-  // Map common font weights to Figma font styles
-  const getFontStyle = (weight) => {
-    switch (weight) {
-      case 100:
-        return "Thin";
-      case 200:
-        return "Extra Light";
-      case 300:
-        return "Light";
-      case 400:
-        return "Regular";
-      case 500:
-        return "Medium";
-      case 600:
-        return "Semi Bold";
-      case 700:
-        return "Bold";
-      case 800:
-        return "Extra Bold";
-      case 900:
-        return "Black";
-      default:
-        return "Regular";
-    }
-  };
-
-  const textNode = figma.createText();
-  textNode.x = x;
-  textNode.y = y;
-  textNode.name = name || text;
-  try {
-    await figma.loadFontAsync({
-      family: "Inter",
-      style: getFontStyle(fontWeight),
-    });
-    textNode.fontName = { family: "Inter", style: getFontStyle(fontWeight) };
-    textNode.fontSize = parseInt(fontSize);
-  } catch (error) {
-    console.error("Error setting font size", error);
-  }
-  setCharacters(textNode, text);
-
-  // Set text color
-  const paintStyle = {
-    type: "SOLID",
-    color: {
-      r: parseFloat(fontColor.r) || 0,
-      g: parseFloat(fontColor.g) || 0,
-      b: parseFloat(fontColor.b) || 0,
-    },
-    opacity: parseFloat(fontColor.a) || 1,
-  };
-  textNode.fills = [paintStyle];
-
-  // If parentId is provided, append to that node, otherwise append to current page
-  if (parentId) {
-    const parentNode = await figma.getNodeByIdAsync(parentId);
-    if (!parentNode) {
-      throw new Error(`Parent node not found with ID: ${parentId}`);
-    }
-    if (!("appendChild" in parentNode)) {
-      throw new Error(`Parent node does not support children: ${parentId}`);
-    }
-    parentNode.appendChild(textNode);
-  } else {
-    figma.currentPage.appendChild(textNode);
-  }
-
-  return {
-    id: textNode.id,
-    name: textNode.name,
-    x: textNode.x,
-    y: textNode.y,
-    width: textNode.width,
-    height: textNode.height,
-    characters: textNode.characters,
-    fontSize: textNode.fontSize,
-    fontWeight: fontWeight,
-    fontColor: fontColor,
-    fontName: textNode.fontName,
-    fills: textNode.fills,
-    parentId: textNode.parent ? textNode.parent.id : undefined,
-  };
-}
-
-async function setFillColor(params) {
-  console.log("setFillColor", params);
-  const {
-    nodeId,
-    color: { r, g, b, a },
-  } = params || {};
-
-  if (!nodeId) {
-    throw new Error("Missing nodeId parameter");
-  }
-
-  const node = await figma.getNodeByIdAsync(nodeId);
-  if (!node) {
-    throw new Error(`Node not found with ID: ${nodeId}`);
-  }
-
-  if (!("fills" in node)) {
-    throw new Error(`Node does not support fills: ${nodeId}`);
-  }
-
-  // Create RGBA color
-  const rgbColor = {
-    r: parseFloat(r) || 0,
-    g: parseFloat(g) || 0,
-    b: parseFloat(b) || 0,
-    a: parseFloat(a) || 1,
-  };
-
-  // Set fill
-  const paintStyle = {
-    type: "SOLID",
-    color: {
-      r: parseFloat(rgbColor.r),
-      g: parseFloat(rgbColor.g),
-      b: parseFloat(rgbColor.b),
-    },
-    opacity: parseFloat(rgbColor.a),
-  };
-
-  console.log("paintStyle", paintStyle);
-
-  node.fills = [paintStyle];
-
-  return {
-    id: node.id,
-    name: node.name,
-    fills: [paintStyle],
-  };
-}
-
-async function setStrokeColor(params) {
-  const {
-    nodeId,
-    color: { r, g, b, a },
-    weight = 1,
-  } = params || {};
-
-  if (!nodeId) {
-    throw new Error("Missing nodeId parameter");
-  }
-
-  const node = await figma.getNodeByIdAsync(nodeId);
-  if (!node) {
-    throw new Error(`Node not found with ID: ${nodeId}`);
-  }
-
-  if (!("strokes" in node)) {
-    throw new Error(`Node does not support strokes: ${nodeId}`);
-  }
-
-  // Create RGBA color
-  const rgbColor = {
-    r: r !== undefined ? r : 0,
-    g: g !== undefined ? g : 0,
-    b: b !== undefined ? b : 0,
-    a: a !== undefined ? a : 1,
-  };
-
-  // Set stroke
-  const paintStyle = {
-    type: "SOLID",
-    color: {
-      r: rgbColor.r,
-      g: rgbColor.g,
-      b: rgbColor.b,
-    },
-    opacity: rgbColor.a,
-  };
-
-  node.strokes = [paintStyle];
-
-  // Set stroke weight if available
-  if ("strokeWeight" in node) {
-    node.strokeWeight = weight;
-  }
-
-  return {
-    id: node.id,
-    name: node.name,
-    strokes: node.strokes,
-    strokeWeight: "strokeWeight" in node ? node.strokeWeight : undefined,
-  };
-}
-
-async function moveNode(params) {
-  const { nodeId, x, y } = params || {};
-
-  if (!nodeId) {
-    throw new Error("Missing nodeId parameter");
-  }
-
-  if (x === undefined || y === undefined) {
-    throw new Error("Missing x or y parameters");
-  }
-
-  const node = await figma.getNodeByIdAsync(nodeId);
-  if (!node) {
-    throw new Error(`Node not found with ID: ${nodeId}`);
-  }
-
-  if (!("x" in node) || !("y" in node)) {
-    throw new Error(`Node does not support position: ${nodeId}`);
-  }
-
-  node.x = x;
-  node.y = y;
-
-  return {
-    id: node.id,
-    name: node.name,
-    x: node.x,
-    y: node.y,
-  };
-}
-
-async function resizeNode(params) {
-  const { nodeId, width, height } = params || {};
-
-  if (!nodeId) {
-    throw new Error("Missing nodeId parameter");
-  }
-
-  if (width === undefined || height === undefined) {
-    throw new Error("Missing width or height parameters");
-  }
-
-  const node = await figma.getNodeByIdAsync(nodeId);
-  if (!node) {
-    throw new Error(`Node not found with ID: ${nodeId}`);
-  }
-
-  if (!("resize" in node)) {
-    throw new Error(`Node does not support resizing: ${nodeId}`);
-  }
-
-  node.resize(width, height);
-
-  return {
-    id: node.id,
-    name: node.name,
-    width: node.width,
-    height: node.height,
-  };
-}
-
-async function deleteNode(params) {
-  const { nodeId } = params || {};
-
-  if (!nodeId) {
-    throw new Error("Missing nodeId parameter");
-  }
-
-  const node = await figma.getNodeByIdAsync(nodeId);
-  if (!node) {
-    throw new Error(`Node not found with ID: ${nodeId}`);
-  }
-
-  // Save node info before deleting
-  const nodeInfo = {
-    id: node.id,
-    name: node.name,
-    type: node.type,
-  };
-
-  node.remove();
-
-  return nodeInfo;
-}
-
-async function getStyles() {
-  const styles = {
-    colors: await figma.getLocalPaintStylesAsync(),
-    texts: await figma.getLocalTextStylesAsync(),
-    effects: await figma.getLocalEffectStylesAsync(),
-    grids: await figma.getLocalGridStylesAsync(),
-  };
-
-  return {
-    colors: styles.colors.map((style) => ({
-      id: style.id,
-      name: style.name,
-      key: style.key,
-      paint: style.paints[0],
-    })),
-    texts: styles.texts.map((style) => ({
-      id: style.id,
-      name: style.name,
-      key: style.key,
-      fontSize: style.fontSize,
-      fontName: style.fontName,
-    })),
-    effects: styles.effects.map((style) => ({
-      id: style.id,
-      name: style.name,
-      key: style.key,
-    })),
-    grids: styles.grids.map((style) => ({
-      id: style.id,
-      name: style.name,
-      key: style.key,
-    })),
-  };
-}
-
-async function getLocalComponents() {
-  await figma.loadAllPagesAsync();
-
-  const components = figma.root.findAllWithCriteria({
-    types: ["COMPONENT"],
-  });
-
-  return {
-    count: components.length,
-    components: components.map((component) => ({
-      id: component.id,
-      name: component.name,
-      key: "key" in component ? component.key : null,
-    })),
-  };
-}
-
-// async function getTeamComponents() {
-//   try {
-//     const teamComponents =
-//       await figma.teamLibrary.getAvailableComponentsAsync();
-
-//     return {
-//       count: teamComponents.length,
-//       components: teamComponents.map((component) => ({
-//         key: component.key,
-//         name: component.name,
-//         description: component.description,
-//         libraryName: component.libraryName,
-//       })),
-//     };
-//   } catch (error) {
-//     throw new Error(`Error getting team components: ${error.message}`);
-//   }
-// }
-
-async function createComponentInstance(params) {
-  const { componentKey, x = 0, y = 0 } = params || {};
-
-  if (!componentKey) {
-    throw new Error("Missing componentKey parameter");
-  }
-
-  try {
-    console.log("🧩 Creating component instance", { componentKey, x, y });
-    const component = await figma.importComponentByKeyAsync(componentKey);
-    const instance = component.createInstance();
-
-    instance.x = x;
-    instance.y = y;
-
-    figma.currentPage.appendChild(instance);
-
-    return {
-      id: instance.id,
-      name: instance.name,
-      x: instance.x,
-      y: instance.y,
-      width: instance.width,
-      height: instance.height,
-      componentId: instance.componentId,
-    };
-  } catch (error) {
-    // Ensure we surface a helpful error string (Figma may throw strings)
-    let reason = "Unknown error";
-    if (error) {
-      if (typeof error === "string") {
-        reason = error;
-      } else if (typeof error.message === "string" && error.message.length > 0) {
-        reason = error.message;
-      } else if (typeof error.toString === "function") {
-        const asString = error.toString();
-        if (asString && asString !== "[object Object]") {
-          reason = asString;
-        }
-      }
-    }
-    console.error("❌ Error creating component instance:", error);
-    throw new Error(`Error creating component instance: ${reason}`);
-  }
-}
-
-async function exportNodeAsImage(params) {
-  const { nodeId, scale = 1 } = params || {};
-
-  const format = "PNG";
-
-  if (!nodeId) {
-    throw new Error("Missing nodeId parameter");
-  }
-
-  const node = await figma.getNodeByIdAsync(nodeId);
-  if (!node) {
-    throw new Error(`Node not found with ID: ${nodeId}`);
-  }
-
-  if (!("exportAsync" in node)) {
-    throw new Error(`Node does not support exporting: ${nodeId}`);
-  }
-
-  try {
-    const settings = {
-      format: format,
-      constraint: { type: "SCALE", value: scale },
-    };
-
-    const bytes = await node.exportAsync(settings);
-
-    let mimeType;
-    switch (format) {
-      case "PNG":
-        mimeType = "image/png";
-        break;
-      case "JPG":
-        mimeType = "image/jpeg";
-        break;
-      case "SVG":
-        mimeType = "image/svg+xml";
-        break;
-      case "PDF":
-        mimeType = "application/pdf";
-        break;
-      default:
-        mimeType = "application/octet-stream";
-    }
-
-    // Proper way to convert Uint8Array to base64
-    const base64 = customBase64Encode(bytes);
-    // const imageData = `data:${mimeType};base64,${base64}`;
-
-    return {
-      nodeId,
-      format,
-      scale,
-      mimeType,
-      imageData: base64,
-    };
-  } catch (error) {
-    throw new Error(`Error exporting node as image: ${error.message}`);
-  }
-}
-function customBase64Encode(bytes) {
-  const chars =
-    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-  let base64 = "";
-
-  const byteLength = bytes.byteLength;
-  const byteRemainder = byteLength % 3;
-  const mainLength = byteLength - byteRemainder;
-
-  let a, b, c, d;
-  let chunk;
-
-  // Main loop deals with bytes in chunks of 3
-  for (let i = 0; i < mainLength; i = i + 3) {
-    // Combine the three bytes into a single integer
-    chunk = (bytes[i] << 16) | (bytes[i + 1] << 8) | bytes[i + 2];
-
-    // Use bitmasks to extract 6-bit segments from the triplet
-    a = (chunk & 16515072) >> 18; // 16515072 = (2^6 - 1) << 18
-    b = (chunk & 258048) >> 12; // 258048 = (2^6 - 1) << 12
-    c = (chunk & 4032) >> 6; // 4032 = (2^6 - 1) << 6
-    d = chunk & 63; // 63 = 2^6 - 1
-
-    // Convert the raw binary segments to the appropriate ASCII encoding
-    base64 += chars[a] + chars[b] + chars[c] + chars[d];
-  }
-
-  // Deal with the remaining bytes and padding
-  if (byteRemainder === 1) {
-    chunk = bytes[mainLength];
-
-    a = (chunk & 252) >> 2; // 252 = (2^6 - 1) << 2
-
-    // Set the 4 least significant bits to zero
-    b = (chunk & 3) << 4; // 3 = 2^2 - 1
-
-    base64 += chars[a] + chars[b] + "==";
-  } else if (byteRemainder === 2) {
-    chunk = (bytes[mainLength] << 8) | bytes[mainLength + 1];
-
-    a = (chunk & 64512) >> 10; // 64512 = (2^6 - 1) << 10
-    b = (chunk & 1008) >> 4; // 1008 = (2^6 - 1) << 4
-
-    // Set the 2 least significant bits to zero
-    c = (chunk & 15) << 2; // 15 = 2^4 - 1
-
-    base64 += chars[a] + chars[b] + chars[c] + "=";
-  }
-
-  return base64;
-}
-
-async function setCornerRadius(params) {
-  const { nodeId, radius, corners } = params || {};
-
-  if (!nodeId) {
-    throw new Error("Missing nodeId parameter");
-  }
-
-  if (radius === undefined) {
-    throw new Error("Missing radius parameter");
-  }
-
-  const node = await figma.getNodeByIdAsync(nodeId);
-  if (!node) {
-    throw new Error(`Node not found with ID: ${nodeId}`);
-  }
-
-  // Check if node supports corner radius
-  if (!("cornerRadius" in node)) {
-    throw new Error(`Node does not support corner radius: ${nodeId}`);
-  }
-
-  // If corners array is provided, set individual corner radii
-  if (corners && Array.isArray(corners) && corners.length === 4) {
-    if ("topLeftRadius" in node) {
-      // Node supports individual corner radii
-      if (corners[0]) node.topLeftRadius = radius;
-      if (corners[1]) node.topRightRadius = radius;
-      if (corners[2]) node.bottomRightRadius = radius;
-      if (corners[3]) node.bottomLeftRadius = radius;
-    } else {
-      // Node only supports uniform corner radius
-      node.cornerRadius = radius;
-    }
-  } else {
-    // Set uniform corner radius
-    node.cornerRadius = radius;
-  }
-
-  return {
-    id: node.id,
-    name: node.name,
-    cornerRadius: "cornerRadius" in node ? node.cornerRadius : undefined,
-    topLeftRadius: "topLeftRadius" in node ? node.topLeftRadius : undefined,
-    topRightRadius: "topRightRadius" in node ? node.topRightRadius : undefined,
-    bottomRightRadius:
-      "bottomRightRadius" in node ? node.bottomRightRadius : undefined,
-    bottomLeftRadius:
-      "bottomLeftRadius" in node ? node.bottomLeftRadius : undefined,
-  };
-}
-
-async function setTextContent(params) {
-  const { nodeId, text, smartStrategy } = params || {};
-
-  if (!nodeId) {
-    throw new Error("Missing nodeId parameter");
-  }
-
-  if (text === undefined) {
-    throw new Error("Missing text parameter");
-  }
-
-  const node = await figma.getNodeByIdAsync(nodeId);
-  if (!node) {
-    throw new Error(`Node not found with ID: ${nodeId}`);
-  }
-
-  if (node.type !== "TEXT") {
-    throw new Error(`Node is not a text node: ${nodeId}`);
-  }
-
-  try {
-    // Only load a concrete font; figma.mixed cannot be loaded
-    try {
-      if (node.fontName !== figma.mixed) {
-        await figma.loadFontAsync(node.fontName);
-      }
-    } catch (_) {}
-
-    const options = smartStrategy ? { smartStrategy } : undefined;
-    await setCharacters(node, text, options);
-
-    let fontNameResult = null;
-    try {
-      fontNameResult = (node.fontName === figma.mixed) ? "MIXED" : node.fontName;
-    } catch (_) { fontNameResult = null; }
-
-    return {
-      id: node.id,
-      name: node.name,
-      characters: node.characters,
-      fontName: fontNameResult,
-    };
-  } catch (error) {
-    throw new Error(`Error setting text content: ${error.message}`);
-  }
-}
-
-// Initialize settings on load
-(async function initializePlugin() {
-  try {
-    const savedSettings = await figma.clientStorage.getAsync("settings");
-    if (savedSettings) {
-      if (savedSettings.serverPort) {
-        state.serverPort = savedSettings.serverPort;
-      }
-    }
-
-    // Send initial settings to UI
-    figma.ui.postMessage({
-      type: "init-settings",
-      settings: {
-        serverPort: state.serverPort,
-      },
-    });
-  } catch (error) {
-    console.error("Error loading settings:", error);
-  }
-})();
-
-function uniqBy(arr, predicate) {
-  const cb = typeof predicate === "function" ? predicate : (o) => o[predicate];
-  return [
-    ...arr
-      .reduce((map, item) => {
-        const key = item === null || item === undefined ? item : cb(item);
-
-        map.has(key) || map.set(key, item);
-
-        return map;
-      }, new Map())
-      .values(),
-  ];
-}
-const setCharacters = async (node, characters, options) => {
-  const fallbackFont = (options && options.fallbackFont) || {
-    family: "Inter",
-    style: "Regular",
-  };
-  try {
-    if (node.fontName === figma.mixed) {
-      if (options && options.smartStrategy === "prevail") {
-        const fontHashTree = {};
-        for (let i = 1; i < node.characters.length; i++) {
-          const charFont = node.getRangeFontName(i - 1, i);
-          const key = `${charFont.family}::${charFont.style}`;
-          fontHashTree[key] = fontHashTree[key] ? fontHashTree[key] + 1 : 1;
-        }
-        const prevailedTreeItem = Object.entries(fontHashTree).sort(
-          (a, b) => b[1] - a[1]
-        )[0];
-        const [family, style] = prevailedTreeItem[0].split("::");
-        const prevailedFont = {
-          family,
-          style,
-        };
-        await figma.loadFontAsync(prevailedFont);
-        node.fontName = prevailedFont;
-      } else if (options && options.smartStrategy === "strict") {
-        return setCharactersWithStrictMatchFont(node, characters, fallbackFont);
-      } else if (options && options.smartStrategy === "experimental") {
-        return setCharactersWithSmartMatchFont(node, characters, fallbackFont);
-      } else {
-        const firstCharFont = node.getRangeFontName(0, 1);
-        await figma.loadFontAsync(firstCharFont);
-        node.fontName = firstCharFont;
-      }
-    } else {
-      await figma.loadFontAsync({
-        family: node.fontName.family,
-        style: node.fontName.style,
-      });
-    }
-  } catch (err) {
-    console.warn(
-      `Failed to load "${node.fontName["family"]} ${node.fontName["style"]}" font and replaced with fallback "${fallbackFont.family} ${fallbackFont.style}"`,
-      err
-    );
-    await figma.loadFontAsync(fallbackFont);
-    node.fontName = fallbackFont;
-  }
-  try {
-    node.characters = characters;
-    return true;
-  } catch (err) {
-    console.warn(`Failed to set characters. Skipped.`, err);
-    return false;
-  }
-};
-
-const setCharactersWithStrictMatchFont = async (
-  node,
-  characters,
-  fallbackFont
-) => {
-  const fontHashTree = {};
-  for (let i = 1; i < node.characters.length; i++) {
-    const startIdx = i - 1;
-    const startCharFont = node.getRangeFontName(startIdx, i);
-    const startCharFontVal = `${startCharFont.family}::${startCharFont.style}`;
-    while (i < node.characters.length) {
-      i++;
-      const charFont = node.getRangeFontName(i - 1, i);
-      if (startCharFontVal !== `${charFont.family}::${charFont.style}`) {
-        break;
-      }
-    }
-    fontHashTree[`${startIdx}_${i}`] = startCharFontVal;
-  }
-  await figma.loadFontAsync(fallbackFont);
-  node.fontName = fallbackFont;
-  node.characters = characters;
-  console.log(fontHashTree);
-  await Promise.all(
-    Object.keys(fontHashTree).map(async (range) => {
-      console.log(range, fontHashTree[range]);
-      const [start, end] = range.split("_");
-      const [family, style] = fontHashTree[range].split("::");
-      const matchedFont = {
-        family,
-        style,
-      };
-      await figma.loadFontAsync(matchedFont);
-      return node.setRangeFontName(Number(start), Number(end), matchedFont);
-    })
-  );
-  return true;
-};
-
-const getDelimiterPos = (str, delimiter, startIdx = 0, endIdx = str.length) => {
-  const indices = [];
-  let temp = startIdx;
-  for (let i = startIdx; i < endIdx; i++) {
-    if (
-      str[i] === delimiter &&
-      i + startIdx !== endIdx &&
-      temp !== i + startIdx
-    ) {
-      indices.push([temp, i + startIdx]);
-      temp = i + startIdx + 1;
-    }
-  }
-  temp !== endIdx && indices.push([temp, endIdx]);
-  return indices.filter(Boolean);
-};
-
-const buildLinearOrder = (node) => {
-  const fontTree = [];
-  const newLinesPos = getDelimiterPos(node.characters, "\n");
-  newLinesPos.forEach(([newLinesRangeStart, newLinesRangeEnd], n) => {
-    const newLinesRangeFont = node.getRangeFontName(
-      newLinesRangeStart,
-      newLinesRangeEnd
-    );
-    if (newLinesRangeFont === figma.mixed) {
-      const spacesPos = getDelimiterPos(
-        node.characters,
-        " ",
-        newLinesRangeStart,
-        newLinesRangeEnd
-      );
-      spacesPos.forEach(([spacesRangeStart, spacesRangeEnd], s) => {
-        const spacesRangeFont = node.getRangeFontName(
-          spacesRangeStart,
-          spacesRangeEnd
-        );
-        if (spacesRangeFont === figma.mixed) {
-          const spacesRangeFont = node.getRangeFontName(
-            spacesRangeStart,
-            spacesRangeStart[0]
-          );
-          fontTree.push({
-            start: spacesRangeStart,
-            delimiter: " ",
-            family: spacesRangeFont.family,
-            style: spacesRangeFont.style,
-          });
+        const paintStyle = figma.createPaintStyle();
+        if (exact && conflictMode === 'suffix') {
+            let i = 2; let candidate = `${name} (${i})`;
+            const names = new Set(existing.map(s => String(s.name)));
+            while (names.has(candidate)) { i += 1; candidate = `${name} (${i})`; }
+            paintStyle.name = candidate;
         } else {
-          fontTree.push({
-            start: spacesRangeStart,
-            delimiter: " ",
-            family: spacesRangeFont.family,
-            style: spacesRangeFont.style,
-          });
+            paintStyle.name = name;
         }
-      });
-    } else {
-      fontTree.push({
-        start: newLinesRangeStart,
-        delimiter: "\n",
-        family: newLinesRangeFont.family,
-        style: newLinesRangeFont.style,
-      });
-    }
-  });
-  return fontTree
-    .sort((a, b) => +a.start - +b.start)
-    .map(({ family, style, delimiter }) => ({ family, style, delimiter }));
-};
+        paintStyle.paints = paints;
 
-const setCharactersWithSmartMatchFont = async (
-  node,
-  characters,
-  fallbackFont
-) => {
-  const rangeTree = buildLinearOrder(node);
-  const fontsToLoad = uniqBy(
-    rangeTree,
-    ({ family, style }) => `${family}::${style}`
-  ).map(({ family, style }) => ({
-    family,
-    style,
-  }));
-
-  await Promise.all([...fontsToLoad, fallbackFont].map(figma.loadFontAsync));
-
-  node.fontName = fallbackFont;
-  node.characters = characters;
-
-  let prevPos = 0;
-  rangeTree.forEach(({ family, style, delimiter }) => {
-    if (prevPos < node.characters.length) {
-      const delimeterPos = node.characters.indexOf(delimiter, prevPos);
-      const endPos =
-        delimeterPos > prevPos ? delimeterPos : node.characters.length;
-      const matchedFont = {
-        family,
-        style,
-      };
-      node.setRangeFontName(prevPos, endPos, matchedFont);
-      prevPos = endPos + 1;
-    }
-  });
-  return true;
-};
-
-// Add the cloneNode function implementation
-async function cloneNode(params) {
-  const { nodeId, x, y } = params || {};
-
-  if (!nodeId) {
-    throw new Error("Missing nodeId parameter");
-  }
-
-  const node = await figma.getNodeByIdAsync(nodeId);
-  if (!node) {
-    throw new Error(`Node not found with ID: ${nodeId}`);
-  }
-
-  // Clone the node
-  const clone = node.clone();
-
-  // If x and y are provided, move the clone to that position
-  if (x !== undefined && y !== undefined) {
-    if (!("x" in clone) || !("y" in clone)) {
-      throw new Error(`Cloned node does not support position: ${nodeId}`);
-    }
-    clone.x = x;
-    clone.y = y;
-  }
-
-  // Add the clone to the same parent as the original node
-  if (node.parent) {
-    node.parent.appendChild(clone);
-  } else {
-    figma.currentPage.appendChild(clone);
-  }
-
-  return {
-    id: clone.id,
-    name: clone.name,
-    x: "x" in clone ? clone.x : undefined,
-    y: "y" in clone ? clone.y : undefined,
-    width: "width" in clone ? clone.width : undefined,
-    height: "height" in clone ? clone.height : undefined,
-  };
-}
-
-async function scanTextNodes(params) {
-  console.log(`Starting to scan text nodes from node ID: ${params.nodeId}`);
-  const {
-    nodeId,
-    useChunking = true,
-    chunkSize = 10,
-    commandId = generateCommandId(),
-  } = params || {};
-
-  const node = await figma.getNodeByIdAsync(nodeId);
-
-  if (!node) {
-    console.error(`Node with ID ${nodeId} not found`);
-    // Send error progress update
-    sendProgressUpdate(
-      commandId,
-      "scan_text_nodes",
-      "error",
-      0,
-      0,
-      0,
-      `Node with ID ${nodeId} not found`,
-      { error: `Node not found: ${nodeId}` }
-    );
-    throw new Error(`Node with ID ${nodeId} not found`);
-  }
-
-  // If chunking is not enabled, use the original implementation
-  if (!useChunking) {
-    const textNodes = [];
-    try {
-      // Send started progress update
-      sendProgressUpdate(
-        commandId,
-        "scan_text_nodes",
-        "started",
-        0,
-        1, // Not known yet how many nodes there are
-        0,
-        `Starting scan of node "${node.name || nodeId}" without chunking`,
-        null
-      );
-
-      await findTextNodes(node, [], 0, textNodes);
-
-      // Send completed progress update
-      sendProgressUpdate(
-        commandId,
-        "scan_text_nodes",
-        "completed",
-        100,
-        textNodes.length,
-        textNodes.length,
-        `Scan complete. Found ${textNodes.length} text nodes.`,
-        { textNodes }
-      );
-
-      return {
-        success: true,
-        message: `Scanned ${textNodes.length} text nodes.`,
-        count: textNodes.length,
-        textNodes: textNodes,
-        commandId,
-      };
+        const result = { success: true, summary: `Created paint style '${paintStyle.name}'`, modified_node_ids: [], created_style_id: paintStyle.id, name: paintStyle.name, type: 'paint' };
+        logger.info("✅ create_paint_style succeeded", { styleId: paintStyle.id, name: paintStyle.name });
+        return result;
     } catch (error) {
-      console.error("Error scanning text nodes:", error);
-
-      // Send error progress update
-      sendProgressUpdate(
-        commandId,
-        "scan_text_nodes",
-        "error",
-        0,
-        0,
-        0,
-        `Error scanning text nodes: ${error.message}`,
-        { error: error.message }
-      );
-
-      throw new Error(`Error scanning text nodes: ${error.message}`);
-    }
-  }
-
-  // Chunked implementation
-  console.log(`Using chunked scanning with chunk size: ${chunkSize}`);
-
-  // First, collect all nodes to process (without processing them yet)
-  const nodesToProcess = [];
-
-  // Send started progress update
-  sendProgressUpdate(
-    commandId,
-    "scan_text_nodes",
-    "started",
-    0,
-    0, // Not known yet how many nodes there are
-    0,
-    `Starting chunked scan of node "${node.name || nodeId}"`,
-    { chunkSize }
-  );
-
-  await collectNodesToProcess(node, [], 0, nodesToProcess);
-
-  const totalNodes = nodesToProcess.length;
-  console.log(`Found ${totalNodes} total nodes to process`);
-
-  // Calculate number of chunks needed
-  const totalChunks = Math.ceil(totalNodes / chunkSize);
-  console.log(`Will process in ${totalChunks} chunks`);
-
-  // Send update after node collection
-  sendProgressUpdate(
-    commandId,
-    "scan_text_nodes",
-    "in_progress",
-    5, // 5% progress for collection phase
-    totalNodes,
-    0,
-    `Found ${totalNodes} nodes to scan. Will process in ${totalChunks} chunks.`,
-    {
-      totalNodes,
-      totalChunks,
-      chunkSize,
-    }
-  );
-
-  // Process nodes in chunks
-  const allTextNodes = [];
-  let processedNodes = 0;
-  let chunksProcessed = 0;
-
-  for (let i = 0; i < totalNodes; i += chunkSize) {
-    const chunkEnd = Math.min(i + chunkSize, totalNodes);
-    console.log(
-      `Processing chunk ${chunksProcessed + 1}/${totalChunks} (nodes ${i} to ${chunkEnd - 1
-      })`
-    );
-
-    // Send update before processing chunk
-    sendProgressUpdate(
-      commandId,
-      "scan_text_nodes",
-      "in_progress",
-      Math.round(5 + (chunksProcessed / totalChunks) * 90), // 5-95% for processing
-      totalNodes,
-      processedNodes,
-      `Processing chunk ${chunksProcessed + 1}/${totalChunks}`,
-      {
-        currentChunk: chunksProcessed + 1,
-        totalChunks,
-        textNodesFound: allTextNodes.length,
-      }
-    );
-
-    const chunkNodes = nodesToProcess.slice(i, chunkEnd);
-    const chunkTextNodes = [];
-
-    // Process each node in this chunk
-    for (const nodeInfo of chunkNodes) {
-      if (nodeInfo.node.type === "TEXT") {
         try {
-          const textNodeInfo = await processTextNode(
-            nodeInfo.node,
-            nodeInfo.parentPath,
-            nodeInfo.depth
-          );
-          if (textNodeInfo) {
-            chunkTextNodes.push(textNodeInfo);
-          }
-        } catch (error) {
-          console.error(`Error processing text node: ${error.message}`);
-          // Continue with other nodes
-        }
-      }
-
-      // Brief delay to allow UI updates and prevent freezing
-      await delay(5);
+            const payload = JSON.parse((error && error.message) || String(error));
+            if (payload && payload.code) {
+                logger.error("❌ create_paint_style failed", { code: payload.code, originalError: (error && error.message) || String(error), details: payload.details || {} });
+                throw new Error(JSON.stringify(payload));
+            }
+        } catch (_) {}
+        const payload = { code: "unknown_plugin_error", message: (error && error.message) || String(error), details: {} };
+        logger.error("❌ create_paint_style failed", { code: payload.code, originalError: payload.message, details: payload.details });
+        throw new Error(JSON.stringify(payload));
     }
-
-    // Add results from this chunk
-    allTextNodes.push(...chunkTextNodes);
-    processedNodes += chunkNodes.length;
-    chunksProcessed++;
-
-    // Send update after processing chunk
-    sendProgressUpdate(
-      commandId,
-      "scan_text_nodes",
-      "in_progress",
-      Math.round(5 + (chunksProcessed / totalChunks) * 90), // 5-95% for processing
-      totalNodes,
-      processedNodes,
-      `Processed chunk ${chunksProcessed}/${totalChunks}. Found ${allTextNodes.length} text nodes so far.`,
-      {
-        currentChunk: chunksProcessed,
-        totalChunks,
-        processedNodes,
-        textNodesFound: allTextNodes.length,
-        chunkResult: chunkTextNodes,
-      }
-    );
-
-    // Small delay between chunks to prevent UI freezing
-    if (i + chunkSize < totalNodes) {
-      await delay(50);
-    }
-  }
-
-  // Send completed progress update
-  sendProgressUpdate(
-    commandId,
-    "scan_text_nodes",
-    "completed",
-    100,
-    totalNodes,
-    processedNodes,
-    `Scan complete. Found ${allTextNodes.length} text nodes.`,
-    {
-      textNodes: allTextNodes,
-      processedNodes,
-      chunks: chunksProcessed,
-    }
-  );
-
-  return {
-    success: true,
-    message: `Chunked scan complete. Found ${allTextNodes.length} text nodes.`,
-    totalNodes: allTextNodes.length,
-    processedNodes: processedNodes,
-    chunks: chunksProcessed,
-    textNodes: allTextNodes,
-    commandId,
-  };
 }
-
-// Helper function to collect all nodes that need to be processed
-async function collectNodesToProcess(
-  node,
-  parentPath = [],
-  depth = 0,
-  nodesToProcess = []
-) {
-  // Skip invisible nodes
-  if (node.visible === false) return;
-
-  // Get the path to this node
-  const nodePath = [...parentPath, node.name || `Unnamed ${node.type}`];
-
-  // Add this node to the processing list
-  nodesToProcess.push({
-    node: node,
-    parentPath: nodePath,
-    depth: depth,
-  });
-
-  // Recursively add children
-  if ("children" in node) {
-    for (const child of node.children) {
-      await collectNodesToProcess(child, nodePath, depth + 1, nodesToProcess);
-    }
-  }
-}
-
-// Process a single text node
-async function processTextNode(node, parentPath, depth) {
-  if (node.type !== "TEXT") return null;
-
-  try {
-    // Safely extract font information
-    let fontFamily = "";
-    let fontStyle = "";
-
-    if (node.fontName) {
-      if (typeof node.fontName === "object") {
-        if ("family" in node.fontName) fontFamily = node.fontName.family;
-        if ("style" in node.fontName) fontStyle = node.fontName.style;
-      }
-    }
-
-    // Create a safe representation of the text node
-    const safeTextNode = {
-      id: node.id,
-      name: node.name || "Text",
-      type: node.type,
-      characters: node.characters,
-      fontSize: typeof node.fontSize === "number" ? node.fontSize : 0,
-      fontFamily: fontFamily,
-      fontStyle: fontStyle,
-      x: typeof node.x === "number" ? node.x : 0,
-      y: typeof node.y === "number" ? node.y : 0,
-      width: typeof node.width === "number" ? node.width : 0,
-      height: typeof node.height === "number" ? node.height : 0,
-      path: parentPath.join(" > "),
-      depth: depth,
-    };
-
-    // Highlight the node briefly (optional visual feedback)
+async function createTextStyle(params) {
     try {
-      const originalFills = JSON.parse(JSON.stringify(node.fills));
-      node.fills = [
-        {
-          type: "SOLID",
-          color: { r: 1, g: 0.5, b: 0 },
-          opacity: 0.3,
-        },
-      ];
+        const { name, style, onConflict } = params || {};
 
-      // Brief delay for the highlight to be visible
-      await delay(100);
+        if (figma.editorType !== 'figma') {
+            const payload = { code: "unsupported_editor_type", message: "Style APIs are only available in Figma Design", details: { editorType: figma.editorType } };
+            logger.error("❌ create_text_style failed", { code: payload.code, originalError: payload.message, details: payload.details });
+            throw new Error(JSON.stringify(payload));
+        }
+        if (typeof name !== 'string' || name.trim().length === 0) {
+            const payload = { code: "missing_parameter", message: "'name' is required and must be a non-empty string", details: { name } };
+            logger.error("❌ create_text_style failed", { code: payload.code, originalError: payload.message, details: payload.details });
+            throw new Error(JSON.stringify(payload));
+        }
+        const s = (style && typeof style === 'object') ? style : {};
 
-      try {
-        node.fills = originalFills;
-      } catch (err) {
-        console.error("Error resetting fills:", err);
-      }
-    } catch (highlightErr) {
-      console.error("Error highlighting text node:", highlightErr);
-      // Continue anyway, highlighting is just visual feedback
+        const conflictMode = (onConflict === 'skip' || onConflict === 'suffix' || onConflict === 'error') ? onConflict : 'error';
+        const existing = await figma.getLocalTextStylesAsync();
+        const exact = existing.find(st => String(st.name) === name);
+        if (exact) {
+            if (conflictMode === 'skip') {
+            logger.info("✅ create_text_style skipped (name exists)", { styleId: exact.id, name: exact.name });
+            return { success: true, summary: `Skipped: text style '${name}' already exists`, modified_node_ids: [], created_style_id: exact.id, name: exact.name, type: 'text', skipped: true };
+            }
+            if (conflictMode === 'error') {
+                const payload = { code: "conflict_style_name", message: `A text style named '${name}' already exists`, details: { name, existingStyleId: exact.id } };
+                logger.error("❌ create_text_style failed", { code: payload.code, originalError: payload.message, details: payload.details });
+                throw new Error(JSON.stringify(payload));
+            }
+        }
+
+        const textStyle = figma.createTextStyle();
+        if (exact && conflictMode === 'suffix') {
+            let i = 2; let candidate = `${name} (${i})`;
+            const names = new Set(existing.map(st => String(st.name)));
+            while (names.has(candidate)) { i += 1; candidate = `${name} (${i})`; }
+            textStyle.name = candidate;
+        } else {
+            textStyle.name = name;
+        }
+
+        try {
+            if (s.font_name && typeof s.font_name === 'object' && s.font_name.family && s.font_name.style) {
+                try { await figma.loadFontAsync({ family: s.font_name.family, style: s.font_name.style }); } catch (_) {}
+                try { textStyle.fontName = { family: s.font_name.family, style: s.font_name.style }; } catch (_) {}
+            }
+            if (typeof s.font_size === 'number') { try { textStyle.fontSize = s.font_size; } catch (_) {} }
+            if (typeof s.text_case === 'string') { try { textStyle.textCase = s.text_case; } catch (_) {} }
+            if (typeof s.text_decoration === 'string') { try { textStyle.textDecoration = s.text_decoration; } catch (_) {} }
+            if (typeof s.letter_spacing_percent === 'number') { try { textStyle.letterSpacing = { unit: "PERCENT", value: s.letter_spacing_percent }; } catch (_) {} }
+            if (typeof s.line_height_percent === 'number') { try { textStyle.lineHeight = { unit: "PERCENT", value: s.line_height_percent }; } catch (_) {} }
+        } catch (_) {}
+
+        const result = { success: true, summary: `Created text style '${textStyle.name}'`, modified_node_ids: [], created_style_id: textStyle.id, name: textStyle.name, type: 'text' };
+        logger.info("✅ create_text_style succeeded", { styleId: textStyle.id, name: textStyle.name });
+        return result;
+    } catch (error) {
+        try {
+            const payload = JSON.parse((error && error.message) || String(error));
+            if (payload && payload.code) {
+                logger.error("❌ create_text_style failed", { code: payload.code, originalError: (error && error.message) || String(error), details: payload.details || {} });
+                throw new Error(JSON.stringify(payload));
+            }
+        } catch (_) {}
+        const payload = { code: "unknown_plugin_error", message: (error && error.message) || String(error), details: {} };
+        logger.error("❌ create_text_style failed", { code: payload.code, originalError: payload.message, details: payload.details });
+        throw new Error(JSON.stringify(payload));
     }
-
-    return safeTextNode;
-  } catch (nodeErr) {
-    console.error("Error processing text node:", nodeErr);
-    return null;
-  }
 }
-
-// A delay function that returns a promise
-function delay(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-// Keep the original findTextNodes for backward compatibility
-async function findTextNodes(node, parentPath = [], depth = 0, textNodes = []) {
-  // Skip invisible nodes
-  if (node.visible === false) return;
-
-  // Get the path to this node including its name
-  const nodePath = [...parentPath, node.name || `Unnamed ${node.type}`];
-
-  if (node.type === "TEXT") {
+async function createEffectStyle(params) {
     try {
-      // Safely extract font information to avoid Symbol serialization issues
-      let fontFamily = "";
-      let fontStyle = "";
+        const { name, effects, onConflict } = params || {};
 
-      if (node.fontName) {
-        if (typeof node.fontName === "object") {
-          if ("family" in node.fontName) fontFamily = node.fontName.family;
-          if ("style" in node.fontName) fontStyle = node.fontName.style;
+        if (figma.editorType !== 'figma') {
+            const payload = { code: "unsupported_editor_type", message: "Style APIs are only available in Figma Design", details: { editorType: figma.editorType } };
+            logger.error("❌ create_effect_style failed", { code: payload.code, originalError: payload.message, details: payload.details });
+            throw new Error(JSON.stringify(payload));
         }
-      }
+        if (typeof name !== 'string' || name.trim().length === 0) {
+            const payload = { code: "missing_parameter", message: "'name' is required and must be a non-empty string", details: { name } };
+            logger.error("❌ create_effect_style failed", { code: payload.code, originalError: payload.message, details: payload.details });
+            throw new Error(JSON.stringify(payload));
+        }
+        if (!Array.isArray(effects) || effects.length === 0) {
+            const payload = { code: "invalid_parameter", message: "'effects' must be a non-empty array of Effect objects", details: { effectsType: Array.isArray(effects) ? 'array' : typeof effects } };
+            logger.error("❌ create_effect_style failed", { code: payload.code, originalError: payload.message, details: payload.details });
+            throw new Error(JSON.stringify(payload));
+        }
 
-      // Create a safe representation of the text node with only serializable properties
-      const safeTextNode = {
-        id: node.id,
-        name: node.name || "Text",
-        type: node.type,
-        characters: node.characters,
-        fontSize: typeof node.fontSize === "number" ? node.fontSize : 0,
-        fontFamily: fontFamily,
-        fontStyle: fontStyle,
-        x: typeof node.x === "number" ? node.x : 0,
-        y: typeof node.y === "number" ? node.y : 0,
-        width: typeof node.width === "number" ? node.width : 0,
-        height: typeof node.height === "number" ? node.height : 0,
-        path: nodePath.join(" > "),
-        depth: depth,
-      };
+        const conflictMode = (onConflict === 'skip' || onConflict === 'suffix' || onConflict === 'error') ? onConflict : 'error';
+        const existing = await figma.getLocalEffectStylesAsync();
+        const exact = existing.find(s => String(s.name) === name);
+        if (exact) {
+            if (conflictMode === 'skip') {
+            logger.info("✅ create_effect_style skipped (name exists)", { styleId: exact.id, name: exact.name });
+            return { success: true, summary: `Skipped: effect style '${name}' already exists`, modified_node_ids: [], created_style_id: exact.id, name: exact.name, type: 'effect', skipped: true };
+            }
+            if (conflictMode === 'error') {
+                const payload = { code: "conflict_style_name", message: `An effect style named '${name}' already exists`, details: { name, existingStyleId: exact.id } };
+                logger.error("❌ create_effect_style failed", { code: payload.code, originalError: payload.message, details: payload.details });
+                throw new Error(JSON.stringify(payload));
+            }
+        }
 
-      // Only highlight the node if it's not being done via API
-      try {
-        // Safe way to create a temporary highlight without causing serialization issues
-        const originalFills = JSON.parse(JSON.stringify(node.fills));
-        node.fills = [
-          {
-            type: "SOLID",
-            color: { r: 1, g: 0.5, b: 0 },
-            opacity: 0.3,
-          },
-        ];
+        const effectStyle = figma.createEffectStyle();
+        if (exact && conflictMode === 'suffix') {
+            let i = 2; let candidate = `${name} (${i})`;
+            const names = new Set(existing.map(s => String(s.name)));
+            while (names.has(candidate)) { i += 1; candidate = `${name} (${i})`; }
+            effectStyle.name = candidate;
+        } else {
+            effectStyle.name = name;
+        }
+        effectStyle.effects = effects;
 
-        // Promise-based delay instead of setTimeout
-        await delay(500);
-
+        const result = { success: true, summary: `Created effect style '${effectStyle.name}'`, modified_node_ids: [], created_style_id: effectStyle.id, name: effectStyle.name, type: 'effect' };
+        logger.info("✅ create_effect_style succeeded", { styleId: effectStyle.id, name: effectStyle.name });
+        return result;
+    } catch (error) {
         try {
-          node.fills = originalFills;
-        } catch (err) {
-          console.error("Error resetting fills:", err);
-        }
-      } catch (highlightErr) {
-        console.error("Error highlighting text node:", highlightErr);
-        // Continue anyway, highlighting is just visual feedback
-      }
-
-      textNodes.push(safeTextNode);
-    } catch (nodeErr) {
-      console.error("Error processing text node:", nodeErr);
-      // Skip this node but continue with others
+            const payload = JSON.parse((error && error.message) || String(error));
+            if (payload && payload.code) {
+                logger.error("❌ create_effect_style failed", { code: payload.code, originalError: (error && error.message) || String(error), details: payload.details || {} });
+                throw new Error(JSON.stringify(payload));
+            }
+        } catch (_) {}
+        const payload = { code: "unknown_plugin_error", message: (error && error.message) || String(error), details: {} };
+        logger.error("❌ create_effect_style failed", { code: payload.code, originalError: payload.message, details: payload.details });
+        throw new Error(JSON.stringify(payload));
     }
-  }
-
-  // Recursively process children of container nodes
-  if ("children" in node) {
-    for (const child of node.children) {
-      await findTextNodes(child, nodePath, depth + 1, textNodes);
-    }
-  }
 }
+async function createGridStyle(params) {
+    try {
+        const { name, layoutGrids, onConflict } = params || {};
 
-// Replace text in a specific node
-async function setMultipleTextContents(params) {
-  const { nodeId, text } = params || {};
-  const commandId = params.commandId || generateCommandId();
-
-  if (!nodeId || !text || !Array.isArray(text)) {
-    const errorMsg = "Missing required parameters: nodeId and text array";
-
-    // Send error progress update
-    sendProgressUpdate(
-      commandId,
-      "set_multiple_text_contents",
-      "error",
-      0,
-      0,
-      0,
-      errorMsg,
-      { error: errorMsg }
-    );
-
-    throw new Error(errorMsg);
-  }
-
-  console.log(
-    `Starting text replacement for node: ${nodeId} with ${text.length} text replacements`
-  );
-
-  // Send started progress update
-  sendProgressUpdate(
-    commandId,
-    "set_multiple_text_contents",
-    "started",
-    0,
-    text.length,
-    0,
-    `Starting text replacement for ${text.length} nodes`,
-    { totalReplacements: text.length }
-  );
-
-  // Define the results array and counters
-  const results = [];
-  let successCount = 0;
-  let failureCount = 0;
-
-  // Split text replacements into chunks of 5
-  const CHUNK_SIZE = 5;
-  const chunks = [];
-
-  for (let i = 0; i < text.length; i += CHUNK_SIZE) {
-    chunks.push(text.slice(i, i + CHUNK_SIZE));
-  }
-
-  console.log(`Split ${text.length} replacements into ${chunks.length} chunks`);
-
-  // Send chunking info update
-  sendProgressUpdate(
-    commandId,
-    "set_multiple_text_contents",
-    "in_progress",
-    5, // 5% progress for planning phase
-    text.length,
-    0,
-    `Preparing to replace text in ${text.length} nodes using ${chunks.length} chunks`,
-    {
-      totalReplacements: text.length,
-      chunks: chunks.length,
-      chunkSize: CHUNK_SIZE,
-    }
-  );
-
-  // Process each chunk sequentially
-  for (let chunkIndex = 0; chunkIndex < chunks.length; chunkIndex++) {
-    const chunk = chunks[chunkIndex];
-    console.log(
-      `Processing chunk ${chunkIndex + 1}/${chunks.length} with ${chunk.length
-      } replacements`
-    );
-
-    // Send chunk processing start update
-    sendProgressUpdate(
-      commandId,
-      "set_multiple_text_contents",
-      "in_progress",
-      Math.round(5 + (chunkIndex / chunks.length) * 90), // 5-95% for processing
-      text.length,
-      successCount + failureCount,
-      `Processing text replacements chunk ${chunkIndex + 1}/${chunks.length}`,
-      {
-        currentChunk: chunkIndex + 1,
-        totalChunks: chunks.length,
-        successCount,
-        failureCount,
-      }
-    );
-
-    // Process replacements within a chunk in parallel
-    const chunkPromises = chunk.map(async (replacement) => {
-      if (!replacement.nodeId || replacement.text === undefined) {
-        console.error(`Missing nodeId or text for replacement`);
-        return {
-          success: false,
-          nodeId: replacement.nodeId || "unknown",
-          error: "Missing nodeId or text in replacement entry",
-        };
-      }
-
-      try {
-        console.log(
-          `Attempting to replace text in node: ${replacement.nodeId}`
-        );
-
-        // Get the text node to update (just to check it exists and get original text)
-        const textNode = await figma.getNodeByIdAsync(replacement.nodeId);
-
-        if (!textNode) {
-          console.error(`Text node not found: ${replacement.nodeId}`);
-          return {
-            success: false,
-            nodeId: replacement.nodeId,
-            error: `Node not found: ${replacement.nodeId}`,
-          };
+        if (figma.editorType !== 'figma') {
+            const payload = { code: "unsupported_editor_type", message: "Style APIs are only available in Figma Design", details: { editorType: figma.editorType } };
+            logger.error("❌ create_grid_style failed", { code: payload.code, originalError: payload.message, details: payload.details });
+            throw new Error(JSON.stringify(payload));
+        }
+        if (typeof name !== 'string' || name.trim().length === 0) {
+            const payload = { code: "missing_parameter", message: "'name' is required and must be a non-empty string", details: { name } };
+            logger.error("❌ create_grid_style failed", { code: payload.code, originalError: payload.message, details: payload.details });
+            throw new Error(JSON.stringify(payload));
+        }
+        if (!Array.isArray(layoutGrids) || layoutGrids.length === 0) {
+            const payload = { code: "invalid_parameter", message: "'layoutGrids' must be a non-empty array of LayoutGrid objects", details: { layoutGridsType: Array.isArray(layoutGrids) ? 'array' : typeof layoutGrids } };
+            logger.error("❌ create_grid_style failed", { code: payload.code, originalError: payload.message, details: payload.details });
+            throw new Error(JSON.stringify(payload));
         }
 
-        if (textNode.type !== "TEXT") {
-          console.error(
-            `Node is not a text node: ${replacement.nodeId} (type: ${textNode.type})`
-          );
-          return {
-            success: false,
-            nodeId: replacement.nodeId,
-            error: `Node is not a text node: ${replacement.nodeId} (type: ${textNode.type})`,
-          };
+        const conflictMode = (onConflict === 'skip' || onConflict === 'suffix' || onConflict === 'error') ? onConflict : 'error';
+        const existing = await figma.getLocalGridStylesAsync();
+        const exact = existing.find(s => String(s.name) === name);
+        if (exact) {
+            if (conflictMode === 'skip') {
+            logger.info("✅ create_grid_style skipped (name exists)", { styleId: exact.id, name: exact.name });
+            return { success: true, summary: `Skipped: grid style '${name}' already exists`, modified_node_ids: [], created_style_id: exact.id, name: exact.name, type: 'grid', skipped: true };
+            }
+            if (conflictMode === 'error') {
+                const payload = { code: "conflict_style_name", message: `A grid style named '${name}' already exists`, details: { name, existingStyleId: exact.id } };
+                logger.error("❌ create_grid_style failed", { code: payload.code, originalError: payload.message, details: payload.details });
+                throw new Error(JSON.stringify(payload));
+            }
         }
 
-        // Save original text for the result
-        const originalText = textNode.characters;
-        console.log(`Original text: "${originalText}"`);
-        console.log(`Will translate to: "${replacement.text}"`);
+        const gridStyle = figma.createGridStyle();
+        if (exact && conflictMode === 'suffix') {
+            let i = 2; let candidate = `${name} (${i})`;
+            const names = new Set(existing.map(s => String(s.name)));
+            while (names.has(candidate)) { i += 1; candidate = `${name} (${i})`; }
+            gridStyle.name = candidate;
+        } else {
+            gridStyle.name = name;
+        }
+        gridStyle.layoutGrids = layoutGrids;
 
-        // Highlight the node before changing text
-        let originalFills;
+        const result = { success: true, summary: `Created grid style '${gridStyle.name}'`, modified_node_ids: [], created_style_id: gridStyle.id, name: gridStyle.name, type: 'grid' };
+        logger.info("✅ create_grid_style succeeded", { styleId: gridStyle.id, name: gridStyle.name });
+        return result;
+    } catch (error) {
         try {
-          // Save original fills for restoration later
-          originalFills = JSON.parse(JSON.stringify(textNode.fills));
-          // Apply highlight color (orange with 30% opacity)
-          textNode.fills = [
-            {
-              type: "SOLID",
-              color: { r: 1, g: 0.5, b: 0 },
-              opacity: 0.3,
-            },
-          ];
-        } catch (highlightErr) {
-          console.error(
-            `Error highlighting text node: ${highlightErr.message}`
-          );
-          // Continue anyway, highlighting is just visual feedback
-        }
-
-        // Use the existing setTextContent function to handle font loading and text setting
-        await setTextContent({
-          nodeId: replacement.nodeId,
-          text: replacement.text,
-        });
-
-        // Keep highlight for a moment after text change, then restore original fills
-        if (originalFills) {
-          try {
-            // Use delay function for consistent timing
-            await delay(500);
-            textNode.fills = originalFills;
-          } catch (restoreErr) {
-            console.error(`Error restoring fills: ${restoreErr.message}`);
-          }
-        }
-
-        console.log(
-          `Successfully replaced text in node: ${replacement.nodeId}`
-        );
-        return {
-          success: true,
-          nodeId: replacement.nodeId,
-          originalText: originalText,
-          translatedText: replacement.text,
-        };
-      } catch (error) {
-        console.error(
-          `Error replacing text in node ${replacement.nodeId}: ${error.message}`
-        );
-        return {
-          success: false,
-          nodeId: replacement.nodeId,
-          error: `Error applying replacement: ${error.message}`,
-        };
-      }
-    });
-
-    // Wait for all replacements in this chunk to complete
-    const chunkResults = await Promise.all(chunkPromises);
-
-    // Process results for this chunk
-    chunkResults.forEach((result) => {
-      if (result.success) {
-        successCount++;
-      } else {
-        failureCount++;
-      }
-      results.push(result);
-    });
-
-    // Send chunk processing complete update with partial results
-    sendProgressUpdate(
-      commandId,
-      "set_multiple_text_contents",
-      "in_progress",
-      Math.round(5 + ((chunkIndex + 1) / chunks.length) * 90), // 5-95% for processing
-      text.length,
-      successCount + failureCount,
-      `Completed chunk ${chunkIndex + 1}/${chunks.length
-      }. ${successCount} successful, ${failureCount} failed so far.`,
-      {
-        currentChunk: chunkIndex + 1,
-        totalChunks: chunks.length,
-        successCount,
-        failureCount,
-        chunkResults: chunkResults,
-      }
-    );
-
-    // Add a small delay between chunks to avoid overloading Figma
-    if (chunkIndex < chunks.length - 1) {
-      console.log("Pausing between chunks to avoid overloading Figma...");
-      await delay(1000); // 1 second delay between chunks
+            const payload = JSON.parse((error && error.message) || String(error));
+            if (payload && payload.code) {
+                logger.error("❌ create_grid_style failed", { code: payload.code, originalError: (error && error.message) || String(error), details: payload.details || {} });
+                throw new Error(JSON.stringify(payload));
+            }
+        } catch (_) {}
+        const payload = { code: "unknown_plugin_error", message: (error && error.message) || String(error), details: {} };
+        logger.error("❌ create_grid_style failed", { code: payload.code, originalError: payload.message, details: payload.details });
+        throw new Error(JSON.stringify(payload));
     }
-  }
-
-  console.log(
-    `Replacement complete: ${successCount} successful, ${failureCount} failed`
-  );
-
-  // Send completed progress update
-  sendProgressUpdate(
-    commandId,
-    "set_multiple_text_contents",
-    "completed",
-    100,
-    text.length,
-    successCount + failureCount,
-    `Text replacement complete: ${successCount} successful, ${failureCount} failed`,
-    {
-      totalReplacements: text.length,
-      replacementsApplied: successCount,
-      replacementsFailed: failureCount,
-      completedInChunks: chunks.length,
-      results: results,
-    }
-  );
-
-  return {
-    success: successCount > 0,
-    nodeId: nodeId,
-    replacementsApplied: successCount,
-    replacementsFailed: failureCount,
-    totalReplacements: text.length,
-    results: results,
-    completedInChunks: chunks.length,
-    commandId,
-  };
 }
 
-// Function to generate simple UUIDs for command IDs
-function generateCommandId() {
-  return (
-    "cmd_" +
-    Math.random().toString(36).substring(2, 15) +
-    Math.random().toString(36).substring(2, 15)
-  );
-}
 
-async function getAnnotations(params) {
+ 
+
+// ======================================================
+// Undo Group Wrapper: withUndoGroup(label, actions, options)
+// - Ensures step-level logging
+// - Optionally reveals affected nodes for UX via scrollAndZoomIntoView
+// - Does NOT call figma.commitUndo() automatically (split only when intentional)
+// ======================================================
+async function withUndoGroup(label, actions, options) {
+  const opts = options || {};
+  const reveal = opts.autoReveal !== false;
+  const log = (globalThis.logger && typeof globalThis.logger.info === 'function') ? globalThis.logger : logger;
+  log.info(`▶️ Step start`, { label });
   try {
-    const { nodeId, includeCategories = true } = params;
+    const result = await actions();
 
-    // Get categories first if needed
-    let categoriesMap = {};
-    if (includeCategories) {
-      const categories = await figma.annotations.getAnnotationCategoriesAsync();
-      categoriesMap = categories.reduce((map, category) => {
-        map[category.id] = {
-          id: category.id,
-          label: category.label,
-          color: category.color,
-          isPreset: category.isPreset,
-        };
-        return map;
-      }, {});
+    // Determine affected node ids, if any
+    const affectedIds = new Set();
+    if (result && typeof result === 'object') {
+      if (Array.isArray(result.modified_node_ids)) {
+        for (const id of result.modified_node_ids) if (typeof id === 'string' && id.length > 0) affectedIds.add(id);
+      }
+      if (result.node && result.node.id) affectedIds.add(result.node.id);
+      if (result.node_id) affectedIds.add(result.node_id);
+      if (result.created_node_id) affectedIds.add(result.created_node_id);
+      if (Array.isArray(result.resolved_node_ids)) {
+        for (const id of result.resolved_node_ids) if (typeof id === 'string' && id.length > 0) affectedIds.add(id);
+      }
+      // Heuristic: if search returned a single match, reveal it
+      if (Array.isArray(result.matching_nodes) && result.matching_nodes.length === 1 && result.matching_nodes[0] && result.matching_nodes[0].id) {
+        affectedIds.add(result.matching_nodes[0].id);
+      }
+    }
+    if (opts && Array.isArray(opts.candidate_ids)) {
+      for (const id of opts.candidate_ids) if (typeof id === 'string' && id.length > 0) affectedIds.add(id);
     }
 
-    if (nodeId) {
-      // Get annotations for a specific node
-      const node = await figma.getNodeByIdAsync(nodeId);
-      if (!node) {
-        throw new Error(`Node not found: ${nodeId}`);
-      }
-
-      if (!("annotations" in node)) {
-        throw new Error(`Node type ${node.type} does not support annotations`);
-      }
-
-      // Collect annotations from this node and all its descendants
-      const mergedAnnotations = [];
-      const collect = async (n) => {
-        if ("annotations" in n && n.annotations && n.annotations.length > 0) {
-          for (const a of n.annotations) {
-            mergedAnnotations.push({ nodeId: n.id, annotation: a });
-          }
+    if (reveal && affectedIds.size > 0) {
+      try {
+        // Resolve nodes; limit to a reasonable number to avoid perf issues
+        const MAX_NODES_TO_REVEAL = 50;
+        const ids = Array.from(affectedIds).slice(0, MAX_NODES_TO_REVEAL);
+        const nodes = [];
+        for (const id of ids) {
+          try { const n = await figma.getNodeByIdAsync(id); if (n) nodes.push(n); } catch (_) {}
         }
-        if ("children" in n) {
-          for (const child of n.children) {
-            await collect(child);
+        if (nodes.length > 0) {
+          const primary = nodes[0];
+          // Switch to the page of the primary node
+          let p = primary.parent;
+          while (p && p.type !== 'PAGE') p = p.parent;
+          if (p && p.id && figma.currentPage && p.id !== figma.currentPage.id) {
+            try { figma.currentPage = p; } catch (_) {}
           }
-        }
-      };
-      await collect(node);
-
-      const result = {
-        nodeId: node.id,
-        name: node.name,
-        annotations: mergedAnnotations,
-      };
-
-      if (includeCategories) {
-        result.categories = Object.values(categoriesMap);
-      }
-
-      return result;
-    } else {
-      // Get all annotations in the current page
-      const annotations = [];
-      const processNode = async (node) => {
-        if (
-          "annotations" in node &&
-          node.annotations &&
-          node.annotations.length > 0
-        ) {
-          annotations.push({
-            nodeId: node.id,
-            name: node.name,
-            annotations: node.annotations,
+          // Keep selection minimal to avoid disrupting user workflow
+          try { figma.currentPage.selection = [primary]; } catch (_) {}
+          // Only reveal nodes that are on the same page as the primary
+          const pageId = (p && p.id) ? p.id : (figma.currentPage && figma.currentPage.id);
+          const nodesOnPage = nodes.filter((n) => {
+            let q = n.parent; let page = null;
+            while (q && q.type !== 'PAGE') q = q.parent;
+            page = q;
+            return page && page.id === pageId;
           });
+          try { figma.viewport.scrollAndZoomIntoView(nodesOnPage.length > 0 ? nodesOnPage : [primary]); } catch (_) {}
         }
-        if ("children" in node) {
-          for (const child of node.children) {
-            await processNode(child);
-          }
-        }
-      };
-
-      // Start from current page
-      await processNode(figma.currentPage);
-
-      const result = {
-        annotatedNodes: annotations,
-      };
-
-      if (includeCategories) {
-        result.categories = Object.values(categoriesMap);
-      }
-
-      return result;
+      } catch (_) {}
     }
+
+    log.info(`✅ Step success`, { label });
+    return result;
   } catch (error) {
-    console.error("Error in getAnnotations:", error);
+    log.error(`❌ Step failed`, { label, error: (error && error.message) || String(error) });
     throw error;
   }
-}
-
-async function setAnnotation(params) {
-  try {
-    console.log("=== setAnnotation Debug Start ===");
-    console.log("Input params:", JSON.stringify(params, null, 2));
-
-    const { nodeId, annotationId, labelMarkdown, categoryId, properties } =
-      params;
-
-    // Validate required parameters
-    if (!nodeId) {
-      console.error("Validation failed: Missing nodeId");
-      return { success: false, error: "Missing nodeId" };
-    }
-
-    if (!labelMarkdown) {
-      console.error("Validation failed: Missing labelMarkdown");
-      return { success: false, error: "Missing labelMarkdown" };
-    }
-
-    console.log("Attempting to get node:", nodeId);
-    // Get and validate node
-    const node = await figma.getNodeByIdAsync(nodeId);
-    console.log("Node lookup result:", {
-      id: nodeId,
-      found: !!node,
-      type: node ? node.type : undefined,
-      name: node ? node.name : undefined,
-      hasAnnotations: node ? "annotations" in node : false,
-    });
-
-    if (!node) {
-      console.error("Node lookup failed:", nodeId);
-      return { success: false, error: `Node not found: ${nodeId}` };
-    }
-
-    // Validate node supports annotations
-    if (!("annotations" in node)) {
-      console.error("Node annotation support check failed:", {
-        nodeType: node.type,
-        nodeId: node.id,
-      });
-      return {
-        success: false,
-        error: `Node type ${node.type} does not support annotations`,
-      };
-    }
-
-    // Create the annotation object
-    const newAnnotation = {
-      labelMarkdown,
-    };
-
-    // Validate and add categoryId if provided
-    if (categoryId) {
-      console.log("Adding categoryId to annotation:", categoryId);
-      newAnnotation.categoryId = categoryId;
-    }
-
-    // Validate and add properties if provided
-    if (properties && Array.isArray(properties) && properties.length > 0) {
-      console.log(
-        "Adding properties to annotation:",
-        JSON.stringify(properties, null, 2)
-      );
-      newAnnotation.properties = properties;
-    }
-
-    // Log current annotations before update
-    console.log("Current node annotations:", node.annotations);
-
-    // Overwrite annotations
-    console.log(
-      "Setting new annotation:",
-      JSON.stringify(newAnnotation, null, 2)
-    );
-    node.annotations = [newAnnotation];
-
-    // Verify the update
-    console.log("Updated node annotations:", node.annotations);
-    console.log("=== setAnnotation Debug End ===");
-
-    return {
-      success: true,
-      nodeId: node.id,
-      name: node.name,
-      annotations: node.annotations,
-    };
-  } catch (error) {
-    console.error("=== setAnnotation Error ===");
-    console.error("Error details:", {
-      message: error.message,
-      stack: error.stack,
-      params: JSON.stringify(params, null, 2),
-    });
-    return { success: false, error: error.message };
-  }
-}
-
-/**
- * Scan for nodes with specific types within a node
- * @param {Object} params - Parameters object
- * @param {string} params.nodeId - ID of the node to scan within
- * @param {Array<string>} params.types - Array of node types to find (e.g. ['COMPONENT', 'FRAME'])
- * @returns {Object} - Object containing found nodes
- */
-async function scanNodesByTypes(params) {
-  console.log(`Starting to scan nodes by types from node ID: ${params.nodeId}`);
-  const { nodeId, types = [] } = params || {};
-
-  if (!types || types.length === 0) {
-    throw new Error("No types specified to search for");
-  }
-
-  const node = await figma.getNodeByIdAsync(nodeId);
-
-  if (!node) {
-    throw new Error(`Node with ID ${nodeId} not found`);
-  }
-
-  // Simple implementation without chunking
-  const matchingNodes = [];
-
-  // Send a single progress update to notify start
-  const commandId = generateCommandId();
-  sendProgressUpdate(
-    commandId,
-    "scan_nodes_by_types",
-    "started",
-    0,
-    1,
-    0,
-    `Starting scan of node "${node.name || nodeId}" for types: ${types.join(
-      ", "
-    )}`,
-    null
-  );
-
-  // Recursively find nodes with specified types
-  await findNodesByTypes(node, types, matchingNodes);
-
-  // Send completion update
-  sendProgressUpdate(
-    commandId,
-    "scan_nodes_by_types",
-    "completed",
-    100,
-    matchingNodes.length,
-    matchingNodes.length,
-    `Scan complete. Found ${matchingNodes.length} matching nodes.`,
-    { matchingNodes }
-  );
-
-  return {
-    success: true,
-    message: `Found ${matchingNodes.length} matching nodes.`,
-    count: matchingNodes.length,
-    matchingNodes: matchingNodes,
-    searchedTypes: types,
-  };
-}
-
-/**
- * Helper function to recursively find nodes with specific types
- * @param {SceneNode} node - The root node to start searching from
- * @param {Array<string>} types - Array of node types to find
- * @param {Array} matchingNodes - Array to store found nodes
- */
-async function findNodesByTypes(node, types, matchingNodes = []) {
-  // Skip invisible nodes
-  if (node.visible === false) return;
-
-  // Check if this node is one of the specified types
-  if (types.includes(node.type)) {
-    // Create a minimal representation with just ID, type and bbox
-    matchingNodes.push({
-      id: node.id,
-      name: node.name || `Unnamed ${node.type}`,
-      type: node.type,
-      // Basic bounding box info
-      bbox: {
-        x: typeof node.x === "number" ? node.x : 0,
-        y: typeof node.y === "number" ? node.y : 0,
-        width: typeof node.width === "number" ? node.width : 0,
-        height: typeof node.height === "number" ? node.height : 0,
-      },
-    });
-  }
-
-  // Recursively process children of container nodes
-  if ("children" in node) {
-    for (const child of node.children) {
-      await findNodesByTypes(child, types, matchingNodes);
-    }
-  }
-}
-
-// Set multiple annotations with async progress updates
-async function setMultipleAnnotations(params) {
-  console.log("=== setMultipleAnnotations Debug Start ===");
-  console.log("Input params:", JSON.stringify(params, null, 2));
-
-  const { nodeId, annotations } = params;
-
-  if (!annotations || annotations.length === 0) {
-    console.error("Validation failed: No annotations provided");
-    return { success: false, error: "No annotations provided" };
-  }
-
-  console.log(
-    `Processing ${annotations.length} annotations for node ${nodeId}`
-  );
-
-  const results = [];
-  let successCount = 0;
-  let failureCount = 0;
-
-  // Process annotations sequentially
-  for (let i = 0; i < annotations.length; i++) {
-    const annotation = annotations[i];
-    console.log(
-      `\nProcessing annotation ${i + 1}/${annotations.length}:`,
-      JSON.stringify(annotation, null, 2)
-    );
-
-    try {
-      console.log("Calling setAnnotation with params:", {
-        nodeId: annotation.nodeId,
-        labelMarkdown: annotation.labelMarkdown,
-        categoryId: annotation.categoryId,
-        properties: annotation.properties,
-      });
-
-      const result = await setAnnotation({
-        nodeId: annotation.nodeId,
-        labelMarkdown: annotation.labelMarkdown,
-        categoryId: annotation.categoryId,
-        properties: annotation.properties,
-      });
-
-      console.log("setAnnotation result:", JSON.stringify(result, null, 2));
-
-      if (result.success) {
-        successCount++;
-        results.push({ success: true, nodeId: annotation.nodeId });
-        console.log(`✓ Annotation ${i + 1} applied successfully`);
-      } else {
-        failureCount++;
-        results.push({
-          success: false,
-          nodeId: annotation.nodeId,
-          error: result.error,
-        });
-        console.error(`✗ Annotation ${i + 1} failed:`, result.error);
-      }
-    } catch (error) {
-      failureCount++;
-      const errorResult = {
-        success: false,
-        nodeId: annotation.nodeId,
-        error: error.message,
-      };
-      results.push(errorResult);
-      console.error(`✗ Annotation ${i + 1} failed with error:`, error);
-      console.error("Error details:", {
-        message: error.message,
-        stack: error.stack,
-      });
-    }
-  }
-
-  const summary = {
-    success: successCount > 0,
-    annotationsApplied: successCount,
-    annotationsFailed: failureCount,
-    totalAnnotations: annotations.length,
-    results: results,
-  };
-
-  console.log("\n=== setMultipleAnnotations Summary ===");
-  console.log(JSON.stringify(summary, null, 2));
-  console.log("=== setMultipleAnnotations Debug End ===");
-
-  return summary;
-}
-
-async function deleteMultipleNodes(params) {
-  const { nodeIds } = params || {};
-  const commandId = generateCommandId();
-
-  if (!nodeIds || !Array.isArray(nodeIds) || nodeIds.length === 0) {
-    const errorMsg = "Missing or invalid nodeIds parameter";
-    sendProgressUpdate(
-      commandId,
-      "delete_multiple_nodes",
-      "error",
-      0,
-      0,
-      0,
-      errorMsg,
-      { error: errorMsg }
-    );
-    throw new Error(errorMsg);
-  }
-
-  console.log(`Starting deletion of ${nodeIds.length} nodes`);
-
-  // Send started progress update
-  sendProgressUpdate(
-    commandId,
-    "delete_multiple_nodes",
-    "started",
-    0,
-    nodeIds.length,
-    0,
-    `Starting deletion of ${nodeIds.length} nodes`,
-    { totalNodes: nodeIds.length }
-  );
-
-  const results = [];
-  let successCount = 0;
-  let failureCount = 0;
-
-  // Process nodes in chunks of 5 to avoid overwhelming Figma
-  const CHUNK_SIZE = 5;
-  const chunks = [];
-
-  for (let i = 0; i < nodeIds.length; i += CHUNK_SIZE) {
-    chunks.push(nodeIds.slice(i, i + CHUNK_SIZE));
-  }
-
-  console.log(`Split ${nodeIds.length} deletions into ${chunks.length} chunks`);
-
-  // Send chunking info update
-  sendProgressUpdate(
-    commandId,
-    "delete_multiple_nodes",
-    "in_progress",
-    5,
-    nodeIds.length,
-    0,
-    `Preparing to delete ${nodeIds.length} nodes using ${chunks.length} chunks`,
-    {
-      totalNodes: nodeIds.length,
-      chunks: chunks.length,
-      chunkSize: CHUNK_SIZE,
-    }
-  );
-
-  // Process each chunk sequentially
-  for (let chunkIndex = 0; chunkIndex < chunks.length; chunkIndex++) {
-    const chunk = chunks[chunkIndex];
-    console.log(
-      `Processing chunk ${chunkIndex + 1}/${chunks.length} with ${chunk.length
-      } nodes`
-    );
-
-    // Send chunk processing start update
-    sendProgressUpdate(
-      commandId,
-      "delete_multiple_nodes",
-      "in_progress",
-      Math.round(5 + (chunkIndex / chunks.length) * 90),
-      nodeIds.length,
-      successCount + failureCount,
-      `Processing deletion chunk ${chunkIndex + 1}/${chunks.length}`,
-      {
-        currentChunk: chunkIndex + 1,
-        totalChunks: chunks.length,
-        successCount,
-        failureCount,
-      }
-    );
-
-    // Process deletions within a chunk in parallel
-    const chunkPromises = chunk.map(async (nodeId) => {
-      try {
-        const node = await figma.getNodeByIdAsync(nodeId);
-
-        if (!node) {
-          console.error(`Node not found: ${nodeId}`);
-          return {
-            success: false,
-            nodeId: nodeId,
-            error: `Node not found: ${nodeId}`,
-          };
-        }
-
-        // Save node info before deleting
-        const nodeInfo = {
-          id: node.id,
-          name: node.name,
-          type: node.type,
-        };
-
-        // Delete the node
-        node.remove();
-
-        console.log(`Successfully deleted node: ${nodeId}`);
-        return {
-          success: true,
-          nodeId: nodeId,
-          nodeInfo: nodeInfo,
-        };
-      } catch (error) {
-        console.error(`Error deleting node ${nodeId}: ${error.message}`);
-        return {
-          success: false,
-          nodeId: nodeId,
-          error: error.message,
-        };
-      }
-    });
-
-    // Wait for all deletions in this chunk to complete
-    const chunkResults = await Promise.all(chunkPromises);
-
-    // Process results for this chunk
-    chunkResults.forEach((result) => {
-      if (result.success) {
-        successCount++;
-      } else {
-        failureCount++;
-      }
-      results.push(result);
-    });
-
-    // Send chunk processing complete update
-    sendProgressUpdate(
-      commandId,
-      "delete_multiple_nodes",
-      "in_progress",
-      Math.round(5 + ((chunkIndex + 1) / chunks.length) * 90),
-      nodeIds.length,
-      successCount + failureCount,
-      `Completed chunk ${chunkIndex + 1}/${chunks.length
-      }. ${successCount} successful, ${failureCount} failed so far.`,
-      {
-        currentChunk: chunkIndex + 1,
-        totalChunks: chunks.length,
-        successCount,
-        failureCount,
-        chunkResults: chunkResults,
-      }
-    );
-
-    // Add a small delay between chunks
-    if (chunkIndex < chunks.length - 1) {
-      console.log("Pausing between chunks...");
-      await delay(1000);
-    }
-  }
-
-  console.log(
-    `Deletion complete: ${successCount} successful, ${failureCount} failed`
-  );
-
-  // Send completed progress update
-  sendProgressUpdate(
-    commandId,
-    "delete_multiple_nodes",
-    "completed",
-    100,
-    nodeIds.length,
-    successCount + failureCount,
-    `Node deletion complete: ${successCount} successful, ${failureCount} failed`,
-    {
-      totalNodes: nodeIds.length,
-      nodesDeleted: successCount,
-      nodesFailed: failureCount,
-      completedInChunks: chunks.length,
-      results: results,
-    }
-  );
-
-  return {
-    success: successCount > 0,
-    nodesDeleted: successCount,
-    nodesFailed: failureCount,
-    totalNodes: nodeIds.length,
-    results: results,
-    completedInChunks: chunks.length,
-    commandId,
-  };
-}
-
-// Implementation for getInstanceOverrides function
-async function getInstanceOverrides(instanceNode = null) {
-  console.log("=== getInstanceOverrides called ===");
-
-  let sourceInstance = null;
-
-  // Check if an instance node was passed directly
-  if (instanceNode) {
-    console.log("Using provided instance node");
-
-    // Validate that the provided node is an instance
-    if (instanceNode.type !== "INSTANCE") {
-      console.error("Provided node is not an instance");
-      figma.notify("Provided node is not a component instance");
-      return { success: false, message: "Provided node is not a component instance" };
-    }
-
-    sourceInstance = instanceNode;
-  } else {
-    // No node provided, use selection
-    console.log("No node provided, using current selection");
-
-    // Get the current selection
-    const selection = figma.currentPage.selection;
-
-    // Check if there's anything selected
-    if (selection.length === 0) {
-      console.log("No nodes selected");
-      figma.notify("Please select at least one instance");
-      return { success: false, message: "No nodes selected" };
-    }
-
-    // Filter for instances in the selection
-    const instances = selection.filter(node => node.type === "INSTANCE");
-
-    if (instances.length === 0) {
-      console.log("No instances found in selection");
-      figma.notify("Please select at least one component instance");
-      return { success: false, message: "No instances found in selection" };
-    }
-
-    // Take the first instance from the selection
-    sourceInstance = instances[0];
-  }
-
-  try {
-    console.log(`Getting instance information:`);
-    console.log(sourceInstance);
-
-    // Get component overrides and main component
-    const overrides = sourceInstance.overrides || [];
-    console.log(`  Raw Overrides:`, overrides);
-
-    // Get main component
-    const mainComponent = await sourceInstance.getMainComponentAsync();
-    if (!mainComponent) {
-      console.error("Failed to get main component");
-      figma.notify("Failed to get main component");
-      return { success: false, message: "Failed to get main component" };
-    }
-
-    // return data to MCP server
-    const returnData = {
-      success: true,
-      message: `Got component information from "${sourceInstance.name}" for overrides.length: ${overrides.length}`,
-      sourceInstanceId: sourceInstance.id,
-      mainComponentId: mainComponent.id,
-      overridesCount: overrides.length
-    };
-
-    console.log("Data to return to MCP server:", returnData);
-    figma.notify(`Got component information from "${sourceInstance.name}"`);
-
-    return returnData;
-  } catch (error) {
-    console.error("Error in getInstanceOverrides:", error);
-    figma.notify(`Error: ${error.message}`);
-    return {
-      success: false,
-      message: `Error: ${error.message}`
-    };
-  }
-}
-
-/**
- * Helper function to validate and get target instances
- * @param {string[]} targetNodeIds - Array of instance node IDs
- * @returns {instanceNode[]} targetInstances - Array of target instances
- */
-async function getValidTargetInstances(targetNodeIds) {
-  let targetInstances = [];
-
-  // Handle array of instances or single instance
-  if (Array.isArray(targetNodeIds)) {
-    if (targetNodeIds.length === 0) {
-      return { success: false, message: "No instances provided" };
-    }
-    for (const targetNodeId of targetNodeIds) {
-      const targetNode = await figma.getNodeByIdAsync(targetNodeId);
-      if (targetNode && targetNode.type === "INSTANCE") {
-        targetInstances.push(targetNode);
-      }
-    }
-    if (targetInstances.length === 0) {
-      return { success: false, message: "No valid instances provided" };
-    }
-  } else {
-    return { success: false, message: "Invalid target node IDs provided" };
-  }
-
-
-  return { success: true, message: "Valid target instances provided", targetInstances };
-}
-
-/**
- * Helper function to validate and get saved override data
- * @param {string} sourceInstanceId - Source instance ID
- * @returns {Promise<Object>} - Validation result with source instance data or error
- */
-async function getSourceInstanceData(sourceInstanceId) {
-  if (!sourceInstanceId) {
-    return { success: false, message: "Missing source instance ID" };
-  }
-
-  // Get source instance by ID
-  const sourceInstance = await figma.getNodeByIdAsync(sourceInstanceId);
-  if (!sourceInstance) {
-    return {
-      success: false,
-      message: "Source instance not found. The original instance may have been deleted."
-    };
-  }
-
-  // Verify it's an instance
-  if (sourceInstance.type !== "INSTANCE") {
-    return {
-      success: false,
-      message: "Source node is not a component instance."
-    };
-  }
-
-  // Get main component
-  const mainComponent = await sourceInstance.getMainComponentAsync();
-  if (!mainComponent) {
-    return {
-      success: false,
-      message: "Failed to get main component from source instance."
-    };
-  }
-
-  return {
-    success: true,
-    sourceInstance,
-    mainComponent,
-    overrides: sourceInstance.overrides || []
-  };
-}
-
-/**
- * Sets saved overrides to the selected component instance(s)
- * @param {InstanceNode[] | null} targetInstances - Array of instance nodes to set overrides to
- * @param {Object} sourceResult - Source instance data from getSourceInstanceData
- * @returns {Promise<Object>} - Result of the set operation
- */
-async function setInstanceOverrides(targetInstances, sourceResult) {
-  try {
-
-
-    const { sourceInstance, mainComponent, overrides } = sourceResult;
-
-    console.log(`Processing ${targetInstances.length} instances with ${overrides.length} overrides`);
-    console.log(`Source instance: ${sourceInstance.id}, Main component: ${mainComponent.id}`);
-    console.log(`Overrides:`, overrides);
-
-    // Process all instances
-    const results = [];
-    let totalAppliedCount = 0;
-
-    for (const targetInstance of targetInstances) {
-      try {
-        // // Skip if trying to apply to the source instance itself
-        // if (targetInstance.id === sourceInstance.id) {
-        //   console.log(`Skipping source instance itself: ${targetInstance.id}`);
-        //   results.push({
-        //     success: false,
-        //     instanceId: targetInstance.id,
-        //     instanceName: targetInstance.name,
-        //     message: "This is the source instance itself, skipping"
-        //   });
-        //   continue;
-        // }
-
-        // Swap component
-        try {
-          targetInstance.swapComponent(mainComponent);
-          console.log(`Swapped component for instance "${targetInstance.name}"`);
-        } catch (error) {
-          console.error(`Error swapping component for instance "${targetInstance.name}":`, error);
-          results.push({
-            success: false,
-            instanceId: targetInstance.id,
-            instanceName: targetInstance.name,
-            message: `Error: ${error.message}`
-          });
-        }
-
-        // Prepare overrides by replacing node IDs
-        let appliedCount = 0;
-
-        // Apply each override
-        for (const override of overrides) {
-          // Skip if no ID or overriddenFields
-          if (!override.id || !override.overriddenFields || override.overriddenFields.length === 0) {
-            continue;
-          }
-
-          // Replace source instance ID with target instance ID in the node path
-          const overrideNodeId = override.id.replace(sourceInstance.id, targetInstance.id);
-          const overrideNode = await figma.getNodeByIdAsync(overrideNodeId);
-
-          if (!overrideNode) {
-            console.log(`Override node not found: ${overrideNodeId}`);
-            continue;
-          }
-
-          // Get source node to copy properties from
-          const sourceNode = await figma.getNodeByIdAsync(override.id);
-          if (!sourceNode) {
-            console.log(`Source node not found: ${override.id}`);
-            continue;
-          }
-
-          // Apply each overridden field
-          let fieldApplied = false;
-          for (const field of override.overriddenFields) {
-            try {
-              if (field === "componentProperties") {
-                // Apply component properties
-                if (sourceNode.componentProperties && overrideNode.componentProperties) {
-                  const properties = {};
-                  for (const key in sourceNode.componentProperties) {
-                    // if INSTANCE_SWAP use id, otherwise use value
-                    if (sourceNode.componentProperties[key].type === 'INSTANCE_SWAP') {
-                      properties[key] = sourceNode.componentProperties[key].value;
-                    
-                    } else {
-                      properties[key] = sourceNode.componentProperties[key].value;
-                    }
-                  }
-                  overrideNode.setProperties(properties);
-                  fieldApplied = true;
-                }
-              } else if (field === "characters" && overrideNode.type === "TEXT") {
-                // For text nodes, need to load fonts first
-                await figma.loadFontAsync(overrideNode.fontName);
-                overrideNode.characters = sourceNode.characters;
-                fieldApplied = true;
-              } else if (field in overrideNode) {
-                // Direct property assignment
-                overrideNode[field] = sourceNode[field];
-                fieldApplied = true;
-              }
-            } catch (fieldError) {
-              console.error(`Error applying field ${field}:`, fieldError);
-            }
-          }
-
-          if (fieldApplied) {
-            appliedCount++;
-          }
-        }
-
-        if (appliedCount > 0) {
-          totalAppliedCount += appliedCount;
-          results.push({
-            success: true,
-            instanceId: targetInstance.id,
-            instanceName: targetInstance.name,
-            appliedCount
-          });
-          console.log(`Applied ${appliedCount} overrides to "${targetInstance.name}"`);
-        } else {
-          results.push({
-            success: false,
-            instanceId: targetInstance.id,
-            instanceName: targetInstance.name,
-            message: "No overrides were applied"
-          });
-        }
-      } catch (instanceError) {
-        console.error(`Error processing instance "${targetInstance.name}":`, instanceError);
-        results.push({
-          success: false,
-          instanceId: targetInstance.id,
-          instanceName: targetInstance.name,
-          message: `Error: ${instanceError.message}`
-        });
-      }
-    }
-
-    // Return results
-    if (totalAppliedCount > 0) {
-      const instanceCount = results.filter(r => r.success).length;
-      const message = `Applied ${totalAppliedCount} overrides to ${instanceCount} instances`;
-      figma.notify(message);
-      return {
-        success: true,
-        message,
-        totalCount: totalAppliedCount,
-        results
-      };
-    } else {
-      const message = "No overrides applied to any instance";
-      figma.notify(message);
-      return { success: false, message, results };
-    }
-
-  } catch (error) {
-    console.error("Error in setInstanceOverrides:", error);
-    const message = `Error: ${error.message}`;
-    figma.notify(message);
-    return { success: false, message };
-  }
-}
-
-async function setLayoutMode(params) {
-  const { nodeId, layoutMode = "NONE", layoutWrap = "NO_WRAP" } = params || {};
-
-  // Get the target node
-  const node = await figma.getNodeByIdAsync(nodeId);
-  if (!node) {
-    throw new Error(`Node with ID ${nodeId} not found`);
-  }
-
-  // Check if node is a frame or component that supports layoutMode
-  if (
-    node.type !== "FRAME" &&
-    node.type !== "COMPONENT" &&
-    node.type !== "COMPONENT_SET" &&
-    node.type !== "INSTANCE"
-  ) {
-    throw new Error(`Node type ${node.type} does not support layoutMode`);
-  }
-
-  // Set layout mode
-  node.layoutMode = layoutMode;
-
-  // Set layoutWrap if applicable
-  if (layoutMode !== "NONE") {
-    node.layoutWrap = layoutWrap;
-  }
-
-  return {
-    id: node.id,
-    name: node.name,
-    layoutMode: node.layoutMode,
-    layoutWrap: node.layoutWrap,
-  };
-}
-
-async function setPadding(params) {
-  const { nodeId, paddingTop, paddingRight, paddingBottom, paddingLeft } =
-    params || {};
-
-  // Get the target node
-  const node = await figma.getNodeByIdAsync(nodeId);
-  if (!node) {
-    throw new Error(`Node with ID ${nodeId} not found`);
-  }
-
-  // Check if node is a frame or component that supports padding
-  if (
-    node.type !== "FRAME" &&
-    node.type !== "COMPONENT" &&
-    node.type !== "COMPONENT_SET" &&
-    node.type !== "INSTANCE"
-  ) {
-    throw new Error(`Node type ${node.type} does not support padding`);
-  }
-
-  // Check if the node has auto-layout enabled
-  if (node.layoutMode === "NONE") {
-    throw new Error(
-      "Padding can only be set on auto-layout frames (layoutMode must not be NONE)"
-    );
-  }
-
-  // Set padding values if provided
-  if (paddingTop !== undefined) node.paddingTop = paddingTop;
-  if (paddingRight !== undefined) node.paddingRight = paddingRight;
-  if (paddingBottom !== undefined) node.paddingBottom = paddingBottom;
-  if (paddingLeft !== undefined) node.paddingLeft = paddingLeft;
-
-  return {
-    id: node.id,
-    name: node.name,
-    paddingTop: node.paddingTop,
-    paddingRight: node.paddingRight,
-    paddingBottom: node.paddingBottom,
-    paddingLeft: node.paddingLeft,
-  };
-}
-
-async function setAxisAlign(params) {
-  const { nodeId, primaryAxisAlignItems, counterAxisAlignItems } = params || {};
-
-  // Get the target node
-  const node = await figma.getNodeByIdAsync(nodeId);
-  if (!node) {
-    throw new Error(`Node with ID ${nodeId} not found`);
-  }
-
-  // Check if node is a frame or component that supports axis alignment
-  if (
-    node.type !== "FRAME" &&
-    node.type !== "COMPONENT" &&
-    node.type !== "COMPONENT_SET" &&
-    node.type !== "INSTANCE"
-  ) {
-    throw new Error(`Node type ${node.type} does not support axis alignment`);
-  }
-
-  // Check if the node has auto-layout enabled
-  if (node.layoutMode === "NONE") {
-    throw new Error(
-      "Axis alignment can only be set on auto-layout frames (layoutMode must not be NONE)"
-    );
-  }
-
-  // Validate and set primaryAxisAlignItems if provided
-  if (primaryAxisAlignItems !== undefined) {
-    if (
-      !["MIN", "MAX", "CENTER", "SPACE_BETWEEN"].includes(primaryAxisAlignItems)
-    ) {
-      throw new Error(
-        "Invalid primaryAxisAlignItems value. Must be one of: MIN, MAX, CENTER, SPACE_BETWEEN"
-      );
-    }
-    node.primaryAxisAlignItems = primaryAxisAlignItems;
-  }
-
-  // Validate and set counterAxisAlignItems if provided
-  if (counterAxisAlignItems !== undefined) {
-    if (!["MIN", "MAX", "CENTER", "BASELINE"].includes(counterAxisAlignItems)) {
-      throw new Error(
-        "Invalid counterAxisAlignItems value. Must be one of: MIN, MAX, CENTER, BASELINE"
-      );
-    }
-    // BASELINE is only valid for horizontal layout
-    if (
-      counterAxisAlignItems === "BASELINE" &&
-      node.layoutMode !== "HORIZONTAL"
-    ) {
-      throw new Error(
-        "BASELINE alignment is only valid for horizontal auto-layout frames"
-      );
-    }
-    node.counterAxisAlignItems = counterAxisAlignItems;
-  }
-
-  return {
-    id: node.id,
-    name: node.name,
-    primaryAxisAlignItems: node.primaryAxisAlignItems,
-    counterAxisAlignItems: node.counterAxisAlignItems,
-    layoutMode: node.layoutMode,
-  };
-}
-
-async function setLayoutSizing(params) {
-  const { nodeId, layoutSizingHorizontal, layoutSizingVertical } = params || {};
-
-  // Get the target node
-  const node = await figma.getNodeByIdAsync(nodeId);
-  if (!node) {
-    throw new Error(`Node with ID ${nodeId} not found`);
-  }
-
-  // Check if node is a frame or component that supports layout sizing
-  if (
-    node.type !== "FRAME" &&
-    node.type !== "COMPONENT" &&
-    node.type !== "COMPONENT_SET" &&
-    node.type !== "INSTANCE"
-  ) {
-    throw new Error(`Node type ${node.type} does not support layout sizing`);
-  }
-
-  // Check if the node has auto-layout enabled
-  if (node.layoutMode === "NONE") {
-    throw new Error(
-      "Layout sizing can only be set on auto-layout frames (layoutMode must not be NONE)"
-    );
-  }
-
-  // Validate and set layoutSizingHorizontal if provided
-  if (layoutSizingHorizontal !== undefined) {
-    if (!["FIXED", "HUG", "FILL"].includes(layoutSizingHorizontal)) {
-      throw new Error(
-        "Invalid layoutSizingHorizontal value. Must be one of: FIXED, HUG, FILL"
-      );
-    }
-    // HUG is only valid on auto-layout frames and text nodes
-    if (
-      layoutSizingHorizontal === "HUG" &&
-      !["FRAME", "TEXT"].includes(node.type)
-    ) {
-      throw new Error(
-        "HUG sizing is only valid on auto-layout frames and text nodes"
-      );
-    }
-    // FILL is only valid on auto-layout children
-    if (
-      layoutSizingHorizontal === "FILL" &&
-      (!node.parent || node.parent.layoutMode === "NONE")
-    ) {
-      throw new Error("FILL sizing is only valid on auto-layout children");
-    }
-    node.layoutSizingHorizontal = layoutSizingHorizontal;
-  }
-
-  // Validate and set layoutSizingVertical if provided
-  if (layoutSizingVertical !== undefined) {
-    if (!["FIXED", "HUG", "FILL"].includes(layoutSizingVertical)) {
-      throw new Error(
-        "Invalid layoutSizingVertical value. Must be one of: FIXED, HUG, FILL"
-      );
-    }
-    // HUG is only valid on auto-layout frames and text nodes
-    if (
-      layoutSizingVertical === "HUG" &&
-      !["FRAME", "TEXT"].includes(node.type)
-    ) {
-      throw new Error(
-        "HUG sizing is only valid on auto-layout frames and text nodes"
-      );
-    }
-    // FILL is only valid on auto-layout children
-    if (
-      layoutSizingVertical === "FILL" &&
-      (!node.parent || node.parent.layoutMode === "NONE")
-    ) {
-      throw new Error("FILL sizing is only valid on auto-layout children");
-    }
-    node.layoutSizingVertical = layoutSizingVertical;
-  }
-
-  return {
-    id: node.id,
-    name: node.name,
-    layoutSizingHorizontal: node.layoutSizingHorizontal,
-    layoutSizingVertical: node.layoutSizingVertical,
-    layoutMode: node.layoutMode,
-  };
-}
-
-async function setItemSpacing(params) {
-  const { nodeId, itemSpacing, counterAxisSpacing } = params || {};
-
-  // Validate that at least one spacing parameter is provided
-  if (itemSpacing === undefined && counterAxisSpacing === undefined) {
-    throw new Error("At least one of itemSpacing or counterAxisSpacing must be provided");
-  }
-
-  // Get the target node
-  const node = await figma.getNodeByIdAsync(nodeId);
-  if (!node) {
-    throw new Error(`Node with ID ${nodeId} not found`);
-  }
-
-  // Check if node is a frame or component that supports item spacing
-  if (
-    node.type !== "FRAME" &&
-    node.type !== "COMPONENT" &&
-    node.type !== "COMPONENT_SET" &&
-    node.type !== "INSTANCE"
-  ) {
-    throw new Error(`Node type ${node.type} does not support item spacing`);
-  }
-
-  // Check if the node has auto-layout enabled
-  if (node.layoutMode === "NONE") {
-    throw new Error(
-      "Item spacing can only be set on auto-layout frames (layoutMode must not be NONE)"
-    );
-  }
-
-  // Set item spacing if provided
-  if (itemSpacing !== undefined) {
-    if (typeof itemSpacing !== "number") {
-      throw new Error("Item spacing must be a number");
-    }
-    node.itemSpacing = itemSpacing;
-  }
-
-  // Set counter axis spacing if provided
-  if (counterAxisSpacing !== undefined) {
-    if (typeof counterAxisSpacing !== "number") {
-      throw new Error("Counter axis spacing must be a number");
-    }
-    // counterAxisSpacing only applies when layoutWrap is WRAP
-    if (node.layoutWrap !== "WRAP") {
-      throw new Error(
-        "Counter axis spacing can only be set on frames with layoutWrap set to WRAP"
-      );
-    }
-    node.counterAxisSpacing = counterAxisSpacing;
-  }
-
-  return {
-    id: node.id,
-    name: node.name,
-    itemSpacing: node.itemSpacing || undefined,
-    counterAxisSpacing: node.counterAxisSpacing || undefined,
-    layoutMode: node.layoutMode,
-    layoutWrap: node.layoutWrap,
-  };
-}
-
-async function setDefaultConnector(params) {
-  const { connectorId } = params || {};
-  
-  // If connectorId is provided, search and set by that ID (do not check existing storage)
-  if (connectorId) {
-    // Get node by specified ID
-    const node = await figma.getNodeByIdAsync(connectorId);
-    if (!node) {
-      throw new Error(`Connector node not found with ID: ${connectorId}`);
-    }
-    
-    // Check node type
-    if (node.type !== 'CONNECTOR') {
-      throw new Error(`Node is not a connector: ${connectorId}`);
-    }
-    
-    // Set the found connector as the default connector
-    await figma.clientStorage.setAsync('defaultConnectorId', connectorId);
-    
-    return {
-      success: true,
-      message: `Default connector set to: ${connectorId}`,
-      connectorId: connectorId
-    };
-  } 
-  // If connectorId is not provided, check existing storage
-  else {
-    // Check if there is an existing default connector in client storage
-    try {
-      const existingConnectorId = await figma.clientStorage.getAsync('defaultConnectorId');
-      
-      // If there is an existing connector ID, check if the node is still valid
-      if (existingConnectorId) {
-        try {
-          const existingConnector = await figma.getNodeByIdAsync(existingConnectorId);
-          
-          // If the stored connector still exists and is of type CONNECTOR
-          if (existingConnector && existingConnector.type === 'CONNECTOR') {
-            return {
-              success: true,
-              message: `Default connector is already set to: ${existingConnectorId}`,
-              connectorId: existingConnectorId,
-              exists: true
-            };
-          }
-          // The stored connector is no longer valid - find a new connector
-          else {
-            console.log(`Stored connector ID ${existingConnectorId} is no longer valid, finding a new connector...`);
-          }
-        } catch (error) {
-          console.log(`Error finding stored connector: ${error.message}. Will try to set a new one.`);
-        }
-      }
-    } catch (error) {
-      console.log(`Error checking for existing connector: ${error.message}`);
-    }
-    
-    // If there is no stored default connector or it is invalid, find one in the current page
-    try {
-      // Find CONNECTOR type nodes in the current page
-      const currentPageConnectors = figma.currentPage.findAllWithCriteria({ types: ['CONNECTOR'] });
-      
-      if (currentPageConnectors && currentPageConnectors.length > 0) {
-        // Use the first connector found
-        const foundConnector = currentPageConnectors[0];
-        const autoFoundId = foundConnector.id;
-        
-        // Set the found connector as the default connector
-        await figma.clientStorage.setAsync('defaultConnectorId', autoFoundId);
-        
-        return {
-          success: true,
-          message: `Automatically found and set default connector to: ${autoFoundId}`,
-          connectorId: autoFoundId,
-          autoSelected: true
-        };
-      } else {
-        // If no connector is found in the current page, show a guide message
-        throw new Error('No connector found in the current page. Please create a connector in Figma first or specify a connector ID.');
-      }
-    } catch (error) {
-      // Error occurred while running findAllWithCriteria
-      throw new Error(`Failed to find a connector: ${error.message}`);
-    }
-  }
-}
-
-async function createCursorNode(targetNodeId) {
-  const svgString = `<svg width="48" height="48" viewBox="0 0 48 48" fill="none" xmlns="http://www.w3.org/2000/svg">
-    <path d="M16 8V35.2419L22 28.4315L27 39.7823C27 39.7823 28.3526 40.2722 29 39.7823C29.6474 39.2924 30.2913 38.3057 30 37.5121C28.6247 33.7654 25 26.1613 25 26.1613H32L16 8Z" fill="#202125" />
-  </svg>`;
-  try {
-    const targetNode = await figma.getNodeByIdAsync(targetNodeId);
-    if (!targetNode) throw new Error("Target node not found");
-
-    // The targetNodeId has semicolons since it is a nested node.
-    // So we need to get the parent node ID from the target node ID and check if we can appendChild to it or not.
-    let parentNodeId = targetNodeId.includes(';') 
-      ? targetNodeId.split(';')[0] 
-      : targetNodeId;
-    if (!parentNodeId) throw new Error("Could not determine parent node ID");
-
-    // Find the parent node to append cursor node as child
-    let parentNode = await figma.getNodeByIdAsync(parentNodeId);
-    if (!parentNode) throw new Error("Parent node not found");
-
-    // If the parent node is not eligible to appendChild, set the parentNode to the parent of the parentNode
-    if (parentNode.type === 'INSTANCE' || parentNode.type === 'COMPONENT' || parentNode.type === 'COMPONENT_SET') {
-      parentNode = parentNode.parent;
-      if (!parentNode) throw new Error("Parent node not found");
-    }
-
-    // Create the cursor node
-    const importedNode = await figma.createNodeFromSvg(svgString);
-    if (!importedNode || !importedNode.id) {
-      throw new Error("Failed to create imported cursor node");
-    }
-    importedNode.name = "TTF_Connector / Mouse Cursor";
-    importedNode.resize(48, 48);
-
-    const cursorNode = importedNode.findOne(node => node.type === 'VECTOR');
-    if (cursorNode) {
-      cursorNode.fills = [{
-        type: 'SOLID',
-        color: { r: 0, g: 0, b: 0 },
-        opacity: 1
-      }];
-      cursorNode.strokes = [{
-        type: 'SOLID',
-        color: { r: 1, g: 1, b: 1 },
-        opacity: 1
-      }];
-      cursorNode.strokeWeight = 2;
-      cursorNode.strokeAlign = 'OUTSIDE';
-      cursorNode.effects = [{
-        type: "DROP_SHADOW",
-        color: { r: 0, g: 0, b: 0, a: 0.3 },
-        offset: { x: 1, y: 1 },
-        radius: 2,
-        spread: 0,
-        visible: true,
-        blendMode: "NORMAL"
-      }];
-    }
-
-    // Append the cursor node to the parent node
-    parentNode.appendChild(importedNode);
-
-    // if the parentNode has auto-layout enabled, set the layoutPositioning to ABSOLUTE
-    if ('layoutMode' in parentNode && parentNode.layoutMode !== 'NONE') {
-      importedNode.layoutPositioning = 'ABSOLUTE';
-    }
-
-    // Adjust the importedNode's position to the targetNode's position
-    if (
-      targetNode.absoluteBoundingBox &&
-      parentNode.absoluteBoundingBox
-    ) {
-      // if the targetNode has absoluteBoundingBox, set the importedNode's absoluteBoundingBox to the targetNode's absoluteBoundingBox
-      console.log('targetNode.absoluteBoundingBox', targetNode.absoluteBoundingBox);
-      console.log('parentNode.absoluteBoundingBox', parentNode.absoluteBoundingBox);
-      importedNode.x = targetNode.absoluteBoundingBox.x - parentNode.absoluteBoundingBox.x  + targetNode.absoluteBoundingBox.width / 2 - 48 / 2
-      importedNode.y = targetNode.absoluteBoundingBox.y - parentNode.absoluteBoundingBox.y + targetNode.absoluteBoundingBox.height / 2 - 48 / 2;
-    } else if (
-      'x' in targetNode && 'y' in targetNode && 'width' in targetNode && 'height' in targetNode) {
-        // if the targetNode has x, y, width, height, calculate center based on relative position
-        console.log('targetNode.x/y/width/height', targetNode.x, targetNode.y, targetNode.width, targetNode.height);
-        importedNode.x = targetNode.x + targetNode.width / 2 - 48 / 2;
-        importedNode.y = targetNode.y + targetNode.height / 2 - 48 / 2;
-    } else {
-      // Fallback: Place at top-left of target if possible, otherwise at (0,0) relative to parent
-      if ('x' in targetNode && 'y' in targetNode) {
-        console.log('Fallback to targetNode x/y');
-        importedNode.x = targetNode.x;
-        importedNode.y = targetNode.y;
-      } else {
-        console.log('Fallback to (0,0)');
-        importedNode.x = 0;
-        importedNode.y = 0;
-      }
-    }
-
-    // get the importedNode ID and the importedNode
-    console.log('importedNode', importedNode);
-
-
-    return { id: importedNode.id, node: importedNode };
-    
-  } catch (error) {
-    console.error("Error creating cursor from SVG:", error);
-    return { id: null, node: null, error: error.message };
-  }
-}
-
-async function createConnections(params) {
-  if (!params || !params.connections || !Array.isArray(params.connections)) {
-    throw new Error('Missing or invalid connections parameter');
-  }
-  
-  const { connections } = params;
-  
-  // Command ID for progress tracking
-  const commandId = generateCommandId();
-  sendProgressUpdate(
-    commandId,
-    "create_connections",
-    "started",
-    0,
-    connections.length,
-    0,
-    `Starting to create ${connections.length} connections`
-  );
-  
-  // Get default connector ID from client storage
-  const defaultConnectorId = await figma.clientStorage.getAsync('defaultConnectorId');
-  if (!defaultConnectorId) {
-    throw new Error('No default connector set. Please try one of the following options to create connections:\n1. Create a connector in FigJam and copy/paste it to your current page, then run the "set_default_connector" command.\n2. Select an existing connector on the current page, then run the "set_default_connector" command.');
-  }
-  
-  // Get the default connector
-  const defaultConnector = await figma.getNodeByIdAsync(defaultConnectorId);
-  if (!defaultConnector) {
-    throw new Error(`Default connector not found with ID: ${defaultConnectorId}`);
-  }
-  if (defaultConnector.type !== 'CONNECTOR') {
-    throw new Error(`Node is not a connector: ${defaultConnectorId}`);
-  }
-  
-  // Results array for connection creation
-  const results = [];
-  let processedCount = 0;
-  const totalCount = connections.length;
-  
-  // Preload fonts (used for text if provided)
-  let fontLoaded = false;
-  
-  for (let i = 0; i < connections.length; i++) {
-    try {
-      const { startNodeId: originalStartId, endNodeId: originalEndId, text } = connections[i];
-      let startId = originalStartId;
-      let endId = originalEndId;
-
-      // Check and potentially replace start node ID
-      if (startId.includes(';')) {
-        console.log(`Nested start node detected: ${startId}. Creating cursor node.`);
-        const cursorResult = await createCursorNode(startId);
-        if (!cursorResult || !cursorResult.id) {
-          throw new Error(`Failed to create cursor node for nested start node: ${startId}`);
-        }
-        startId = cursorResult.id; 
-      }  
-      
-      const startNode = await figma.getNodeByIdAsync(startId);
-      if (!startNode) throw new Error(`Start node not found with ID: ${startId}`);
-
-      // Check and potentially replace end node ID
-      if (endId.includes(';')) {
-        console.log(`Nested end node detected: ${endId}. Creating cursor node.`);
-        const cursorResult = await createCursorNode(endId);
-        if (!cursorResult || !cursorResult.id) {
-          throw new Error(`Failed to create cursor node for nested end node: ${endId}`);
-        }
-        endId = cursorResult.id;
-      }
-      const endNode = await figma.getNodeByIdAsync(endId);
-      if (!endNode) throw new Error(`End node not found with ID: ${endId}`);
-
-      
-      // Clone the default connector
-      const clonedConnector = defaultConnector.clone();
-      
-      // Update connector name using potentially replaced node names
-      clonedConnector.name = `TTF_Connector/${startNode.id}/${endNode.id}`;
-      
-      // Set start and end points using potentially replaced IDs
-      clonedConnector.connectorStart = {
-        endpointNodeId: startId,
-        magnet: 'AUTO'
-      };
-      
-      clonedConnector.connectorEnd = {
-        endpointNodeId: endId,
-        magnet: 'AUTO'
-      };
-      
-      // Add text (if provided)
-      if (text) {
-        try {
-          // Try to load the necessary fonts
-          try {
-            // First check if default connector has font and use the same
-            if (defaultConnector.text && defaultConnector.text.fontName) {
-              const fontName = defaultConnector.text.fontName;
-              await figma.loadFontAsync(fontName);
-              clonedConnector.text.fontName = fontName;
-            } else {
-              // Try default Inter font
-              await figma.loadFontAsync({ family: "Inter", style: "Regular" });
-            }
-          } catch (fontError) {
-            // If first font load fails, try another font style
-            try {
-              await figma.loadFontAsync({ family: "Inter", style: "Medium" });
-            } catch (mediumFontError) {
-              // If second font fails, try system font
-              try {
-                await figma.loadFontAsync({ family: "System", style: "Regular" });
-              } catch (systemFontError) {
-                // If all font loading attempts fail, throw error
-                throw new Error(`Failed to load any font: ${fontError.message}`);
-              }
-            }
-          }
-          
-          // Set the text
-          clonedConnector.text.characters = text;
-        } catch (textError) {
-          console.error("Error setting text:", textError);
-          // Continue with connection even if text setting fails
-          results.push({
-            id: clonedConnector.id,
-            startNodeId: startNodeId,
-            endNodeId: endNodeId,
-            text: "",
-            textError: textError.message
-          });
-          
-          // Continue to next connection
-          continue;
-        }
-      }
-      
-      // Add to results (using the *original* IDs for reference if needed)
-      results.push({
-        id: clonedConnector.id,
-        originalStartNodeId: originalStartId,
-        originalEndNodeId: originalEndId,
-        usedStartNodeId: startId, // ID actually used for connection
-        usedEndNodeId: endId,     // ID actually used for connection
-        text: text || ""
-      });
-      
-      // Update progress
-      processedCount++;
-      sendProgressUpdate(
-        commandId,
-        "create_connections",
-        "in_progress",
-        processedCount / totalCount,
-        totalCount,
-        processedCount,
-        `Created connection ${processedCount}/${totalCount}`
-      );
-      
-    } catch (error) {
-      console.error("Error creating connection", error);
-      // Continue processing remaining connections even if an error occurs
-      processedCount++;
-      sendProgressUpdate(
-        commandId,
-        "create_connections",
-        "in_progress",
-        processedCount / totalCount,
-        totalCount,
-        processedCount,
-        `Error creating connection: ${error.message}`
-      );
-      
-      results.push({
-        error: error.message,
-        connectionInfo: connections[i]
-      });
-    }
-  }
-  
-  // Completion update
-  sendProgressUpdate(
-    commandId,
-    "create_connections",
-    "completed",
-    1,
-    totalCount,
-    totalCount,
-    `Completed creating ${results.length} connections`
-  );
-  
-  return {
-    success: true,
-    count: results.length,
-    connections: results
-  };
-}
-
-async function zoom(params) {
-  const { zoomLevel, center } = params || {};
-
-  if (zoomLevel === undefined) {
-    throw new Error("Missing zoomLevel parameter");
-  }
-
-  if (center) {
-    figma.viewport.center = center;
-  }
-  
-  figma.viewport.zoom = zoomLevel;
-
-  return {
-    success: true,
-    zoom: figma.viewport.zoom,
-    center: figma.viewport.center,
-  };
-}
-
-async function center(params) {
-    const { x, y } = params || {};
-
-    if (x === undefined || y === undefined) {
-        throw new Error("Missing x or y parameters");
-    }
-
-    figma.viewport.center = { x, y };
-
-    return {
-        success: true,
-        center: figma.viewport.center,
-    };
-}
-
-async function scrollAndZoomIntoView(params) {
-    const { nodeIds } = params || {};
-
-    if (!nodeIds || !Array.isArray(nodeIds) || nodeIds.length === 0) {
-        throw new Error("Missing or invalid nodeIds parameter");
-    }
-
-    const nodes = [];
-    for (const nodeId of nodeIds) {
-        const node = await figma.getNodeByIdAsync(nodeId);
-        if (node) {
-            nodes.push(node);
-        }
-    }
-
-    if (nodes.length > 0) {
-        figma.viewport.scrollAndZoomIntoView(nodes);
-        return {
-            success: true,
-            message: `Scrolled and zoomed into ${nodes.length} nodes.`,
-        };
-    } else {
-        throw new Error("No valid nodes found to scroll and zoom into.");
-    }
-}
-
-async function group(params) {
-    const { nodeIds, parentId, name } = params || {};
-
-    if (!nodeIds || !Array.isArray(nodeIds) || nodeIds.length === 0) {
-        throw new Error("Missing or invalid nodeIds parameter. Please provide an array of node IDs.");
-    }
-
-    const nodes = [];
-    for (const nodeId of nodeIds) {
-        const node = await figma.getNodeByIdAsync(nodeId);
-        if (node) {
-            nodes.push(node);
-        }
-    }
-
-    if (nodes.length > 0) {
-        let parent = figma.currentPage;
-        if (parentId) {
-            const parentNode = await figma.getNodeByIdAsync(parentId);
-            if (parentNode && 'appendChild' in parentNode) {
-                parent = parentNode;
-            } else {
-                throw new Error(`Invalid parentId: ${parentId}`);
-            }
-        }
-        
-        const groupNode = figma.group(nodes, parent);
-        if (name) {
-            groupNode.name = name;
-        }
-
-        return {
-            success: true,
-            groupId: groupNode.id,
-            name: groupNode.name,
-            children: groupNode.children.map(child => child.id),
-        };
-    } else {
-        throw new Error("No valid nodes found to group. Please check the provided node IDs.");
-    }
-}
-
-async function ungroup(params) {
-    const { nodeId } = params || {};
-
-    if (!nodeId) {
-        throw new Error("Missing nodeId parameter");
-    }
-
-    const node = await figma.getNodeByIdAsync(nodeId);
-
-    if (node && node.type === 'GROUP') {
-        const parent = node.parent;
-        const children = [...node.children];
-        if (parent && 'insertChild' in parent) {
-            const index = parent.children.indexOf(node);
-            children.forEach(child => parent.insertChild(index, child));
-            node.remove(); // a group with no children is automatically removed
-        }
-        
-        return {
-            success: true,
-            message: `Ungrouped node ${nodeId}.`,
-            childrenIds: children.map(child => child.id),
-        };
-    } else if (!node) {
-        throw new Error(`Node not found with ID: ${nodeId}`);
-    } else {
-        throw new Error(`Node with ID ${nodeId} is not a group.`);
-    }
-}
-
-async function createSlice(params) {
-    const { x = 0, y = 0, radius = 50, startAngle = 0, sweepAngle = Math.PI, name = "Slice", parentId } = params || {};
-    if (typeof radius !== 'number' || radius <= 0) {
-        throw new Error("Radius must be a positive number.");
-    }
-    const slice = figma.createSlice();
-    slice.x = x;
-    slice.y = y;
-    slice.resize(radius * 2, radius * 2);
-    slice.startAngle = startAngle;
-    slice.sweepAngle = sweepAngle;
-    slice.name = name;
-
-    if (parentId) {
-        const parentNode = await figma.getNodeByIdAsync(parentId);
-        if (parentNode && 'appendChild' in parentNode) {
-            parentNode.appendChild(slice);
-        }
-    } else {
-        figma.currentPage.appendChild(slice);
-    }
-
-    return { id: slice.id, name: slice.name };
-}
-
-async function createPolygon(params) {
-    const { x = 0, y = 0, radius = 50, count = 3, name = "Polygon", parentId } = params || {};
-    if (typeof radius !== 'number' || radius <= 0) {
-        throw new Error("Radius must be a positive number.");
-    }
-    if (typeof count !== 'number' || count < 3) {
-        throw new Error("Count must be a number greater than or equal to 3.");
-    }
-    const polygon = figma.createPolygon();
-    polygon.x = x;
-    polygon.y = y;
-    polygon.resize(radius * 2, radius * 2);
-    polygon.pointCount = count;
-    polygon.name = name;
-
-    if (parentId) {
-        const parentNode = await figma.getNodeByIdAsync(parentId);
-        if (parentNode && 'appendChild' in parentNode) {
-            parentNode.appendChild(polygon);
-        }
-    } else {
-        figma.currentPage.appendChild(polygon);
-    }
-
-    return { id: polygon.id, name: polygon.name, pointCount: polygon.pointCount };
-}
-
-async function createStar(params) {
-    const { x = 0, y = 0, outerRadius = 50, innerRadius = 25, count = 5, name = "Star", parentId } = params || {};
-    if (typeof outerRadius !== 'number' || outerRadius <= 0) {
-        throw new Error("Outer radius must be a positive number.");
-    }
-    if (typeof innerRadius !== 'number' || innerRadius <= 0) {
-        throw new Error("Inner radius must be a positive number.");
-    }
-    if (innerRadius >= outerRadius) {
-        throw new Error("Inner radius must be less than outer radius.");
-    }
-    if (typeof count !== 'number' || count < 2) {
-        throw new Error("Count must be a number greater than or equal to 2.");
-    }
-    const star = figma.createStar();
-    star.x = x;
-    star.y = y;
-    star.resize(outerRadius * 2, outerRadius * 2);
-    star.pointCount = count;
-    star.innerRadius = innerRadius / outerRadius;
-    star.name = name;
-
-    if (parentId) {
-        const parentNode = await figma.getNodeByIdAsync(parentId);
-        if (parentNode && 'appendChild' in parentNode) {
-            parentNode.appendChild(star);
-        }
-    } else {
-        figma.currentPage.appendChild(star);
-    }
-
-    return { id: star.id, name: star.name, pointCount: star.pointCount };
-}
-
-async function createLine(params) {
-    const { x1 = 0, y1 = 0, x2 = 100, y2 = 0, name = "Line", parentId } = params || {};
-    const line = figma.createLine();
-    line.x = x1;
-    line.y = y1;
-    line.resize(Math.sqrt(Math.pow(x2 - x1, 2) + Math.pow(y2 - y1, 2)), 0);
-    line.rotation = Math.atan2(y2 - y1, x2 - x1) * 180 / Math.PI;
-    line.name = name;
-    
-    if (parentId) {
-        const parentNode = await figma.getNodeByIdAsync(parentId);
-        if (parentNode && 'appendChild' in parentNode) {
-            parentNode.appendChild(line);
-        }
-    } else {
-        figma.currentPage.appendChild(line);
-    }
-
-    return { id: line.id, name: line.name };
-}
-
-async function createEllipse(params) {
-    const { x = 0, y = 0, width = 100, height = 100, name = "Ellipse", parentId } = params || {};
-    const ellipse = figma.createEllipse();
-    ellipse.x = x;
-    ellipse.y = y;
-    ellipse.resize(width, height);
-    ellipse.name = name;
-
-    if (parentId) {
-        const parentNode = await figma.getNodeByIdAsync(parentId);
-        if (parentNode && 'appendChild' in parentNode) {
-            parentNode.appendChild(ellipse);
-        }
-    } else {
-        figma.currentPage.appendChild(ellipse);
-    }
-
-    return { id: ellipse.id, name: ellipse.name, width: ellipse.width, height: ellipse.height };
-}
-
-async function createBooleanOperation(params) {
-    const { operation, nodeIds, parentId, name } = params || {};
-
-    if (!operation || !['UNION', 'SUBTRACT', 'INTERSECT', 'EXCLUDE'].includes(operation)) {
-        throw new Error("Invalid or missing operation parameter. Must be one of: UNION, SUBTRACT, INTERSECT, EXCLUDE");
-    }
-
-    if (!nodeIds || !Array.isArray(nodeIds) || nodeIds.length < 2) {
-        throw new Error("Missing or invalid nodeIds parameter. At least two nodes are required.");
-    }
-
-    const nodes = [];
-    for (const nodeId of nodeIds) {
-        const node = await figma.getNodeByIdAsync(nodeId);
-        if (node && ('fills' in node)) { // boolean operations can only be applied to vector-like nodes
-            nodes.push(node);
-        }
-    }
-
-    if (nodes.length < 2) {
-        throw new Error("At least two valid vector-like nodes are required for a boolean operation.");
-    }
-    
-    let parent = figma.currentPage;
-    if (parentId) {
-        const parentNode = await figma.getNodeByIdAsync(parentId);
-        if (parentNode && 'appendChild' in parentNode) {
-            parent = parentNode;
-        }
-    }
-
-    let booleanNode;
-    switch (operation) {
-        case 'UNION':
-            booleanNode = figma.union(nodes, parent);
-            break;
-        case 'SUBTRACT':
-            booleanNode = figma.subtract(nodes, parent);
-            break;
-        case 'INTERSECT':
-            booleanNode = figma.intersect(nodes, parent);
-            break;
-        case 'EXCLUDE':
-            booleanNode = figma.exclude(nodes, parent);
-            break;
-    }
-
-    if (name) {
-        booleanNode.name = name;
-    } else {
-        booleanNode.name = `${operation} Group`;
-    }
-
-    return {
-        success: true,
-        nodeId: booleanNode.id,
-        name: booleanNode.name,
-        operation: operation,
-    };
-}
-
-async function flatten(params) {
-    const { nodeId } = params || {};
-    if (!nodeId) {
-        throw new Error("Missing nodeId parameter");
-    }
-
-    const node = await figma.getNodeByIdAsync(nodeId);
-    if (!node || !('children' in node)) {
-        throw new Error(`Node not found or cannot contain children: ${nodeId}`);
-    }
-    if (node.children.length === 0) {
-        throw new Error("Cannot flatten a node with no children.");
-    }
-
-    const flattenedNode = figma.flatten(node.children);
-    
-    return {
-        success: true,
-        nodeId: flattenedNode.id,
-        name: flattenedNode.name
-    };
-}
-
-async function mask(params) {
-    const { maskNodeId, objectNodeIds, parentId, name } = params || {};
-
-    if (!maskNodeId || !objectNodeIds || !Array.isArray(objectNodeIds) || objectNodeIds.length === 0) {
-        throw new Error("Missing or invalid parameters. 'maskNodeId' and 'objectNodeIds' are required.");
-    }
-
-    if (objectNodeIds.includes(maskNodeId)) {
-        throw new Error("The mask node cannot also be one of the object nodes.");
-    }
-
-    const maskNode = await figma.getNodeByIdAsync(maskNodeId);
-    if (!maskNode) {
-        throw new Error(`Mask node not found: ${maskNodeId}`);
-    }
-
-    const objectNodes = [];
-    for (const nodeId of objectNodeIds) {
-        const node = await figma.getNodeByIdAsync(nodeId);
-        if (node) {
-            objectNodes.push(node);
-        }
-    }
-
-    if (objectNodes.length === 0) {
-        throw new Error("No valid object nodes found to mask.");
-    }
-    
-    // The mask node should be the last in the list
-    const nodesToGroup = [...objectNodes, maskNode];
-    
-    let parent = figma.currentPage;
-    if (parentId) {
-        const parentNode = await figma.getNodeByIdAsync(parentId);
-        if (parentNode && 'appendChild' in parentNode) {
-            parent = parentNode;
-        }
-    }
-
-    const group = figma.group(nodesToGroup, parent);
-    group.isMask = true;
-    maskNode.isMask = true;
-
-    if (name) {
-        group.name = name;
-    } else {
-        group.name = "Mask Group";
-    }
-
-    return {
-        success: true,
-        groupId: group.id,
-        name: group.name,
-    };
-}
-
-async function reparent(params) {
-    const { nodeIds, newParentId } = params || {};
-
-    if (!nodeIds || !Array.isArray(nodeIds) || nodeIds.length === 0 || !newParentId) {
-        throw new Error("Missing or invalid parameters. 'nodeIds' and 'newParentId' are required.");
-    }
-    if (nodeIds.includes(newParentId)) {
-        throw new Error("A node cannot be reparented to itself.");
-    }
-
-    const newParent = await figma.getNodeByIdAsync(newParentId);
-    if (!newParent || !('appendChild' in newParent)) {
-        throw new Error(`Invalid new parent: ${newParentId}`);
-    }
-
-    for (const nodeId of nodeIds) {
-        const node = await figma.getNodeByIdAsync(nodeId);
-        if (node) {
-            newParent.appendChild(node);
-        }
-    }
-
-    return {
-        success: true,
-        message: `Reparented ${nodeIds.length} nodes to ${newParentId}.`,
-    };
-}
-
-async function insertChild(params) {
-    const { parentId, childId, index } = params || {};
-
-    if (!parentId || !childId || index === undefined) {
-        throw new Error("Missing or invalid parameters. 'parentId', 'childId', and 'index' are required.");
-    }
-    if (parentId === childId) {
-        throw new Error("A node cannot be inserted into itself.");
-    }
-
-    const parent = await figma.getNodeByIdAsync(parentId);
-    if (!parent || !('insertChild' in parent)) {
-        throw new Error(`Invalid parent: ${parentId}`);
-    }
-
-    const child = await figma.getNodeByIdAsync(childId);
-    if (!child) {
-        throw new Error(`Child node not found: ${childId}`);
-    }
-
-    parent.insertChild(index, child);
-
-    return {
-        success: true,
-        message: `Inserted child ${childId} into parent ${parentId} at index ${index}.`,
-    };
-}
-
-async function createPaintStyle(params) {
-    const { name, paints } = params || {};
-    if (!name || !paints) {
-        throw new Error("Missing 'name' or 'paints' parameter. Please provide a name and a list of paint objects.");
-    }
-
-    const style = figma.createPaintStyle();
-    style.name = name;
-    style.paints = paints;
-
-    return {
-        success: true,
-        styleId: style.id,
-        name: style.name,
-    };
-}
-
-async function createTextStyle(params) {
-    const { name, style } = params || {};
-    if (!name || !style) {
-        throw new Error("Missing 'name' or 'style' parameter. Please provide a name and a text style object.");
-    }
-    
-    const textStyle = figma.createTextStyle();
-    textStyle.name = name;
-    Object.assign(textStyle, style);
-    
-    return {
-        success: true,
-        styleId: textStyle.id,
-        name: textStyle.name,
-    };
-}
-
-async function createEffectStyle(params) {
-    const { name, effects } = params || {};
-    if (!name || !effects) {
-        throw new Error("Missing 'name' or 'effects' parameter. Please provide a name and a list of effect objects.");
-    }
-
-    const effectStyle = figma.createEffectStyle();
-    effectStyle.name = name;
-    effectStyle.effects = effects;
-
-    return {
-        success: true,
-        styleId: effectStyle.id,
-        name: effectStyle.name,
-    };
-}
-
-async function createGridStyle(params) {
-    const { name, layoutGrids } = params || {};
-    if (!name || !layoutGrids) {
-        throw new Error("Missing 'name' or 'layoutGrids' parameter. Please provide a name and a list of layout grid objects.");
-    }
-
-    const gridStyle = figma.createGridStyle();
-    gridStyle.name = name;
-    gridStyle.layoutGrids = layoutGrids;
-
-    return {
-        success: true,
-        styleId: gridStyle.id,
-        name: gridStyle.name,
-    };
-}
-
-async function createComponent(params) {
-    const { nodeId } = params || {};
-    if (!nodeId) {
-        throw new Error("Missing 'nodeId' parameter.");
-    }
-    
-    const node = await figma.getNodeByIdAsync(nodeId);
-    if (!node) {
-        throw new Error(`Node not found: ${nodeId}`);
-    }
-    
-    const component = figma.createComponent();
-    component.name = node.name;
-    component.resize(node.width, node.height);
-    component.x = node.x;
-    component.y = node.y;
-
-    if ('children' in node) {
-        for (const child of node.children) {
-            component.appendChild(child.clone());
-        }
-    }
-    
-    // Create an instance of the new component
-    const instance = component.createInstance();
-    instance.x = node.x;
-    instance.y = node.y;
-    
-    // Add the instance to the same parent as the original node
-    if (node.parent && 'appendChild' in node.parent) {
-        node.parent.appendChild(instance);
-    } else {
-        figma.currentPage.appendChild(instance);
-    }
-
-    // Optionally, you can remove the original node if it's no longer needed
-    // node.remove();
-
-    return {
-        success: true,
-        componentId: component.id,
-        instanceId: instance.id,
-        name: component.name,
-    };
-}
-
-async function publishComponents(params) {
-    try {
-        const result = await figma.publishAsync('Publishing components');
-        if (result.ok) {
-            return {
-                success: true,
-                message: 'Components published successfully.'
-            };
-        } else {
-            return {
-                success: false,
-                message: 'Component publishing was canceled by the user.'
-            };
-        }
-    } catch (error) {
-        throw new Error(`Failed to publish components: ${error.message}`);
-    }
-}
-
-async function vectorPaths(params) {
-    const { paths, name = "Vector", parentId } = params || {};
-    if (!paths) {
-        throw new Error("Missing 'paths' parameter.");
-    }
-    const vectorNode = figma.createVector();
-    vectorNode.vectorPaths = paths;
-    vectorNode.name = name;
-    
-    if (parentId) {
-        const parentNode = await figma.getNodeByIdAsync(parentId);
-        if (parentNode && 'appendChild' in parentNode) {
-            parentNode.appendChild(vectorNode);
-        }
-    } else {
-        figma.currentPage.appendChild(vectorNode);
-    }
-
-    return {
-        success: true,
-        nodeId: vectorNode.id,
-        name: vectorNode.name,
-    };
-}
-
-async function vectorNetwork(params) {
-    const { nodeId } = params || {};
-    if (!nodeId) {
-        throw new Error("Missing 'nodeId' parameter.");
-    }
-
-    const node = await figma.getNodeByIdAsync(nodeId);
-    if (!node || node.type !== 'VECTOR') {
-        throw new Error("Node is not a vector.");
-    }
-
-    return {
-        success: true,
-        vectorNetwork: node.vectorNetwork,
-    };
-}
-
-async function outlineStroke(params) {
-    const { nodeId } = params || {};
-    if (!nodeId) {
-        throw new Error("Missing 'nodeId' parameter.");
-    }
-
-    const node = await figma.getNodeByIdAsync(nodeId);
-    if (!node || !('outlineStroke' in node)) {
-        throw new Error("Node does not support outlineStroke.");
-    }
-    
-    const outline = node.outlineStroke();
-
-    if (outline) {
-        return {
-            success: true,
-            nodeId: outline.id,
-            name: outline.name,
-        };
-    } else {
-        return {
-            success: false,
-            message: "Stroke outlining did not produce a result. This can happen if the node has no stroke or a complex stroke type."
-        }
-    }
-}
-
-async function createImage(params) {
-    const { base64, name = "Image", parentId } = params || {};
-    if (!base64) {
-        throw new Error("Missing 'base64' parameter.");
-    }
-    
-    // a mini polyfill for base64 decoding
-    const binary_string = atob(base64);
-    const len = binary_string.length;
-    const bytes = new Uint8Array(len);
-    for (let i = 0; i < len; i++) {
-        bytes[i] = binary_string.charCodeAt(i);
-    }
-
-    const image = await figma.createImageAsync(bytes);
-    const rect = figma.createRectangle();
-    rect.name = name;
-    rect.resize(image.getSize().width, image.getSize().height);
-    rect.fills = [{ type: 'IMAGE', scaleMode: 'FILL', imageHash: image.hash }];
-
-    if (parentId) {
-        const parentNode = await figma.getNodeByIdAsync(parentId);
-        if (parentNode && 'appendChild' in parentNode) {
-            parentNode.appendChild(rect);
-        }
-    } else {
-        figma.currentPage.appendChild(rect);
-    }
-    
-    return {
-        success: true,
-        nodeId: rect.id,
-        name: rect.name,
-        imageHash: image.hash,
-    };
-}
-
-async function getImageByHash(params) {
-    const { hash } = params || {};
-    if (!hash) {
-        throw new Error("Missing 'hash' parameter.");
-    }
-
-    const image = figma.getImageByHash(hash);
-    
-    if (image) {
-        const bytes = await image.getBytesAsync();
-        // a mini polyfill for base64 encoding
-        let binary = '';
-        const len = bytes.byteLength;
-        for (let i = 0; i < len; i++) {
-            binary += String.fromCharCode(bytes[i]);
-        }
-        const base64 = btoa(binary);
-
-        return {
-            success: true,
-            base64: base64,
-            size: image.getSize(),
-        };
-    } else {
-        return {
-            success: false,
-            message: `Image with hash "${hash}" not found.`
-        };
-    }
-}
-
-async function setGradientFill(params) {
-    const { nodeId, gradient } = params || {};
-
-    if (!nodeId || !gradient) {
-        throw new Error("Missing 'nodeId' or 'gradient' parameter.");
-    }
-
-    const node = await figma.getNodeByIdAsync(nodeId);
-    if (!node || !('fills' in node)) {
-        throw new Error("Node not found or does not support fills.");
-    }
-
-    node.fills = [gradient];
-
-    return {
-        success: true,
-        nodeId: node.id,
-        fills: node.fills,
-    };
-}
-
-async function setRangeTextStyle(params) {
-    const { nodeId, start, end, textStyleId } = params || {};
-    if (!nodeId || start === undefined || end === undefined || !textStyleId) {
-        throw new Error("Missing required parameters: 'nodeId', 'start', 'end', 'textStyleId'.");
-    }
-
-    const node = await figma.getNodeByIdAsync(nodeId);
-    if (!node || node.type !== 'TEXT') {
-        throw new Error("Node is not a text node.");
-    }
-    
-    await figma.loadFontAsync(node.fontName);
-    node.setRangeTextStyleId(start, end, textStyleId);
-    
-    return {
-        success: true,
-        message: `Applied text style ${textStyleId} to range [${start}, ${end}] of node ${nodeId}.`
-    };
-}
-
-async function listAvailableFonts(params) {
-    const fonts = await figma.listAvailableFontsAsync();
-    return {
-        success: true,
-        fonts: fonts.map(font => ({
-            family: font.fontName.family,
-            style: font.fontName.style,
-        })),
-    };
-}
-
-async function getFlowStartingPoints(params) {
-    const startingPoints = figma.currentPage.flowStartingPoints;
-    return {
-        success: true,
-        startingPoints: startingPoints.map(point => ({
-            nodeId: point.nodeId,
-            name: point.name,
-        })),
-    };
-}
-
-async function findRelatedNodes(params) {
-    const { nodeId } = params || {};
-    if (!nodeId) {
-        throw new Error("Missing 'nodeId' parameter.");
-    }
-
-    const node = await figma.getNodeByIdAsync(nodeId);
-    if (!node) {
-        throw new Error(`Node not found: ${nodeId}`);
-    }
-
-    const relatedNodes = {
-        parents: [],
-        children: [],
-        component: null,
-        instances: [],
-    };
-
-    // Find parents
-    let parent = node.parent;
-    while (parent) {
-        relatedNodes.parents.push({ id: parent.id, name: parent.name, type: parent.type });
-        parent = parent.parent;
-    }
-    
-    // Find children
-    if ('children' in node) {
-        for (const child of node.children) {
-            relatedNodes.children.push({ id: child.id, name: child.name, type: child.type });
-        }
-    }
-
-    // Find main component
-    if (node.type === 'INSTANCE') {
-        const mainComponent = await node.getMainComponentAsync();
-        if (mainComponent) {
-            relatedNodes.component = { id: mainComponent.id, name: mainComponent.name, type: mainComponent.type };
-        }
-    }
-    
-    // Find instances
-    if (node.type === 'COMPONENT') {
-        const instances = await node.getInstancesAsync();
-        for (const instance of instances) {
-            relatedNodes.instances.push({ id: instance.id, name: instance.name, type: instance.type });
-        }
-    }
-    
-    return {
-        success: true,
-        parents: relatedNodes.parents,
-        children: relatedNodes.children,
-        component: relatedNodes.component,
-        instances: relatedNodes.instances,
-    };
-}
-
-
-async function createComment(params) {
-    const { nodeId, comment } = params || {};
-    if (!nodeId || !comment) {
-        throw new Error("Missing 'nodeId' or 'comment' parameter.");
-    }
-    const node = await figma.getNodeByIdAsync(nodeId);
-    if (!node) {
-        throw new Error(`Node not found: ${nodeId}`);
-    }
-
-    const newComment = figma.createComment();
-    newComment.comment = comment;
-    newComment.x = node.x;
-    newComment.y = node.y + node.height + 20;
-    
-    return {
-        success: true,
-        commentId: newComment.id,
-    };
-}
-
-async function getComments(params) {
-    const comments = await figma.root.getCommentsAsync();
-    return {
-        success: true,
-        comments: comments.map(c => ({
-            id: c.id,
-            message: c.message,
-            clientMeta: c.clientMeta,
-            createdAt: c.createdAt,
-            resolvedAt: c.resolvedAt,
-            user: c.user,
-        })),
-    };
-}
-
-async function deleteComment(params) {
-    const { commentId } = params || {};
-    if (!commentId) {
-        throw new Error("Missing 'commentId' parameter.");
-    }
-    
-    try {
-        await figma.root.deleteCommentAsync(commentId);
-        return {
-            success: true,
-            message: `Comment ${commentId} deleted.`,
-        };
-    } catch (e) {
-        throw new Error(`Could not delete comment. This requires special permissions. Details: ${e.message}`);
-    }
-}
-
-async function getCurrentUser(params) {
-    const user = figma.currentUser;
-    if (user) {
-        return {
-            success: true,
-            user: {
-                id: user.id,
-                name: user.name,
-                color: user.color,
-                sessionId: user.sessionId,
-            },
-        };
-    } else {
-        return {
-            success: false,
-            message: "Could not retrieve current user information. This may require special permissions."
-        }
-    }
-}
-
-async function getActiveUsers(params) {
-    const activeUsers = await figma.activeUsers;
-    return {
-        success: true,
-        users: activeUsers.map(user => ({
-            id: user.id,
-            name: user.name,
-            color: user.color,
-            sessionId: user.sessionId,
-        })),
-    };
-}
-
-async function codegen(params) {
-    if (!figma.codegen) {
-        throw new Error("Codegen API is not available. Ensure the 'codegen' capability is enabled in the manifest.");
-    }
-
-    const results = await figma.codegen.json(figma.currentPage.selection);
-    
-    return {
-        success: true,
-        json: results,
-    };
-}
-
-async function notifyVSCode(params) {
-    const { message } = params || {};
-    if (!message) {
-        throw new Error("Missing 'message' parameter.");
-    }
-    
-    if (!figma.vscode) {
-        throw new Error("VS Code API is not available. Ensure the 'vscode' capability is enabled in the manifest and the Figma for VS Code extension is installed.");
-    }
-    
-    figma.vscode.notify(message);
-    
-    return {
-        success: true,
-        message: "Notification sent to VS Code."
-    };
-}
-
-// === Full-context gatherer (max depth, no truncation) ===
-async function gatherFullContext(params) {
-  const includeComments = params && params.includeComments !== false;
-
-  const page = figma.currentPage;
-  const selection = page.selection || [];
-
-  const selectionSignature = phase1ComputeSelectionSignature(selection);
-  const force = !!(params && params.force === true);
-
-  if (!force && fullContextCache.data && fullContextCache.lastSignature === selectionSignature && fullContextCache.includeComments === includeComments && (Date.now() - fullContextCache.ts) <= FULL_CONTEXT_TTL_MS) {
-    const cached = Object.assign({}, fullContextCache.data, { cache: { hit: true, ageMs: Date.now() - fullContextCache.ts, ttlMs: FULL_CONTEXT_TTL_MS } });
-    return sanitize(cached);
-  }
-
-  function safeAssign(target, node, key) {
-    try {
-      if (key in node) target[key] = node[key];
-    } catch (_) {}
-  }
-
-  function collectAutoLayout(node, out) {
-    if (!('layoutMode' in node)) return;
-    out.autoLayout = {
-      layoutMode: node.layoutMode,
-      layoutWrap: ('layoutWrap' in node) ? node.layoutWrap : undefined,
-      primaryAxisAlignItems: ('primaryAxisAlignItems' in node) ? node.primaryAxisAlignItems : undefined,
-      counterAxisAlignItems: ('counterAxisAlignItems' in node) ? node.counterAxisAlignItems : undefined,
-      primaryAxisSizingMode: ('primaryAxisSizingMode' in node) ? node.primaryAxisSizingMode : undefined,
-      counterAxisSizingMode: ('counterAxisSizingMode' in node) ? node.counterAxisSizingMode : undefined,
-      itemSpacing: ('itemSpacing' in node) ? node.itemSpacing : undefined,
-      counterAxisSpacing: ('counterAxisSpacing' in node) ? node.counterAxisSpacing : undefined,
-      paddingTop: ('paddingTop' in node) ? node.paddingTop : undefined,
-      paddingRight: ('paddingRight' in node) ? node.paddingRight : undefined,
-      paddingBottom: ('paddingBottom' in node) ? node.paddingBottom : undefined,
-      paddingLeft: ('paddingLeft' in node) ? node.paddingLeft : undefined,
-    };
-    safeAssign(out, node, 'strokesIncludedInLayout');
-    safeAssign(out, node, 'layoutAlign');
-    safeAssign(out, node, 'layoutGrow');
-    safeAssign(out, node, 'layoutSizingHorizontal');
-    safeAssign(out, node, 'layoutSizingVertical');
-  }
-
-  function collectStyles(node, out) {
-    // Paints / Strokes / Effects / Grids
-    if ('fills' in node) out.fills = node.fills;
-    if ('strokes' in node) out.strokes = node.strokes;
-    safeAssign(out, node, 'strokeWeight');
-    safeAssign(out, node, 'strokeAlign');
-    safeAssign(out, node, 'strokeCap');
-    safeAssign(out, node, 'strokeJoin');
-    safeAssign(out, node, 'dashPattern');
-    safeAssign(out, node, 'miterLimit');
-    if ('effects' in node) out.effects = node.effects;
-    if ('layoutGrids' in node) out.layoutGrids = node.layoutGrids;
-    // Style refs
-    safeAssign(out, node, 'fillStyleId');
-    safeAssign(out, node, 'strokeStyleId');
-    safeAssign(out, node, 'effectStyleId');
-    safeAssign(out, node, 'gridStyleId');
-    if (node.type === 'TEXT') safeAssign(out, node, 'textStyleId');
-    // Backgrounds on Frames/Components
-    safeAssign(out, node, 'backgrounds');
-    safeAssign(out, node, 'backgroundStyleId');
-  }
-
-  function collectGeometry(node, out) {
-    out.visible = node.visible !== false;
-    safeAssign(out, node, 'locked');
-    safeAssign(out, node, 'opacity');
-    safeAssign(out, node, 'blendMode');
-    safeAssign(out, node, 'isMask');
-    // Size only (omit x,y/transforms/constraints)
-    out.width = node.width; out.height = node.height;
-    safeAssign(out, node, 'rotation');
-    // Corners
-    safeAssign(out, node, 'cornerRadius');
-    safeAssign(out, node, 'rectangleCornerRadii');
-    safeAssign(out, node, 'cornerSmoothing');
-    // Clipping only (omit export settings)
-    safeAssign(out, node, 'clipsContent');
-  }
-
-  function collectVariables(node, out) {
-    safeAssign(out, node, 'boundVariables');
-  }
-
-  async function collectComponentInfo(node, out) {
-    if (node.type === 'INSTANCE') {
-      try {
-        const mc = await node.getMainComponentAsync();
-        out.instanceOf = mc ? { id: mc.id, name: mc.name, key: ('key' in mc) ? mc.key : undefined } : null;
-      } catch (_) {
-        out.instanceOf = node.mainComponent ? { id: node.mainComponent.id, name: node.mainComponent.name } : null;
-      }
-      safeAssign(out, node, 'componentProperties');
-      safeAssign(out, node, 'componentPropertyReferences');
-      safeAssign(out, node, 'variantProperties');
-      safeAssign(out, node, 'scaleFactor');
-    } else if (node.type === 'COMPONENT') {
-      safeAssign(out, node, 'key');
-      // omit description/documentationLinks and global instances
-      safeAssign(out, node, 'variantProperties');
-    } else if (node.type === 'COMPONENT_SET') {
-      safeAssign(out, node, 'key');
-      // omit description
-      safeAssign(out, node, 'componentPropertyDefinitions');
-    }
-  }
-
-  function collectConnectorsAndVectors(node, out) {
-    // Intentionally omitted per design workflow scope
-  }
-
-  function collectText(node, out) {
-    if (node.type !== 'TEXT') return;
-    out.characters = node.characters || '';
-    out.typography = {
-      fontName: node.fontName,
-      fontSize: node.fontSize,
-      textAlignHorizontal: node.textAlignHorizontal,
-      textAlignVertical: node.textAlignVertical,
-      letterSpacing: node.letterSpacing,
-      lineHeight: node.lineHeight,
-      paragraphSpacing: ('paragraphSpacing' in node) ? node.paragraphSpacing : undefined,
-      paragraphIndent: ('paragraphIndent' in node) ? node.paragraphIndent : undefined,
-      textCase: ('textCase' in node) ? node.textCase : undefined,
-      textDecoration: ('textDecoration' in node) ? node.textDecoration : undefined,
-      textAutoResize: ('textAutoResize' in node) ? node.textAutoResize : undefined,
-    };
-    // Styled text segments if supported
-    try {
-      if ('getStyledTextSegments' in node) {
-        out.styledTextSegments = node.getStyledTextSegments([
-          'fontName','fontSize','fill','fills','textCase','textDecoration','letterSpacing','lineHeight','textStyleId','hyperlink'
-        ]);
-      }
-    } catch (_) {}
-  }
-
-  function collectPluginData(node, out) { /* omitted */ }
-
-  async function collectNodeDeep(node) {
-    const info = {
-      id: node.id,
-      name: node.name,
-      type: node.type,
-      parentId: node.parent ? node.parent.id : null,
-      index: (node.parent && node.parent.children) ? node.parent.children.indexOf(node) : -1,
-    };
-
-    collectGeometry(node, info);
-    collectAutoLayout(node, info);
-    collectStyles(node, info);
-    collectVariables(node, info);
-    collectText(node, info);
-    collectConnectorsAndVectors(node, info);
-    await collectComponentInfo(node, info);
-    safeAssign(info, node, 'reactions');
-
-    collectPluginData(node, info);
-
-    if ('children' in node && Array.isArray(node.children)) {
-      info.children = [];
-      for (const child of node.children) {
-        info.children.push(await collectNodeDeep(child));
-      }
-    }
-
-    return info;
-  }
-
-  const nodesData = [];
-  for (const n of selection) {
-    nodesData.push(await collectNodeDeep(n));
-  }
-
-  // Optional enrichments
-  let comments = undefined;
-  if (includeComments) {
-    try {
-      const all = await figma.root.getCommentsAsync();
-      const selectedIds = new Set(selection.map(n => n.id));
-      comments = all.filter(c => {
-        try {
-          const meta = c.clientMeta || {};
-          const nodeId = meta && (meta.nodeId || meta.node_id || (meta.node && meta.node.id));
-          return nodeId ? selectedIds.has(nodeId) : false;
-        } catch (_) { return false; }
-      }).map(c => ({ id: c.id, message: c.message, clientMeta: c.clientMeta, createdAt: c.createdAt, resolvedAt: c.resolvedAt, user: c.user }));
-    } catch (_) {}
-  }
-
-  function sanitize(value) {
-    if (value === figma.mixed) return "MIXED";
-    if (typeof value === 'symbol') return null;
-    if (!value) return value;
-    if (Array.isArray(value)) return value.map(sanitize);
-    if (typeof value === 'object') {
-      const out = {};
-      for (const k of Object.keys(value)) {
-        const v = value[k];
-        const sv = sanitize(v);
-        if (sv !== undefined) out[k] = sv;
-      }
-      return out;
-    }
-    return value;
-  }
-
-  const result = {
-    success: true,
-    document: { pageId: page.id, pageName: page.name },
-    selectionCount: selection.length,
-    selectedNodeIds: selection.map(n => n.id),
-    gatheredAt: Date.now(),
-    selectionSignature: selectionSignature,
-    nodes: nodesData,
-    comments
-  };
-  // update cache
-  fullContextCache.lastSignature = selectionSignature;
-  fullContextCache.includeComments = includeComments;
-  fullContextCache.data = result;
-  fullContextCache.ts = Date.now();
-
-  return sanitize(result);
 }

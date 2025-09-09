@@ -15,7 +15,7 @@ echo "Platform: $PLATFORM"
 echo "Project directory: $PROJECT_DIR"
 
 # Build the development stage of the Docker image
-docker build --platform "$PLATFORM" --target development -t figma-agent-dev .
+docker build --platform "$PLATFORM" --target development -t figma-agent-dev . 
 
 echo "Starting development container with hot reload on localhost:$PORT ..."
 echo "Container name: $CONTAINER_NAME"

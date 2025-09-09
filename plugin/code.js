@@ -70,14 +70,8 @@ function registerDefaultCommands() {
   commandRegistry.set("get_document_styles", (p) => getDocumentStyles(p));
   commandRegistry.set("get_style_consumers", (p) => getStyleConsumers(p));
   commandRegistry.set("get_document_components", (p) => getDocumentComponents(p));
-  commandRegistry.set("get_prototype_interactions", (p) => getPrototypeInteractions(p));
 
   commandRegistry.set("create_frame", (p) => createFrame(p));
-  commandRegistry.set("create_rectangle", (p) => createRectangle(p));
-  commandRegistry.set("create_ellipse", (p) => createEllipse(p));
-  commandRegistry.set("create_polygon", (p) => createPolygon(p));
-  commandRegistry.set("create_star", (p) => createStar(p));
-  commandRegistry.set("create_line", (p) => createLine(p));
   commandRegistry.set("create_text", (p) => createText(p));
 
   commandRegistry.set("set_fills", (p) => set_fills(p));
@@ -85,25 +79,21 @@ function registerDefaultCommands() {
   commandRegistry.set("set_corner_radius", (p) => set_corner_radius(p));
   commandRegistry.set("set_size", (p) => set_size(p));
   commandRegistry.set("set_position", (p) => set_position(p));
-  commandRegistry.set("set_rotation", (p) => set_rotation(p));
   commandRegistry.set("set_layer_properties", (p) => set_layer_properties(p));
   commandRegistry.set("set_effects", (p) => set_effects(p));
 
   commandRegistry.set("set_auto_layout", (p) => set_auto_layout(p));
   commandRegistry.set("set_auto_layout_child", (p) => set_auto_layout_child(p));
   commandRegistry.set("set_constraints", (p) => set_constraints(p));
+  commandRegistry.set("set_child_index", (p) => set_child_index(p));
 
   commandRegistry.set("set_text_characters", (p) => setTextCharacters(p));
   commandRegistry.set("set_text_style", (p) => setTextStyle(p));
 
   commandRegistry.set("clone_nodes", (p) => clone_nodes(p));
-  commandRegistry.set("group_nodes", (p) => group_nodes(p));
-  commandRegistry.set("ungroup_node", (p) => ungroup_node(p));
   commandRegistry.set("reparent_nodes", (p) => reparent_nodes(p));
   commandRegistry.set("reorder_nodes", (p) => reorder_nodes(p));
 
-  commandRegistry.set("perform_boolean_operation", (p) => perform_boolean_operation(p));
-  commandRegistry.set("flatten_nodes", (p) => flatten_nodes(p));
 
   commandRegistry.set("create_component_from_node", (p) => createComponentFromNode(p));
   commandRegistry.set("create_component_instance", (p) => createComponentInstance(p));
@@ -118,7 +108,6 @@ function registerDefaultCommands() {
   commandRegistry.set("set_variable_value", (p) => setVariableValue(p));
   commandRegistry.set("bind_variable_to_property", (p) => bindVariableToProperty(p));
 
-  commandRegistry.set("set_reaction", (p) => set_reaction(p));
 
   commandRegistry.set("scroll_and_zoom_into_view", (p) => scroll_and_zoom_into_view(p));
   commandRegistry.set("delete_nodes", (p) => delete_nodes(p));
@@ -153,9 +142,20 @@ async function handleCommand(command, params) {
   const autoReveal = !(params && params.autoReveal === false) && !viewportOnly.has(command);
 
   // Wrap the execution in an undo group for atomic step semantics and UX reveal
+  // Provide candidate ids from params so reveal can still work for read-only commands
+  let candidate_ids = [];
+  try {
+    if (params && Array.isArray(params.node_ids)) {
+      candidate_ids = params.node_ids.filter((id) => typeof id === 'string' && id.length > 0);
+    }
+    if (params && typeof params.node_id === 'string' && params.node_id.length > 0) {
+      candidate_ids = [params.node_id, ...candidate_ids];
+    }
+  } catch (_) {}
+
   return await withUndoGroup(stepLabel, async () => {
     return await action();
-  }, { autoReveal });
+  }, { autoReveal, candidate_ids });
 }
 
 // ======================================================
@@ -257,6 +257,36 @@ async function getCanvasSnapshot(params) {
       selection_signature: signature,
       selection_summary: selectionSummary,
     };
+
+    // Optionally include lightweight exported images for the current selection
+    if (include_images && Array.isArray(selection) && selection.length > 0) {
+      try {
+        const maxExports = 2; // keep snapshot small; backend will further cap/validate
+        const fmt = 'PNG';
+        const constraint = { type: 'SCALE', value: 2 };
+        const useAbsoluteBounds = true;
+        const images = {};
+        let exportedCount = 0;
+        for (const node of selection) {
+          if (exportedCount >= maxExports) break;
+          try {
+            if (node && typeof node.exportAsync === 'function') {
+              const bytes = await node.exportAsync({ format: fmt, constraint, useAbsoluteBounds });
+              images[node.id] = customBase64Encode(bytes);
+              exportedCount++;
+            }
+          } catch (e) {
+            try { logger.warn("⚠️ snapshot export failed for node", { node_id: node && node.id, error: (e && e.message) || String(e) }); } catch (_) {}
+          }
+        }
+        if (exportedCount > 0) {
+          payload.exported_images = images;
+          try { logger.info("🖼️ get_canvas_snapshot included exported_images", { count: exportedCount }); } catch (_) {}
+        }
+      } catch (e) {
+        try { logger.warn("⚠️ snapshot image export skipped due to error", { error: (e && e.message) || String(e) }); } catch (_) {}
+      }
+    }
 
     _lastCanvasSnapshot = { signature, include_images, ts: Date.now(), payload };
 
@@ -705,19 +735,28 @@ async function getStyleConsumers(params) {
 }
 
 // -------- TOOL : get_document_components --------
-async function getDocumentComponents() {
+async function getDocumentComponents(params) {
   try {
     const components = [];
+    // Optional filter: 'all' | 'published_only' | 'unpublished_only'
+    let published_filter = (params && typeof params === 'object' && typeof params.published_filter === 'string') ? params.published_filter : 'all';
+    if (published_filter !== 'published_only' && published_filter !== 'unpublished_only' && published_filter !== 'all') {
+      published_filter = 'all';
+    }
     try {
       const all = figma.root && typeof figma.root.findAll === 'function' ? figma.root.findAll(() => true) : [];
       for (const n of all) {
         if (n.type === 'COMPONENT' || n.type === 'COMPONENT_SET') {
-          const entry = { id: n.id, component_key: ("key" in n && n.key) ? String(n.key) : null, name: n.name, type: n.type };
+          const is_published = ("key" in n && !!n.key);
+          if ((published_filter === 'published_only' && !is_published) || (published_filter === 'unpublished_only' && is_published)) {
+            continue;
+          }
+          const entry = { id: n.id, component_key: ("key" in n && n.key) ? String(n.key) : null, name: n.name, type: n.type, is_published };
           components.push(entry);
         }
       }
     } catch (_) {}
-    logger.info('✅ get_document_components succeeded', { count: components.length });
+    logger.info('✅ get_document_components succeeded', { count: components.length, published_filter });
     return { components };
   } catch (error) {
     try {
@@ -733,37 +772,8 @@ async function getDocumentComponents() {
   }
 }
 
-// -------- TOOL : get_prototype_interactions --------
-async function getPrototypeInteractions(params) {
-  try {
-    const { node_id } = params || {};
-    if (typeof node_id !== 'string' || node_id.length === 0) {
-      const payload = { code: 'missing_parameter', message: "'node_id' must be a non-empty string", details: { node_id } };
-      logger.error('❌ get_prototype_interactions failed', { code: payload.code, originalError: payload.message, details: payload.details });
-      throw new Error(JSON.stringify(payload));
-    }
-    const node = await figma.getNodeByIdAsync(node_id);
-    if (!node) {
-      const payload = { code: 'node_not_found', message: `Node not found: ${node_id}`, details: { node_id } };
-      logger.error('❌ get_prototype_interactions failed', { code: payload.code, originalError: payload.message, details: payload.details });
-      throw new Error(JSON.stringify(payload));
-    }
-    const reactions = Array.isArray(node.reactions) ? node.reactions : [];
-    logger.info('✅ get_prototype_interactions succeeded', { count: reactions.length });
-    return { reactions };
-  } catch (error) {
-    try {
-      const maybe = JSON.parse(error && error.message ? error.message : String(error));
-      if (maybe && maybe.code) {
-        logger.error('❌ get_prototype_interactions failed', { code: maybe.code, originalError: (error && error.message) || String(error), details: maybe.details || {} });
-        throw new Error(JSON.stringify(maybe));
-      }
-    } catch (_) {}
-    const payload = { code: 'unknown_plugin_error', message: (error && error.message) || String(error), details: {} };
-    logger.error('❌ get_prototype_interactions failed', { code: payload.code, originalError: payload.message, details: payload.details });
-    throw new Error(JSON.stringify(payload));
-  }
-}
+
+
 
 
 
@@ -794,6 +804,8 @@ async function createFrame(params) {
     frame.x = x;
     frame.y = y;
     try { frame.resize(width, height); } catch (_) {}
+    // Default: enable auto layout for new frames for efficiency
+    try { frame.layoutMode = 'None'; } catch (_) {}
 
     if (!parent_id) {
       figma.currentPage.appendChild(frame);
@@ -831,276 +843,6 @@ async function createFrame(params) {
   }
 }
 
-// -------- TOOL : create_rectangle --------
-async function createRectangle(params) {
-  try {
-    const name = params && typeof params.name === 'string' ? params.name : 'Rectangle';
-    const parent_id = params && (typeof params.parent_id === 'string' ? params.parent_id : undefined);
-    const width = params && typeof params.width === 'number' ? params.width : 100;
-    const height = params && typeof params.height === 'number' ? params.height : 100;
-    const x = params && typeof params.x === 'number' ? params.x : 0;
-    const y = params && typeof params.y === 'number' ? params.y : 0;
-
-    if (!(width > 0) || !(height > 0)) {
-      const payload = { code: 'invalid_size', message: 'Width/height must be positive numbers', details: { width, height } };
-      logger.error('❌ create_rectangle failed', { code: payload.code, originalError: payload.message, details: payload.details });
-      throw new Error(JSON.stringify(payload));
-    }
-
-    const rect = figma.createRectangle();
-    rect.name = name;
-    rect.x = x;
-    rect.y = y;
-    try { rect.resize(width, height); } catch (_) {}
-
-    if (!parent_id) {
-      figma.currentPage.appendChild(rect);
-    } else {
-      const parentNode = await figma.getNodeByIdAsync(parent_id);
-      if (!parentNode) {
-        logger.error('❌ create_rectangle failed', { code: 'parent_not_found', originalError: 'Parent not found', details: { parent_id } });
-        throw new Error(JSON.stringify({ code: 'parent_not_found', message: 'Parent node not found', details: { parent_id } }));
-      }
-      if (!('appendChild' in parentNode)) {
-        logger.error('❌ create_rectangle failed', { code: 'invalid_parent', originalError: 'Parent cannot accept children', details: { parent_id, parentType: parentNode.type } });
-        throw new Error(JSON.stringify({ code: 'invalid_parent', message: 'Parent node does not support children', details: { parent_id, parentType: parentNode.type } }));
-      }
-      try { parentNode.appendChild(rect); } catch (e) {
-        const originalError = (e && e.message) || String(e);
-        const isLocked = /lock/i.test(originalError);
-        const code = isLocked ? 'locked_parent' : 'append_failed';
-        logger.error('❌ create_rectangle failed', { code, originalError, details: { parent_id } });
-        throw new Error(JSON.stringify({ code, message: `Failed to append rectangle to parent ${parent_id}: ${originalError}`, details: { parent_id } }));
-      }
-    }
-
-    logger.info('✅ create_rectangle succeeded', { id: rect.id, name: rect.name });
-    return {
-      success: true,
-      summary: `Created rectangle ${rect.id}`,
-      created_node_id: rect.id,
-      node: { id: rect.id, name: rect.name, x: rect.x, y: rect.y, width: rect.width || width, height: rect.height || height, parent_id }
-    };
-  } catch (error) {
-    try { const maybe = JSON.parse(error && error.message ? error.message : '{}'); if (maybe && maybe.code) throw error; } catch (_) {}
-    logger.error('❌ create_rectangle failed', { code: 'unknown_plugin_error', originalError: (error && error.message) || String(error), details: {} });
-    throw new Error(JSON.stringify({ code: 'unknown_plugin_error', message: (error && error.message) || 'Failed to create rectangle', details: {} }));
-  }
-}
-
-// -------- TOOL : create_ellipse --------
-async function createEllipse(params) {
-  try {
-    const name = params && typeof params.name === 'string' ? params.name : 'Ellipse';
-    const parent_id = params && (typeof params.parent_id === 'string' ? params.parent_id : undefined);
-    const width = params && typeof params.width === 'number' ? params.width : 100;
-    const height = params && typeof params.height === 'number' ? params.height : 100;
-    const x = params && typeof params.x === 'number' ? params.x : 0;
-    const y = params && typeof params.y === 'number' ? params.y : 0;
-
-    const ellipse = figma.createEllipse();
-    ellipse.name = name;
-    ellipse.x = x;
-    ellipse.y = y;
-    try { ellipse.resize(width, height); } catch (_) {}
-
-    if (!parent_id) {
-      figma.currentPage.appendChild(ellipse);
-    } else {
-      const parentNode = await figma.getNodeByIdAsync(parent_id);
-      if (!parentNode) {
-        logger.error("❌ create_ellipse failed", { code: "parent_not_found", originalError: `Parent not found`, details: { parent_id } });
-        throw new Error(JSON.stringify({ code: "parent_not_found", message: `Parent node not found`, details: { parent_id } }));
-      }
-      if (!("appendChild" in parentNode)) {
-        logger.error("❌ create_ellipse failed", { code: "invalid_parent", originalError: `Parent cannot accept children`, details: { parent_id, parentType: parentNode.type } });
-        throw new Error(JSON.stringify({ code: "invalid_parent", message: `Parent node does not support children`, details: { parent_id, parentType: parentNode.type } }));
-      }
-      try { parentNode.appendChild(ellipse); } catch (e) {
-        const originalError = (e && e.message) || String(e);
-        const isLocked = /lock/i.test(originalError);
-        const code = isLocked ? "locked_parent" : "append_failed";
-        logger.error("❌ create_ellipse failed", { code, originalError, details: { parent_id } });
-        throw new Error(JSON.stringify({ code, message: `Failed to append ellipse to parent ${parent_id}: ${originalError}`, details: { parent_id } }));
-      }
-    }
-
-    logger.info("✅ create_ellipse succeeded", { id: ellipse.id, name: ellipse.name });
-    return {
-      success: true,
-      summary: `Created ellipse ${ellipse.id}`,
-      created_node_id: ellipse.id,
-      node: { id: ellipse.id, name: ellipse.name, x: ellipse.x, y: ellipse.y, width: ellipse.width || width, height: ellipse.height || height, parent_id }
-    };
-  } catch (error) {
-    try {
-      const maybe = JSON.parse(error && error.message ? error.message : "{}");
-      if (maybe && typeof maybe === "object" && maybe.code) throw error;
-    } catch (_) {}
-    logger.error("❌ create_ellipse failed", { code: "unknown_plugin_error", originalError: (error && error.message) || String(error), details: {} });
-    throw new Error(JSON.stringify({ code: "unknown_plugin_error", message: (error && error.message) || "Failed to create ellipse", details: {} }));
-  }
-}
-
-// -------- TOOL : create_polygon --------
-async function createPolygon(params) {
-  try {
-    const name = params && typeof params.name === 'string' ? params.name : 'Polygon';
-    const parent_id = params && (typeof params.parent_id === 'string' ? params.parent_id : undefined);
-    const side_count = params && typeof params.side_count === 'number' ? params.side_count : 3;
-    const radius = params && typeof params.radius === 'number' ? params.radius : 50;
-    const x = params && typeof params.x === 'number' ? params.x : 0;
-    const y = params && typeof params.y === 'number' ? params.y : 0;
-
-    const polygon = figma.createPolygon();
-    polygon.name = name;
-    polygon.x = x;
-    polygon.y = y;
-    try { polygon.pointCount = side_count; } catch (_) {}
-    try { polygon.resize(radius * 2, radius * 2); } catch (_) {}
-
-    if (!parent_id) {
-      figma.currentPage.appendChild(polygon);
-    } else {
-      const parentNode = await figma.getNodeByIdAsync(parent_id);
-      if (!parentNode) {
-        logger.error("❌ create_polygon failed", { code: "parent_not_found", originalError: `Parent not found`, details: { parent_id } });
-        throw new Error(JSON.stringify({ code: "parent_not_found", message: `Parent node not found`, details: { parent_id } }));
-      }
-      if (!("appendChild" in parentNode)) {
-        logger.error("❌ create_polygon failed", { code: "invalid_parent", originalError: `Parent cannot accept children`, details: { parent_id, parentType: parentNode.type } });
-        throw new Error(JSON.stringify({ code: "invalid_parent", message: `Parent node does not support children`, details: { parent_id, parentType: parentNode.type } }));
-      }
-      try { parentNode.appendChild(polygon); } catch (e) {
-        const originalError = (e && e.message) || String(e);
-        const isLocked = /lock/i.test(originalError);
-        const code = isLocked ? "locked_parent" : "append_failed";
-        logger.error("❌ create_polygon failed", { code, originalError, details: { parent_id } });
-        throw new Error(JSON.stringify({ code, message: `Failed to append polygon to parent ${parent_id}: ${originalError}`, details: { parent_id } }));
-      }
-    }
-
-    logger.info("✅ create_polygon succeeded", { id: polygon.id, name: polygon.name });
-    return {
-      success: true,
-      summary: `Created polygon ${polygon.id}`,
-      created_node_id: polygon.id,
-      node: { id: polygon.id, name: polygon.name, x: polygon.x, y: polygon.y, point_count: polygon.pointCount || side_count, radius, parent_id }
-    };
-  } catch (error) {
-    try { const maybe = JSON.parse(error && error.message ? error.message : "{}"); if (maybe && maybe.code) throw error; } catch (_) {}
-    logger.error("❌ create_polygon failed", { code: "unknown_plugin_error", originalError: (error && error.message) || String(error), details: {} });
-    throw new Error(JSON.stringify({ code: "unknown_plugin_error", message: (error && error.message) || "Failed to create polygon", details: {} }));
-  }
-}
-
-// -------- TOOL : create_star --------
-async function createStar(params) {
-  try {
-    const name = params && typeof params.name === 'string' ? params.name : 'Star';
-    const parent_id = params && (typeof params.parent_id === 'string' ? params.parent_id : undefined);
-    const point_count = params && typeof params.point_count === 'number' ? params.point_count : 5;
-    const outer_radius = params && typeof params.outer_radius === 'number' ? params.outer_radius : 50;
-    const inner_radius_ratio = params && typeof params.inner_radius_ratio === 'number' ? params.inner_radius_ratio : 0.5;
-    const x = params && typeof params.x === 'number' ? params.x : 0;
-    const y = params && typeof params.y === 'number' ? params.y : 0;
-
-    const star = figma.createStar();
-    star.name = name;
-    star.x = x;
-    star.y = y;
-    try { star.pointCount = point_count; } catch (_) {}
-    try { star.innerRadius = Math.max(0, Math.min(1, inner_radius_ratio)); } catch (_) {}
-    try { star.resize(outer_radius * 2, outer_radius * 2); } catch (_) {}
-
-    if (!parent_id) {
-      figma.currentPage.appendChild(star);
-    } else {
-      const parentNode = await figma.getNodeByIdAsync(parent_id);
-      if (!parentNode) {
-        logger.error("❌ create_star failed", { code: "parent_not_found", originalError: `Parent not found`, details: { parent_id } });
-        throw new Error(JSON.stringify({ code: "parent_not_found", message: `Parent node not found`, details: { parent_id } }));
-      }
-      if (!("appendChild" in parentNode)) {
-        logger.error("❌ create_star failed", { code: "invalid_parent", originalError: `Parent cannot accept children`, details: { parent_id, parentType: parentNode.type } });
-        throw new Error(JSON.stringify({ code: "invalid_parent", message: `Parent node does not support children`, details: { parent_id, parentType: parentNode.type } }));
-      }
-      try { parentNode.appendChild(star); } catch (e) {
-        const originalError = (e && e.message) || String(e);
-        const isLocked = /lock/i.test(originalError);
-        const code = isLocked ? "locked_parent" : "append_failed";
-        logger.error("❌ create_star failed", { code, originalError, details: { parent_id } });
-        throw new Error(JSON.stringify({ code, message: `Failed to append star to parent ${parent_id}: ${originalError}`, details: { parent_id } }));
-      }
-    }
-
-    logger.info("✅ create_star succeeded", { id: star.id, name: star.name });
-    return {
-      success: true,
-      summary: `Created star ${star.id}`,
-      created_node_id: star.id,
-      node: { id: star.id, name: star.name, x: star.x, y: star.y, point_count: star.pointCount || point_count, outer_radius, inner_radius_ratio, parent_id }
-    };
-  } catch (error) {
-    try { const maybe = JSON.parse(error && error.message ? error.message : "{}"); if (maybe && maybe.code) throw error; } catch (_) {}
-    logger.error("❌ create_star failed", { code: "unknown_plugin_error", originalError: (error && error.message) || String(error), details: {} });
-    throw new Error(JSON.stringify({ code: "unknown_plugin_error", message: (error && error.message) || "Failed to create star", details: {} }));
-  }
-}
-
-// -------- TOOL : create_line --------
-async function createLine(params) {
-  try {
-    const name = params && typeof params.name === 'string' ? params.name : 'Line';
-    const parent_id = params && (typeof params.parent_id === 'string' ? params.parent_id : undefined);
-    const length = params && typeof params.length === 'number' ? params.length : 100;
-    const rotation = params && typeof params.rotation_degrees === 'number' ? params.rotation_degrees : 0;
-    const x = params && typeof params.x === 'number' ? params.x : 0;
-    const y = params && typeof params.y === 'number' ? params.y : 0;
-
-    const line = figma.createLine();
-    line.name = name;
-    line.x = x;
-    line.y = y;
-    try { line.rotation = rotation; } catch (_) {}
-    try { line.resize(length, 0); } catch (_) {
-      try { line.resizeWithoutConstraints(length, 0); } catch (_) {}
-    }
-
-    if (!parent_id) {
-      figma.currentPage.appendChild(line);
-    } else {
-      const parentNode = await figma.getNodeByIdAsync(parent_id);
-      if (!parentNode) {
-        logger.error("❌ create_line failed", { code: "parent_not_found", originalError: `Parent not found`, details: { parent_id } });
-        throw new Error(JSON.stringify({ code: "parent_not_found", message: `Parent node not found`, details: { parent_id } }));
-      }
-      if (!("appendChild" in parentNode)) {
-        logger.error("❌ create_line failed", { code: "invalid_parent", originalError: `Parent cannot accept children`, details: { parent_id, parentType: parentNode.type } });
-        throw new Error(JSON.stringify({ code: "invalid_parent", message: `Parent node does not support children`, details: { parent_id, parentType: parentNode.type } }));
-      }
-      try { parentNode.appendChild(line); } catch (e) {
-        const originalError = (e && e.message) || String(e);
-        const isLocked = /lock/i.test(originalError);
-        const code = isLocked ? "locked_parent" : "append_failed";
-        logger.error("❌ create_line failed", { code, originalError, details: { parent_id } });
-        throw new Error(JSON.stringify({ code, message: `Failed to append line to parent ${parent_id}: ${originalError}`, details: { parent_id } }));
-      }
-    }
-
-    logger.info("✅ create_line succeeded", { id: line.id, name: line.name });
-    return {
-      success: true,
-      summary: `Created line ${line.id}`,
-      created_node_id: line.id,
-      node: { id: line.id, name: line.name, x: line.x, y: line.y, length, rotation_degrees: rotation, parent_id }
-    };
-  } catch (error) {
-    try { const maybe = JSON.parse(error && error.message ? error.message : "{}"); if (maybe && maybe.code) throw error; } catch (_) {}
-    logger.error("❌ create_line failed", { code: "unknown_plugin_error", originalError: (error && error.message) || String(error), details: {} });
-    throw new Error(JSON.stringify({ code: "unknown_plugin_error", message: (error && error.message) || "Failed to create line", details: {} }));
-  }
-}
 
 // -------- TOOL : create_text --------
 async function createText(params) {
@@ -1196,6 +938,199 @@ async function createText(params) {
 // ---------------------------------------------------------------
 
 
+// Helpers: normalization & validation for Paint arrays (Figma Plugin API compliant)
+function _deep_clone(value) {
+  try { return structuredClone(value); } catch (_) {
+    try { return JSON.parse(JSON.stringify(value)); } catch (_) { return value; }
+  }
+}
+
+function _clamp01(n) {
+  if (typeof n !== "number" || !isFinite(n)) return 0;
+  if (n < 0) return 0;
+  if (n > 1) return 1;
+  return n;
+}
+
+function _normalize_color_channels(color) {
+  if (!color || typeof color !== "object") return { r: 0, g: 0, b: 0 };
+  let { r, g, b, a } = color;
+  const any_over_one = [r, g, b].some((v) => typeof v === "number" && v > 1);
+  const to_unit = (v) => {
+    if (typeof v !== "number" || !isFinite(v)) return 0;
+    if (any_over_one) return Math.max(0, Math.min(1, v / 255));
+    return _clamp01(v);
+  };
+  const to_alpha = (v) => {
+    if (typeof v !== "number" || !isFinite(v)) return 1;
+    if (v > 1 && v <= 255) return Math.max(0, Math.min(1, v / 255));
+    return _clamp01(v);
+  };
+  const res = { r: to_unit(r), g: to_unit(g), b: to_unit(b) };
+  if (a !== undefined) res.a = to_alpha(a);
+  return res;
+}
+
+function _solid_from_hex(hex) {
+  try {
+    if (figma.util && typeof figma.util.solidPaint === "function") {
+      return figma.util.solidPaint(String(hex));
+    }
+  } catch (_) {}
+  // Fallback minimal hex parser (#RRGGBB or #RRGGBBAA)
+  try {
+    const h = String(hex).trim().replace(/^#/, "");
+    if (!(h.length === 6 || h.length === 8)) throw new Error("bad_hex");
+    const r = parseInt(h.slice(0, 2), 16) / 255;
+    const g = parseInt(h.slice(2, 4), 16) / 255;
+    const b = parseInt(h.slice(4, 6), 16) / 255;
+    const a = h.length === 8 ? parseInt(h.slice(6, 8), 16) / 255 : 1;
+    return { type: "SOLID", color: { r, g, b }, opacity: a };
+  } catch (_) {
+    return { type: "SOLID", color: { r: 0, g: 0, b: 0 } };
+  }
+}
+
+function _normalize_gradient_stops(stops) {
+  if (!Array.isArray(stops)) return [];
+  const normalized = stops.map((s) => {
+    const color = _normalize_color_channels(s && s.color);
+    const position = _clamp01((s && typeof s.position === "number") ? s.position : 0);
+    return { color, position };
+  });
+  // Sort by position ascending to please the API
+  normalized.sort((a, b) => a.position - b.position);
+  return normalized;
+}
+
+function _normalize_paint_type(type_value) {
+  const t = String(type_value || "").toUpperCase();
+  // Accept friendly aliases
+  if (t === "LINEAR") return "GRADIENT_LINEAR";
+  if (t === "RADIAL") return "GRADIENT_RADIAL";
+  if (t === "ANGULAR") return "GRADIENT_ANGULAR";
+  if (t === "DIAMOND") return "GRADIENT_DIAMOND";
+  return t;
+}
+
+function _camelize_known_paint_fields(paint) {
+  // Handle common snake_case inputs
+  const p = _deep_clone(paint) || {};
+  if (p.image_hash && !p.imageHash) { p.imageHash = p.image_hash; delete p.image_hash; }
+  if (p.gradient_stops && !p.gradientStops) { p.gradientStops = p.gradient_stops; delete p.gradient_stops; }
+  if (p.gradient_transform && !p.gradientTransform) { p.gradientTransform = p.gradient_transform; delete p.gradient_transform; }
+  if (p.stops && !p.gradientStops) { p.gradientStops = p.stops; delete p.stops; }
+  // Accept gradient_handle_positions from callers and convert to gradientTransform
+  if (Array.isArray(p.gradient_handle_positions)) {
+    try {
+      const handles = p.gradient_handle_positions;
+      // Compute a reasonable gradientTransform from handle positions
+      let t;
+      if (handles.length >= 3) {
+        const h0 = handles[0] || { x: 0, y: 0 };
+        const h1 = handles[1] || { x: 1, y: 0 };
+        const h2 = handles[2] || { x: 0, y: 1 };
+        t = [
+          [ (h1.x - h0.x) || 0, (h2.x - h0.x) || 0, h0.x || 0 ],
+          [ (h1.y - h0.y) || 0, (h2.y - h0.y) || 0, h0.y || 0 ],
+        ];
+      } else if (handles.length >= 2) {
+        const h0 = handles[0] || { x: 0, y: 0 };
+        const h1 = handles[1] || { x: 1, y: 0 };
+        const vx = (h1.x - h0.x) || 1;
+        const vy = (h1.y - h0.y) || 0;
+        // Perpendicular vector for width; normalize length to match main vector length
+        const t2x = -vy;
+        const t2y = vx;
+        t = [ [ vx, t2x, h0.x || 0 ], [ vy, t2y, h0.y || 0 ] ];
+      }
+      if (!p.gradientTransform && t) {
+        p.gradientTransform = t;
+      }
+    } catch (_) {}
+    // Remove unrecognized property regardless
+    delete p.gradient_handle_positions;
+  }
+  if (p.visible !== undefined) p.visible = !!p.visible;
+  return p;
+}
+
+async function _normalize_paints_input(paints) {
+  const result = [];
+  for (const raw of paints) {
+    if (typeof raw === "string") {
+      result.push(_solid_from_hex(raw));
+      continue;
+    }
+    if (!raw || typeof raw !== "object") {
+      const payload = { code: "invalid_fills", message: "Invalid paint entry", details: { entry: raw } };
+      logger.error("❌ normalize_paints_input failed", payload);
+      throw new Error(JSON.stringify(payload));
+    }
+    const p0 = _camelize_known_paint_fields(raw);
+    const type = _normalize_paint_type(p0.type);
+    if (!type) {
+      const payload = { code: "invalid_fills", message: "Paint object missing type", details: { entry: p0 } };
+      logger.error("❌ normalize_paints_input failed", payload);
+      throw new Error(JSON.stringify(payload));
+    }
+    if (type === "SOLID") {
+      const clone = _deep_clone(p0);
+      clone.type = "SOLID";
+      clone.color = _normalize_color_channels(clone.color);
+      // Move alpha from color.a to top-level opacity per Figma API expectations
+      if (clone && clone.color && typeof clone.color === "object" && Object.prototype.hasOwnProperty.call(clone.color, "a")) {
+        const alpha = clone.color.a;
+        if (clone.opacity === undefined) {
+          clone.opacity = _clamp01(alpha);
+        } else {
+          clone.opacity = _clamp01(clone.opacity);
+        }
+        // Remove unsupported channel from color
+        delete clone.color.a;
+      } else if (clone.opacity !== undefined) {
+        clone.opacity = _clamp01(clone.opacity);
+      }
+      result.push(clone);
+      continue;
+    }
+    if (type.startsWith("GRADIENT_")) {
+      const clone = _deep_clone(p0);
+      clone.type = type;
+      // Normalize and validate stops
+      clone.gradientStops = _normalize_gradient_stops(clone.gradientStops);
+      if (!Array.isArray(clone.gradientStops) || clone.gradientStops.length < 2) {
+        const payload = { code: "invalid_fills", message: "gradientStops must have at least 2 entries", details: { entry: p0 } };
+        logger.error("❌ normalize_paints_input failed", payload);
+        throw new Error(JSON.stringify(payload));
+      }
+      // Default transform to identity if missing
+      if (!Array.isArray(clone.gradientTransform)) {
+        clone.gradientTransform = [ [1, 0, 0], [0, 1, 0] ];
+      }
+      if (clone.opacity !== undefined) clone.opacity = _clamp01(clone.opacity);
+      result.push(clone);
+      continue;
+    }
+    if (type === "IMAGE") {
+      const clone = _deep_clone(p0);
+      clone.type = "IMAGE";
+      // Expect imageHash to be present if caller pre-created image; otherwise keep as-is
+      if (!clone.imageHash && clone.imageBytes) {
+        try {
+          const image = figma.createImage(clone.imageBytes);
+          clone.imageHash = image.hash;
+        } catch (_) {}
+      }
+      result.push(clone);
+      continue;
+    }
+    // Pass through unmodified but cloned for any other paint subtypes (e.g., VIDEO)
+    result.push(_deep_clone(p0));
+  }
+  return result;
+}
+
 // -------- TOOL : set_fills --------
 async function set_fills(params) {
   logger.info("🎨 set_fills called", params);
@@ -1211,11 +1146,29 @@ async function set_fills(params) {
       logger.error("❌ set_fills failed", payload);
       throw new Error(JSON.stringify(payload));
     }
+    // Dynamic page: ensure pages are loaded before mutating nodes
+    try {
+      if (typeof figma.loadAllPagesAsync === "function") {
+        await figma.loadAllPagesAsync();
+      }
+      if (figma.currentPage && typeof figma.currentPage.loadAsync === "function") {
+        await figma.currentPage.loadAsync();
+      }
+    } catch (e) {
+      try { logger.error("⚠️ set_fills page preload failed (continuing)", { code: "page_preload_failed", originalError: (e && e.message) || String(e), details: {} }); } catch (_) {}
+    }
+
+    // Normalize paints per Figma API: ensure unit color channels, handle hex strings, clone to avoid readonly objects
+    const normalized_paints = await _normalize_paints_input(paints);
 
     const modified = [];
     const notFoundIds = [];
     const lockedNodes = [];
     const unsupportedNodes = [];
+    const readOnlyNodes = [];
+    const nonOverridableNodes = [];
+    const failedNodes = [];
+    const failureReasons = {};
     for (const id of node_ids) {
       try {
         const node = await figma.getNodeByIdAsync(id);
@@ -1224,16 +1177,26 @@ async function set_fills(params) {
         if (!("fills" in node)) { unsupportedNodes.push(id); continue; }
         const original = node.fills;
         try {
-          node.fills = paints;
+          node.fills = _deep_clone(normalized_paints);
           modified.push(id);
         } catch (e) {
+          const msg = (e && e.message) ? String(e.message) : String(e);
+          // Classify common failure reasons per Figma API
+          if (/read-?only/i.test(msg) || /Cannot write to internal/i.test(msg)) {
+            readOnlyNodes.push(id);
+          } else if (/cannot be overriden|cannot be overridden|override/i.test(msg)) {
+            nonOverridableNodes.push(id);
+          } else {
+            failedNodes.push(id);
+          }
+          try { failureReasons[id] = msg; } catch (_) {}
           try { node.fills = original; } catch (_) {}
         }
       } catch (_) { notFoundIds.push(id); }
     }
 
     if (modified.length === 0) {
-      const payload = { code: "set_fills_failed", message: "No nodes were updated", details: { notFoundIds, lockedNodes, unsupportedNodes } };
+      const payload = { code: "set_fills_failed", message: "No nodes were updated", details: { notFoundIds, lockedNodes, unsupportedNodes, readOnlyNodes, nonOverridableNodes, failedNodes, failureReasons } };
       logger.error("❌ set_fills failed", payload);
       throw new Error(JSON.stringify(payload));
     }
@@ -1257,6 +1220,29 @@ async function set_strokes(params) {
     if (!Array.isArray(node_ids) || node_ids.length === 0) throw new Error(JSON.stringify({ code: "missing_parameter", message: "Provide node_ids array", details: {} }));
     if (!Array.isArray(paints)) throw new Error(JSON.stringify({ code: "invalid_parameter", message: "paints must be an array (use [] to remove)", details: {} }));
 
+    // Validate stroke parameters per API
+    if (stroke_weight !== undefined && (typeof stroke_weight !== "number" || !(stroke_weight >= 0))) {
+      throw new Error(JSON.stringify({ code: "invalid_parameter", message: "stroke_weight must be a non-negative number", details: { stroke_weight } }));
+    }
+    let normalized_align = undefined;
+    if (typeof stroke_align === "string") {
+      const a = String(stroke_align).toUpperCase().trim();
+      const allowed = ["CENTER", "INSIDE", "OUTSIDE"];
+      if (!allowed.includes(a)) {
+        throw new Error(JSON.stringify({ code: "invalid_parameter", message: "stroke_align must be one of CENTER|INSIDE|OUTSIDE", details: { stroke_align } }));
+      }
+      normalized_align = a;
+    }
+    let normalized_dash = undefined;
+    if (dash_pattern !== undefined) {
+      if (!Array.isArray(dash_pattern) || dash_pattern.some((n) => typeof n !== "number" || !isFinite(n) || n < 0)) {
+        throw new Error(JSON.stringify({ code: "invalid_parameter", message: "dash_pattern must be an array of non-negative numbers", details: { dash_pattern } }));
+      }
+      normalized_dash = dash_pattern.slice();
+    }
+
+    const normalized_paints = await _normalize_paints_input(paints);
+
     const modified = [];
     const notFoundIds = [];
     const lockedNodes = [];
@@ -1269,10 +1255,10 @@ async function set_strokes(params) {
         if (!("strokes" in node)) { unsupportedNodes.push(id); continue; }
         const original = { strokes: node.strokes, strokeWeight: node.strokeWeight, strokeAlign: node.strokeAlign, dashPattern: node.dashPattern };
         try {
-          node.strokes = paints;
+          node.strokes = _deep_clone(normalized_paints);
           if (typeof stroke_weight === "number") node.strokeWeight = stroke_weight;
-          if (typeof stroke_align === "string") node.strokeAlign = stroke_align;
-          if (Array.isArray(dash_pattern)) node.dashPattern = dash_pattern;
+          if (normalized_align) node.strokeAlign = normalized_align;
+          if (normalized_dash) node.dashPattern = normalized_dash;
           modified.push(id);
         } catch (e) {
           try { node.strokes = original.strokes; node.strokeWeight = original.strokeWeight; node.strokeAlign = original.strokeAlign; node.dashPattern = original.dashPattern; } catch (_) {}
@@ -1435,42 +1421,7 @@ async function setPosition(params) {
   }
 }
 
-// -------- TOOL : set_rotation --------
-async function set_rotation(params) {
-  logger.info("🧭 set_rotation called", params);
-  try {
-    const { node_ids, rotation_degrees } = params || {};
-    if (!Array.isArray(node_ids) || node_ids.length === 0) throw new Error(JSON.stringify({ code: "missing_parameter", message: "Provide node_ids array", details: {} }));
-    if (typeof rotation_degrees !== "number") throw new Error(JSON.stringify({ code: "missing_parameter", message: "Provide rotation_degrees", details: {} }));
-    const modified = [];
-    const notFoundIds = [];
-    const lockedNodes = [];
-    const unsupportedNodes = [];
-    for (const id of node_ids) {
-      try {
-        const node = await figma.getNodeByIdAsync(id);
-        if (!node) { notFoundIds.push(id); continue; }
-        if (node.locked) { lockedNodes.push(id); continue; }
-        if (!("rotation" in node)) { unsupportedNodes.push(id); continue; }
-        try { node.rotation = rotation_degrees; modified.push(id); } catch (_) { /* skip */ }
-      } catch (_) { notFoundIds.push(id); }
-    }
-    if (modified.length === 0) {
-      const payload = { code: "set_rotation_failed", message: "No nodes were updated", details: { notFoundIds, lockedNodes, unsupportedNodes } };
-      logger.error("❌ set_rotation failed", payload);
-      throw new Error(JSON.stringify(payload));
-    }
-    const summary = `Rotated ${modified.length} node(s)`;
-    logger.info("✅ set_rotation succeeded", { modified_node_ids: modified });
-    const unresolved = Array.from(new Set([...notFoundIds, ...lockedNodes, ...unsupportedNodes]));
-    return { success: true, modified_node_ids: modified, unresolved_node_ids: unresolved, summary, details: { not_found_node_ids: notFoundIds, locked_node_ids: lockedNodes, unsupported_node_ids: unsupportedNodes } };
-  } catch (error) {
-    try { const maybe = JSON.parse(error && error.message ? error.message : "{}"); if (maybe && maybe.code) throw error; } catch (_) {}
-    const payload = { code: "unknown_plugin_error", message: (error && error.message) || String(error), details: { command: "set_rotation" } };
-    logger.error("❌ set_rotation failed", payload);
-    throw new Error(JSON.stringify(payload));
-  }
-}
+
 
 // -------- TOOL : set_layer_properties --------
 async function set_layer_properties(params) {
@@ -1585,7 +1536,7 @@ async function set_effects(params) {
               if (hasSetEffectStyleIdAsync) {
                 await node.setEffectStyleIdAsync("");
               } else if (hasEffectStyleIdProp) {
-                node.effectStyleId = "";
+                try { node.effectStyleId = ""; } catch (_) {}
               }
             } catch (_) {}
             if (!updated) {
@@ -1598,8 +1549,7 @@ async function set_effects(params) {
                 await node.setEffectStyleIdAsync(style.id);
                 updated = true;
               } else if ("effectStyleId" in node) {
-                node.effectStyleId = style.id;
-                updated = true;
+                try { node.effectStyleId = style.id; updated = true; } catch (_) {}
               }
             }
           } catch (_) {}
@@ -1721,6 +1671,75 @@ async function set_auto_layout(params) {
     try { const maybe = JSON.parse(error && error.message ? error.message : "{}"); if (maybe && maybe.code) throw error; } catch (_) {}
     const payload = { code: "unknown_plugin_error", message: (error && error.message) || String(error), details: { command: "set_auto_layout" } };
     logger.error("❌ set_auto_layout failed", payload);
+    throw new Error(JSON.stringify(payload));
+  }
+}
+
+// -------- TOOL : set_child_index --------
+async function set_child_index(params) {
+  const logger = (globalThis.logger && typeof globalThis.logger.info === 'function') ? globalThis.logger : console;
+  logger.info("↕️ set_child_index called", params);
+  try {
+    const { node_id, new_index } = params || {};
+    if (typeof node_id !== 'string' || node_id.length === 0) {
+      const payload = { code: "missing_parameter", message: "'node_id' is required and must be a string", details: { node_id } };
+      logger.error("❌ set_child_index failed", { code: payload.code, originalError: payload.message, details: payload.details });
+      throw new Error(JSON.stringify(payload));
+    }
+    if (typeof new_index !== 'number' || !Number.isInteger(new_index)) {
+      const payload = { code: "invalid_parameter", message: "'new_index' must be an integer", details: { new_index } };
+      logger.error("❌ set_child_index failed", { code: payload.code, originalError: payload.message, details: payload.details });
+      throw new Error(JSON.stringify(payload));
+    }
+
+    const node = await figma.getNodeByIdAsync(node_id);
+    if (!node) {
+      const payload = { code: "node_not_found", message: `Node not found: ${node_id}`, details: { node_id } };
+      logger.error("❌ set_child_index failed", { code: payload.code, originalError: payload.message, details: payload.details });
+      throw new Error(JSON.stringify(payload));
+    }
+    const parent = node.parent;
+    if (!parent || !("insertChild" in parent) || !Array.isArray(parent.children)) {
+      const payload = { code: "invalid_parent_container", message: "Parent is not a container with children", details: { node_id, parent_type: parent ? parent.type : null } };
+      logger.error("❌ set_child_index failed", { code: payload.code, originalError: payload.message, details: payload.details });
+      throw new Error(JSON.stringify(payload));
+    }
+    const currentIndex = parent.children.indexOf(node);
+    if (currentIndex === -1) {
+      const payload = { code: "not_a_child", message: "Node is not a child of its reported parent", details: { node_id } };
+      logger.error("❌ set_child_index failed", { code: payload.code, originalError: payload.message, details: payload.details });
+      throw new Error(JSON.stringify(payload));
+    }
+
+    // Clamp new index to valid bounds
+    const maxIndex = Math.max(0, parent.children.length - 1);
+    const clampedIndex = Math.min(Math.max(0, new_index), maxIndex);
+
+    // No-op if index is same
+    if (clampedIndex === currentIndex) {
+      const summaryNoop = `Child already at index ${clampedIndex}`;
+      logger.info("✅ set_child_index no-op", { node_id, index: clampedIndex });
+      return { success: true, modified_node_ids: [node_id], summary: summaryNoop };
+    }
+
+    try {
+      parent.insertChild(clampedIndex, node);
+    } catch (e) {
+      const originalError = (e && e.message) || String(e);
+      const payload = { code: "set_child_index_failed", message: `Failed to set child index for ${node_id}`, details: { node_id, new_index: clampedIndex, originalError } };
+      logger.error("❌ set_child_index failed", { code: payload.code, originalError: payload.details.originalError, details: payload.details });
+      throw new Error(JSON.stringify(payload));
+    }
+
+    const summary = `Moved child to index ${clampedIndex}`;
+    logger.info("✅ set_child_index succeeded", { node_id, new_index: clampedIndex });
+    return { success: true, modified_node_ids: [node_id], summary };
+  } catch (error) {
+    if (error && typeof error.message === 'string') {
+      try { JSON.parse(error.message); throw error; } catch (_) {}
+    }
+    const payload = { code: "unknown_plugin_error", message: (error && error.message) || String(error), details: { command: "set_child_index" } };
+    logger.error("❌ set_child_index failed", { code: payload.code, originalError: payload.message, details: payload.details });
     throw new Error(JSON.stringify(payload));
   }
 }
@@ -2022,159 +2041,6 @@ async function clone_nodes(params) {
   }
 }
 
-// -------- TOOL : group_nodes --------
-async function group_nodes(params) {
-  const logger = (globalThis.logger && typeof globalThis.logger.info === 'function') ? globalThis.logger : console;
-  try {
-    const { node_ids, new_group_name, parent_id } = params || {};
-
-    if (!Array.isArray(node_ids) || node_ids.length === 0) {
-      const payload = { code: "missing_required_parameter", message: "'node_ids' must be a non-empty array", details: { node_ids } };
-      logger.error("❌ group_nodes failed", { code: payload.code, originalError: payload.message, details: payload.details });
-      throw new Error(JSON.stringify(payload));
-    }
-    if (typeof new_group_name !== 'string' || new_group_name.length === 0) {
-      const payload = { code: "missing_required_parameter", message: "'new_group_name' is required and must be a string", details: { new_group_name } };
-      logger.error("❌ group_nodes failed", { code: payload.code, originalError: payload.message, details: payload.details });
-      throw new Error(JSON.stringify(payload));
-    }
-    if (typeof parent_id !== 'string' || parent_id.length === 0) {
-      const payload = { code: "missing_required_parameter", message: "'parent_id' is required and must be a string", details: { parent_id } };
-      logger.error("❌ group_nodes failed", { code: payload.code, originalError: payload.message, details: payload.details });
-      throw new Error(JSON.stringify(payload));
-    }
-
-    const nodes = [];
-    const unresolved_node_ids = [];
-    for (const id of node_ids) {
-      const n = await figma.getNodeByIdAsync(id);
-      if (!n) { unresolved_node_ids.push(id); continue; }
-      nodes.push(n);
-    }
-
-    if (nodes.length === 0) {
-      const payload = { code: "no_nodes_to_group", message: "No resolvable nodes to group.", details: { node_ids, unresolved_node_ids } };
-      logger.error("❌ group_nodes failed", { code: payload.code, originalError: payload.message, details: payload.details });
-      throw new Error(JSON.stringify(payload));
-    }
-
-    const parent = await figma.getNodeByIdAsync(parent_id);
-    if (!parent) {
-      const payload = { code: "parent_not_found", message: "Parent node not found", details: { parent_id } };
-      logger.error("❌ group_nodes failed", { code: payload.code, originalError: payload.message, details: payload.details });
-      throw new Error(JSON.stringify(payload));
-    }
-    if (!("appendChild" in parent)) {
-      const payload = { code: "invalid_parent_container", message: "Parent is not a container", details: { parent_id, type: parent.type } };
-      logger.error("❌ group_nodes failed", { code: payload.code, originalError: payload.message, details: payload.details });
-      throw new Error(JSON.stringify(payload));
-    }
-
-    let group;
-    try {
-      // figma.group returns a new Group node when available
-      if (typeof figma.group === 'function') {
-        group = figma.group(nodes, parent);
-      } else {
-        // Fallback: create a frame and move nodes into it
-        group = figma.createFrame();
-        group.name = new_group_name;
-        parent.appendChild(group);
-        for (const n of nodes) {
-          try { group.appendChild(n); } catch (_) {}
-        }
-      }
-      if (group && typeof group.name === 'string') group.name = new_group_name;
-    } catch (e) {
-      const originalError = (e && e.message) || String(e);
-      const payload = { code: "group_failed", message: "Failed to create group", details: { originalError } };
-      logger.error("❌ group_nodes failed", { code: payload.code, originalError: payload.details.originalError, details: payload.details });
-      throw new Error(JSON.stringify(payload));
-    }
-
-    const created_group_id = group && group.id ? group.id : null;
-    if (!created_group_id) {
-      const payload = { code: "group_failed", message: "Grouping did not produce a group node", details: {} };
-      logger.error("❌ group_nodes failed", { code: payload.code, originalError: payload.message, details: payload.details });
-      throw new Error(JSON.stringify(payload));
-    }
-
-    const summary = `Created group '${new_group_name}' with ${nodes.length} node(s).`;
-    logger.info("✅ group_nodes succeeded", { created_group_id, unresolved: unresolved_node_ids.length });
-    return { success: true, created_group_id, summary, unresolved_node_ids };
-  } catch (error) {
-    if (error && typeof error.message === "string") {
-      try { JSON.parse(error.message); throw error; } catch (_) {}
-    }
-    const payload = { code: "unknown_plugin_error", message: (error && error.message) || String(error), details: { command: "group_nodes" } };
-    logger.error("❌ group_nodes failed", { code: payload.code, originalError: payload.message, details: payload.details });
-    throw new Error(JSON.stringify(payload));
-  }
-}
-
-// -------- TOOL : ungroup_node --------
-async function ungroup_node(params) {
-  const logger = (globalThis.logger && typeof globalThis.logger.info === 'function') ? globalThis.logger : console;
-  try {
-    const { node_id } = params || {};
-    if (typeof node_id !== 'string' || node_id.length === 0) {
-      const payload = { code: "missing_required_parameter", message: "'node_id' must be a non-empty string", details: { node_id } };
-      logger.error("❌ ungroup_node failed", { code: payload.code, originalError: payload.message, details: payload.details });
-      throw new Error(JSON.stringify(payload));
-    }
-
-    const group = await figma.getNodeByIdAsync(node_id);
-    if (!group) {
-      const payload = { code: "node_not_found", message: "Group node not found", details: { node_id } };
-      logger.error("❌ ungroup_node failed", { code: payload.code, originalError: payload.message, details: payload.details });
-      throw new Error(JSON.stringify(payload));
-    }
-
-    const parent = group.parent;
-    if (!parent || !("insertChild" in parent || "appendChild" in parent)) {
-      const payload = { code: "invalid_parent_container", message: "Cannot move children to parent", details: { parent: parent ? parent.id : null } };
-      logger.error("❌ ungroup_node failed", { code: payload.code, originalError: payload.message, details: payload.details });
-      throw new Error(JSON.stringify(payload));
-    }
-
-    const moved_child_ids = [];
-    try {
-      // Insert children after the group index where possible
-      const siblings = parent.children || [];
-      const groupIndex = siblings.indexOf(group);
-      for (const child of Array.from(group.children || [])) {
-        try {
-          if (groupIndex >= 0 && typeof parent.insertChild === 'function') {
-            parent.insertChild(groupIndex + 1, child);
-          } else if (typeof parent.appendChild === 'function') {
-            parent.appendChild(child);
-          }
-          moved_child_ids.push(child.id);
-        } catch (_) {
-          // best-effort
-        }
-      }
-      // Remove the empty group
-      if ("remove" in group) group.remove();
-    } catch (e) {
-      const originalError = (e && e.message) || String(e);
-      const payload = { code: "ungroup_failed", message: "Failed to ungroup node", details: { node_id, originalError } };
-      logger.error("❌ ungroup_node failed", { code: payload.code, originalError: payload.details.originalError, details: payload.details });
-      throw new Error(JSON.stringify(payload));
-    }
-
-    const summary = `Ungrouped ${moved_child_ids.length} child(ren) from '${group.name || node_id}'.`;
-    logger.info("✅ ungroup_node succeeded", { moved: moved_child_ids.length });
-    return { success: true, moved_child_ids, summary };
-  } catch (error) {
-    if (error && typeof error.message === "string") {
-      try { JSON.parse(error.message); throw error; } catch (_) {}
-    }
-    const payload = { code: "unknown_plugin_error", message: (error && error.message) || String(error), details: { command: "ungroup_node" } };
-    logger.error("❌ ungroup_node failed", { code: payload.code, originalError: payload.message, details: payload.details });
-    throw new Error(JSON.stringify(payload));
-  }
-}
 
 // -------- TOOL : reparent_nodes --------
 async function reparent_nodes(params) {
@@ -2319,193 +2185,6 @@ async function reorder_nodes(params) {
   }
 }
 
-
-
-
-
-// ----------------------------------------------------
-// -------- Sub-Category 3.6: Vector & Boolean --------
-// ----------------------------------------------------
-
-
-// -------- TOOL : perform_boolean_operation --------
-async function perform_boolean_operation(params) {
-  const logger = (globalThis.logger && typeof globalThis.logger.info === 'function') ? globalThis.logger : console;
-  try {
-    const { node_ids, operation, parent_id } = params || {};
-    const allowedOps = new Set(["UNION", "SUBTRACT", "INTERSECT", "EXCLUDE"]);
-    if (!Array.isArray(node_ids) || node_ids.length < 2) {
-      const payload = { code: "invalid_parameter", message: "'node_ids' must be an array of at least 2 ids", details: { node_ids } };
-      logger.error("❌ perform_boolean_operation failed", { code: payload.code, originalError: payload.message, details: payload.details });
-      throw new Error(JSON.stringify(payload));
-    }
-    if (typeof operation !== "string" || !allowedOps.has(operation)) {
-      const payload = { code: "invalid_parameter", message: "'operation' must be one of UNION|SUBTRACT|INTERSECT|EXCLUDE", details: { operation } };
-      logger.error("❌ perform_boolean_operation failed", { code: payload.code, originalError: payload.message, details: payload.details });
-      throw new Error(JSON.stringify(payload));
-    }
-    if (typeof parent_id !== "string" || parent_id.length === 0) {
-      const payload = { code: "missing_required_parameter", message: "'parent_id' is required", details: { parent_id } };
-      logger.error("❌ perform_boolean_operation failed", { code: payload.code, originalError: payload.message, details: payload.details });
-      throw new Error(JSON.stringify(payload));
-    }
-
-    const parent = await figma.getNodeByIdAsync(parent_id);
-    if (!parent) {
-      const payload = { code: "parent_not_found", message: "Parent node not found", details: { parent_id } };
-      logger.error("❌ perform_boolean_operation failed", { code: payload.code, originalError: payload.message, details: payload.details });
-      throw new Error(JSON.stringify(payload));
-    }
-    if (!("appendChild" in parent)) {
-      const payload = { code: "invalid_parent_container", message: "Parent is not a container", details: { parent_id, type: parent.type } };
-      logger.error("❌ perform_boolean_operation failed", { code: payload.code, originalError: payload.message, details: payload.details });
-      throw new Error(JSON.stringify(payload));
-    }
-
-    const supportedTypes = new Set(["RECTANGLE", "ELLIPSE", "POLYGON", "STAR", "VECTOR", "BOOLEAN_OPERATION"]);
-    const nodes = [];
-    const unresolved_node_ids = [];
-    for (const id of node_ids) {
-      const n = await figma.getNodeByIdAsync(id);
-      if (!n) { unresolved_node_ids.push(id); continue; }
-      if (!supportedTypes.has(n.type)) {
-        const payload = { code: "invalid_node_types", message: "Only vector-like nodes can participate in boolean operations", details: { nodeId: id, type: n.type } };
-        logger.error("❌ perform_boolean_operation failed", { code: payload.code, originalError: payload.message, details: payload.details });
-        throw new Error(JSON.stringify(payload));
-      }
-      nodes.push(n);
-    }
-    if (nodes.length < 2) {
-      const payload = { code: "insufficient_nodes", message: "At least 2 valid nodes required", details: { resolvedCount: nodes.length } };
-      logger.error("❌ perform_boolean_operation failed", { code: payload.code, originalError: payload.message, details: payload.details });
-      throw new Error(JSON.stringify(payload));
-    }
-
-    // Reparent nodes to the target parent if needed
-    try {
-      for (const n of nodes) {
-        if (n.parent && n.parent.id === parent.id) continue;
-        if ("remove" in n) {
-          parent.appendChild(n);
-        }
-      }
-    } catch (e) {
-      // non-fatal; the figma API may handle reparenting internally for some operations
-    }
-
-    let result;
-    try {
-      switch (operation) {
-        case "UNION":
-          result = figma.union(nodes, parent);
-          break;
-        case "SUBTRACT":
-          result = figma.subtract(nodes, parent);
-          break;
-        case "INTERSECT":
-          result = figma.intersect(nodes, parent);
-          break;
-        case "EXCLUDE":
-          result = figma.exclude(nodes, parent);
-          break;
-      }
-    } catch (e) {
-      const originalError = (e && e.message) || String(e);
-      const payload = { code: "boolean_operation_failed", message: "Failed to perform boolean operation", details: { operation, originalError } };
-      logger.error("❌ perform_boolean_operation failed", { code: payload.code, originalError: payload.details.originalError, details: payload.details });
-      throw new Error(JSON.stringify(payload));
-    }
-
-    const created_node_id = result && result.id ? result.id : null;
-    if (!created_node_id) {
-      const payload = { code: "operation_failed", message: "Boolean operation did not produce a node", details: { operation } };
-      logger.error("❌ perform_boolean_operation failed", { code: payload.code, originalError: payload.message, details: payload.details });
-      throw new Error(JSON.stringify(payload));
-    }
-
-    const summary = `${operation} of ${nodes.length} node(s).`;
-    logger.info("✅ perform_boolean_operation succeeded", { operation, created_node_id });
-    return { success: true, summary, created_node_id, unresolved_node_ids };
-  } catch (error) {
-    if (error && typeof error.message === "string") {
-      try { JSON.parse(error.message); throw error; } catch (_) {}
-    }
-    const payload = { code: "unknown_plugin_error", message: (error && error.message) || String(error), details: { command: "perform_boolean_operation" } };
-    logger.error("❌ perform_boolean_operation failed", { code: payload.code, originalError: payload.message, details: payload.details });
-    throw new Error(JSON.stringify(payload));
-  }
-}
-
-// -------- TOOL : flatten_nodes --------
-async function flatten_nodes(params) {
-  const logger = (globalThis.logger && typeof globalThis.logger.info === 'function') ? globalThis.logger : console;
-  try {
-    const { node_ids, parent_id } = params || {};
-    if (!Array.isArray(node_ids) || node_ids.length === 0) {
-      const payload = { code: "missing_required_parameter", message: "'node_ids' must be a non-empty array", details: { node_ids } };
-      logger.error("❌ flatten_nodes failed", { code: payload.code, originalError: payload.message, details: payload.details });
-      throw new Error(JSON.stringify(payload));
-    }
-    if (typeof parent_id !== "string" || parent_id.length === 0) {
-      const payload = { code: "missing_required_parameter", message: "'parent_id' is required", details: { parent_id } };
-      logger.error("❌ flatten_nodes failed", { code: payload.code, originalError: payload.message, details: payload.details });
-      throw new Error(JSON.stringify(payload));
-    }
-
-    const parent = await figma.getNodeByIdAsync(parent_id);
-    if (!parent) {
-      const payload = { code: "parent_not_found", message: "Parent node not found", details: { parent_id } };
-      logger.error("❌ flatten_nodes failed", { code: payload.code, originalError: payload.message, details: payload.details });
-      throw new Error(JSON.stringify(payload));
-    }
-    if (!("appendChild" in parent)) {
-      const payload = { code: "invalid_parent_container", message: "Parent is not a container", details: { parent_id, type: parent.type } };
-      logger.error("❌ flatten_nodes failed", { code: payload.code, originalError: payload.message, details: payload.details });
-      throw new Error(JSON.stringify(payload));
-    }
-
-    const nodes = [];
-    const unresolved_node_ids = [];
-    for (const id of node_ids) {
-      const n = await figma.getNodeByIdAsync(id);
-      if (!n) { unresolved_node_ids.push(id); continue; }
-      nodes.push(n);
-    }
-    if (nodes.length === 0) {
-      const payload = { code: "nodes_not_found", message: "No valid nodes to flatten", details: { node_ids, unresolved_node_ids } };
-      logger.error("❌ flatten_nodes failed", { code: payload.code, originalError: payload.message, details: payload.details });
-      throw new Error(JSON.stringify(payload));
-    }
-
-    let result;
-    try {
-      result = figma.flatten(nodes, parent);
-    } catch (e) {
-      const originalError = (e && e.message) || String(e);
-      const payload = { code: "flatten_failed", message: "Failed to flatten nodes", details: { originalError } };
-      logger.error("❌ flatten_nodes failed", { code: payload.code, originalError: payload.details.originalError, details: payload.details });
-      throw new Error(JSON.stringify(payload));
-    }
-
-    const created_node_id = result && result.id ? result.id : null;
-    if (!created_node_id) {
-      const payload = { code: "operation_failed", message: "Flatten did not produce a node", details: {} };
-      logger.error("❌ flatten_nodes failed", { code: payload.code, originalError: payload.message, details: payload.details });
-      throw new Error(JSON.stringify(payload));
-    }
-
-    const summary = `Flattened ${nodes.length} node(s).`;
-    logger.info("✅ flatten_nodes succeeded", { created_node_id, count: nodes.length });
-    return { success: true, summary, created_node_id, unresolved_node_ids };
-  } catch (error) {
-    if (error && typeof error.message === "string") {
-      try { JSON.parse(error.message); throw error; } catch (_) {}
-    }
-    const payload = { code: "unknown_plugin_error", message: (error && error.message) || String(error), details: { command: "flatten_nodes" } };
-    logger.error("❌ flatten_nodes failed", { code: payload.code, originalError: payload.message, details: payload.details });
-    throw new Error(JSON.stringify(payload));
-  }
-}
 
 
 
@@ -2868,11 +2547,23 @@ async function applyStyle(params) {
       try {
         const n = await figma.getNodeByIdAsync(id);
         if (!n) continue;
-        if (t === 'FILL' && 'fillStyleId' in n) { n.fillStyleId = style_id; modified_node_ids.push(id); continue; }
-        if (t === 'STROKE' && 'strokeStyleId' in n) { n.strokeStyleId = style_id; modified_node_ids.push(id); continue; }
-        if (t === 'EFFECT' && 'effectStyleId' in n) { n.effectStyleId = style_id; modified_node_ids.push(id); continue; }
-        if (t === 'GRID' && 'gridStyleId' in n) { n.gridStyleId = style_id; modified_node_ids.push(id); continue; }
-        if (t === 'TEXT' && n.type === 'TEXT' && 'textStyleId' in n) { n.textStyleId = style_id; modified_node_ids.push(id); continue; }
+
+        // Prefer async setter methods when available (required for documentAccess: dynamic-page)
+        try {
+          if (t === 'FILL' && typeof n.setFillStyleIdAsync === 'function') { await n.setFillStyleIdAsync(style_id); modified_node_ids.push(id); continue; }
+          if (t === 'STROKE' && typeof n.setStrokeStyleIdAsync === 'function') { await n.setStrokeStyleIdAsync(style_id); modified_node_ids.push(id); continue; }
+          if (t === 'EFFECT' && typeof n.setEffectStyleIdAsync === 'function') { await n.setEffectStyleIdAsync(style_id); modified_node_ids.push(id); continue; }
+          if (t === 'GRID' && typeof n.setGridStyleIdAsync === 'function') { await n.setGridStyleIdAsync(style_id); modified_node_ids.push(id); continue; }
+          if (t === 'TEXT' && n.type === 'TEXT' && typeof n.setTextStyleIdAsync === 'function') { await n.setTextStyleIdAsync(style_id); modified_node_ids.push(id); continue; }
+        } catch (_) {}
+
+        // Fallback to direct property assignment for environments that support it
+        try { if (t === 'FILL' && 'fillStyleId' in n) { n.fillStyleId = style_id; modified_node_ids.push(id); continue; } } catch (_) {}
+        try { if (t === 'STROKE' && 'strokeStyleId' in n) { n.strokeStyleId = style_id; modified_node_ids.push(id); continue; } } catch (_) {}
+        try { if (t === 'EFFECT' && 'effectStyleId' in n) { n.effectStyleId = style_id; modified_node_ids.push(id); continue; } } catch (_) {}
+        try { if (t === 'GRID' && 'gridStyleId' in n) { n.gridStyleId = style_id; modified_node_ids.push(id); continue; } } catch (_) {}
+        try { if (t === 'TEXT' && n.type === 'TEXT' && 'textStyleId' in n) { n.textStyleId = style_id; modified_node_ids.push(id); continue; } } catch (_) {}
+
       } catch (_) {}
     }
 
@@ -3159,69 +2850,7 @@ async function bindVariableToProperty(params) {
 // ----------------------------------------------------
 
 
-// -------- TOOL : set_reaction (batch set/replace) --------
-async function set_reaction(params) {
-  logger.info("🔗 set_reaction called", params);
-  try {
-    const { node_ids, reactions } = params || {};
-    if (!Array.isArray(node_ids) || node_ids.length === 0) {
-      const payload = { code: "missing_parameter", message: "Provide node_ids array", details: { received: params || {} } };
-      logger.error("❌ set_reaction failed", payload);
-      throw new Error(JSON.stringify(payload));
-    }
-    if (!Array.isArray(reactions)) {
-      const payload = { code: "invalid_parameter", message: "reactions must be an array (use [] to remove)", details: {} };
-      logger.error("❌ set_reaction failed", payload);
-      throw new Error(JSON.stringify(payload));
-    }
 
-    const modified = [];
-    const notFoundIds = [];
-    const lockedNodes = [];
-    const unsupportedNodes = [];
-    const failedIds = [];
-
-    for (const id of node_ids) {
-      try {
-        const node = await figma.getNodeByIdAsync(id);
-        if (!node) { notFoundIds.push(id); continue; }
-        if (node.locked) { lockedNodes.push(id); continue; }
-        const canSetAsync = ("setReactionsAsync" in node) && typeof node.setReactionsAsync === "function";
-        const canAssign = ("reactions" in node);
-        if (!canSetAsync && !canAssign) { unsupportedNodes.push(id); continue; }
-
-        try {
-          if (canSetAsync) {
-            await node.setReactionsAsync(reactions);
-          } else {
-            // Fallback for environments where direct assignment is allowed
-            node.reactions = reactions;
-          }
-          modified.push(id);
-        } catch (_) {
-          failedIds.push(id);
-        }
-      } catch (_) {
-        notFoundIds.push(id);
-      }
-    }
-
-    if (modified.length === 0) {
-      const payload = { code: "set_reaction_failed", message: "No nodes were updated", details: { notFoundIds, lockedNodes, unsupportedNodes, failedIds } };
-      logger.error("❌ set_reaction failed", payload);
-      throw new Error(JSON.stringify(payload));
-    }
-
-    const summary = reactions.length === 0 ? `Removed reactions from ${modified.length} node(s)` : `Set reactions on ${modified.length} node(s)`;
-    logger.info("✅ set_reaction succeeded", { modified_node_ids: modified });
-    return { success: true, modified_node_ids: modified, summary };
-  } catch (error) {
-    try { const maybe = JSON.parse(error && error.message ? error.message : "{}"); if (maybe && maybe.code) throw error; } catch (_) {}
-    const payload = { code: "unknown_plugin_error", message: (error && error.message) || String(error), details: { command: "set_reaction" } };
-    logger.error("❌ set_reaction failed", payload);
-    throw new Error(JSON.stringify(payload));
-  }
-}
 
 
 
@@ -4510,7 +4139,7 @@ async function createGridStyle(params) {
 // ======================================================
 // Undo Group Wrapper: withUndoGroup(label, actions, options)
 // - Ensures step-level logging
-// - Optionally reveals first affected node for UX via scrollAndZoomIntoView
+// - Optionally reveals affected nodes for UX via scrollAndZoomIntoView
 // - Does NOT call figma.commitUndo() automatically (split only when intentional)
 // ======================================================
 async function withUndoGroup(label, actions, options) {
@@ -4521,34 +4150,55 @@ async function withUndoGroup(label, actions, options) {
   try {
     const result = await actions();
 
-    // Determine first affected node id, if any
-    let firstAffectedId = null;
+    // Determine affected node ids, if any
+    const affectedIds = new Set();
     if (result && typeof result === 'object') {
-      if (Array.isArray(result.modified_node_ids) && result.modified_node_ids.length > 0) {
-        firstAffectedId = result.modified_node_ids[0];
-      } else if (result.node && result.node.id) {
-        firstAffectedId = result.node.id;
-      } else if (result.node_id) {
-        firstAffectedId = result.node_id;
-      } else if (result.created_node_id) {
-        firstAffectedId = result.created_node_id;
-      } else if (Array.isArray(result.resolved_node_ids) && result.resolved_node_ids.length > 0) {
-        firstAffectedId = result.resolved_node_ids[0];
+      if (Array.isArray(result.modified_node_ids)) {
+        for (const id of result.modified_node_ids) if (typeof id === 'string' && id.length > 0) affectedIds.add(id);
+      }
+      if (result.node && result.node.id) affectedIds.add(result.node.id);
+      if (result.node_id) affectedIds.add(result.node_id);
+      if (result.created_node_id) affectedIds.add(result.created_node_id);
+      if (Array.isArray(result.resolved_node_ids)) {
+        for (const id of result.resolved_node_ids) if (typeof id === 'string' && id.length > 0) affectedIds.add(id);
+      }
+      // Heuristic: if search returned a single match, reveal it
+      if (Array.isArray(result.matching_nodes) && result.matching_nodes.length === 1 && result.matching_nodes[0] && result.matching_nodes[0].id) {
+        affectedIds.add(result.matching_nodes[0].id);
       }
     }
+    if (opts && Array.isArray(opts.candidate_ids)) {
+      for (const id of opts.candidate_ids) if (typeof id === 'string' && id.length > 0) affectedIds.add(id);
+    }
 
-    if (reveal && firstAffectedId) {
+    if (reveal && affectedIds.size > 0) {
       try {
-        const node = await figma.getNodeByIdAsync(firstAffectedId);
-        if (node) {
-          // Best-effort: switch page if target is on a different page
-          let p = node.parent;
+        // Resolve nodes; limit to a reasonable number to avoid perf issues
+        const MAX_NODES_TO_REVEAL = 50;
+        const ids = Array.from(affectedIds).slice(0, MAX_NODES_TO_REVEAL);
+        const nodes = [];
+        for (const id of ids) {
+          try { const n = await figma.getNodeByIdAsync(id); if (n) nodes.push(n); } catch (_) {}
+        }
+        if (nodes.length > 0) {
+          const primary = nodes[0];
+          // Switch to the page of the primary node
+          let p = primary.parent;
           while (p && p.type !== 'PAGE') p = p.parent;
           if (p && p.id && figma.currentPage && p.id !== figma.currentPage.id) {
             try { figma.currentPage = p; } catch (_) {}
           }
-          try { figma.currentPage.selection = [node]; } catch (_) {}
-          try { figma.viewport.scrollAndZoomIntoView([node]); } catch (_) {}
+          // Keep selection minimal to avoid disrupting user workflow
+          try { figma.currentPage.selection = [primary]; } catch (_) {}
+          // Only reveal nodes that are on the same page as the primary
+          const pageId = (p && p.id) ? p.id : (figma.currentPage && figma.currentPage.id);
+          const nodesOnPage = nodes.filter((n) => {
+            let q = n.parent; let page = null;
+            while (q && q.type !== 'PAGE') q = q.parent;
+            page = q;
+            return page && page.id === pageId;
+          });
+          try { figma.viewport.scrollAndZoomIntoView(nodesOnPage.length > 0 ? nodesOnPage : [primary]); } catch (_) {}
         }
       } catch (_) {}
     }

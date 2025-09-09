@@ -133,13 +133,13 @@ export interface GetStyleConsumersResult { consuming_nodes: Array<{ node: any; f
 export const GetStyleConsumersParamsSchema = z.object({ style_id: z.string() }).strict();
 
 // Observation: Components & Prototyping
-export interface GetDocumentComponentsParams {}
-export interface GetDocumentComponentsResult { components: Array<{ id: string; component_key: string | null; name: string; type: string }> }
-export const GetDocumentComponentsParamsSchema = z.object({}).strict();
+export type PublishedFilter = "all" | "published_only" | "unpublished_only";
+export interface GetDocumentComponentsParams { published_filter?: PublishedFilter }
+export interface GetDocumentComponentsResult { components: Array<{ id: string; component_key: string | null; name: string; type: string; is_published: boolean }> }
+export const GetDocumentComponentsParamsSchema = z.object({
+  published_filter: z.enum(["all","published_only","unpublished_only"]).optional(),
+}).strict();
 
-export interface GetPrototypeInteractionsParams { node_id: string }
-export interface GetPrototypeInteractionsResult { reactions: any[] }
-export const GetPrototypeInteractionsParamsSchema = z.object({ node_id: z.string() }).strict();
 
 export interface CreateComponentFromNodeParams { node_id: string; name: string }
 export interface CreateComponentFromNodeResult {
@@ -250,10 +250,9 @@ export const SetPositionParamsSchema = z.object({ node_ids: z.array(z.string()).
 export function isSetPositionParams(input: unknown): input is SetPositionParams { try { SetPositionParamsSchema.parse(input); return true; } catch { return false; } }
 export function assertSetPositionParams(input: unknown): asserts input is SetPositionParams { SetPositionParamsSchema.parse(input); }
 
-export interface SetRotationParams { node_ids: string[]; rotation_degrees: number }
-export const SetRotationParamsSchema = z.object({ node_ids: z.array(z.string()).nonempty(), rotation_degrees: z.number() }).strict();
-export function isSetRotationParams(input: unknown): input is SetRotationParams { try { SetRotationParamsSchema.parse(input); return true; } catch { return false; } }
-export function assertSetRotationParams(input: unknown): asserts input is SetRotationParams { SetRotationParamsSchema.parse(input); }
+export interface SetChildIndexParams { node_id: string; new_index: number }
+export const SetChildIndexParamsSchema = z.object({ node_id: z.string().min(1), new_index: z.number().int().min(0) }).strict();
+
 
 export interface SetLayerPropertiesParams { node_ids: string[]; name?: string; opacity?: number; visible?: boolean; locked?: boolean; blend_mode?: "NORMAL"|"DARKEN"|"MULTIPLY"|"COLOR_BURN"|"LIGHTEN"|"SCREEN"|"COLOR_DODGE"|"OVERLAY"|"SOFT_LIGHT"|"HARD_LIGHT"|"DIFFERENCE"|"EXCLUSION"|"HUE"|"SATURATION"|"COLOR"|"LUMINOSITY" }
 export const SetLayerPropertiesParamsSchema = z.object({
@@ -351,10 +350,7 @@ export const SetConstraintsParamsSchema = z.object({
 }).strict();
 
  
-// Prototyping: set_reaction (v2 tool)
-export interface SetReactionParams { node_ids: string[]; reactions: any[] }
-export interface SetReactionResult { success: true; modified_node_ids: string[]; summary: string }
-export const SetReactionParamsSchema = z.object({ node_ids: z.array(z.string()).nonempty(), reactions: z.array(z.any()) }).strict();
+
 
  
  
@@ -369,57 +365,6 @@ export const CreateFrameParamsSchema = z.object({
   x: z.number().optional(),
   y: z.number().optional(),
 }).passthrough();
-
-export interface CreateRectangleParams { name: string; parent_id?: string; width?: number; height?: number; x?: number; y?: number }
-export const CreateRectangleParamsSchema = z.object({
-  name: z.string().min(1),
-  parent_id: z.string().min(1).optional(),
-  width: z.number().optional(),
-  height: z.number().optional(),
-  x: z.number().optional(),
-  y: z.number().optional(),
-}).strict();
-
-export interface CreateEllipseParams { name: string; parent_id?: string; width?: number; height?: number; x?: number; y?: number }
-export const CreateEllipseParamsSchema = z.object({
-  name: z.string().min(1),
-  parent_id: z.string().min(1).optional(),
-  width: z.number().optional(),
-  height: z.number().optional(),
-  x: z.number().optional(),
-  y: z.number().optional(),
-}).strict();
-
-export interface CreatePolygonParams { name: string; parent_id?: string; side_count?: number; radius?: number; x?: number; y?: number }
-export const CreatePolygonParamsSchema = z.object({
-  name: z.string().min(1),
-  parent_id: z.string().min(1).optional(),
-  side_count: z.number().int().min(3).optional(),
-  radius: z.number().positive().optional(),
-  x: z.number().optional(),
-  y: z.number().optional(),
-}).strict();
-
-export interface CreateStarParams { name: string; parent_id?: string; point_count?: number; outer_radius?: number; inner_radius_ratio?: number; x?: number; y?: number }
-export const CreateStarParamsSchema = z.object({
-  name: z.string().min(1),
-  parent_id: z.string().min(1).optional(),
-  point_count: z.number().int().min(3).optional(),
-  outer_radius: z.number().positive().optional(),
-  inner_radius_ratio: z.number().min(0).max(1).optional(),
-  x: z.number().optional(),
-  y: z.number().optional(),
-}).strict();
-
-export interface CreateLineParams { name: string; parent_id?: string; length?: number; x?: number; y?: number; rotation_degrees?: number }
-export const CreateLineParamsSchema = z.object({
-  name: z.string().min(1),
-  parent_id: z.string().min(1).optional(),
-  length: z.number().positive().optional(),
-  x: z.number().optional(),
-  y: z.number().optional(),
-  rotation_degrees: z.number().optional(),
-}).strict();
 
 // Reusable params schema for create_text (previously inline in validation)
 export const CreateTextParamsSchema = z
@@ -451,10 +396,6 @@ export type PrimaryAxisAlignItems = "MIN" | "MAX" | "CENTER" | "SPACE_BETWEEN";
 export type CounterAxisAlignItems = "MIN" | "MAX" | "CENTER" | "BASELINE";
 export type LayoutSizing = "FIXED" | "HUG" | "FILL";
 
-// Typed façade and schema for create_rectangle
-export interface RGBA { r: number; g: number; b: number; a?: number }
-export interface ConstraintsKV { horizontal: "MIN" | "CENTER" | "MAX" | "STRETCH" | "SCALE"; vertical: "MIN" | "CENTER" | "MAX" | "STRETCH" | "SCALE" }
-// Typed façade and schema for create_frame
 
 // Typed façade and schema for create_component_instance
 export interface CreateComponentInstanceParams {
@@ -536,22 +477,6 @@ export const CommitUndoStepParamsSchema = z.object({}).strict();
 
  
 
-// New Hierarchy & Structure (v2 per new-tools.md)
-export interface GroupNodesParams { node_ids: string[]; new_group_name: string; parent_id: string }
-export const GroupNodesParamsSchema = z.object({
-  node_ids: z.array(z.string()).nonempty(),
-  new_group_name: z.string().min(1),
-  parent_id: z.string().min(1),
-}).strict();
-
-export interface UngroupNodeParams { node_id: string }
-export const UngroupNodeParamsSchema = z.object({ node_id: z.string().min(1) }).strict();
-
-export interface ReparentNodesParams { node_ids_to_move: string[]; new_parent_id: string }
-export const ReparentNodesParamsSchema = z.object({
-  node_ids_to_move: z.array(z.string()).nonempty(),
-  new_parent_id: z.string().min(1),
-}).strict();
 
 export type ReorderMode = "BRING_FORWARD" | "SEND_BACKWARD" | "BRING_TO_FRONT" | "SEND_TO_BACK";
 export interface ReorderNodesParams { node_ids: string[]; mode: ReorderMode }
@@ -564,24 +489,13 @@ export const ReorderNodesParamsSchema = z.object({
 export interface CloneNodesParams { node_ids: string[] }
 export const CloneNodesParamsSchema = z.object({ node_ids: z.array(z.string()).nonempty() }).strict();
 
-// Forward-looking schemas to satisfy validation for vector/boolean tools (per new-tools.md)
-export const PerformBooleanOperationParamsSchema = z.object({
-  node_ids: z.array(z.string()).nonempty(),
-  operation: z.enum(["UNION","SUBTRACT","INTERSECT","EXCLUDE"]),
-  parent_id: z.string().min(1),
+// Hierarchy & structure: reparent_nodes
+export interface ReparentNodesParams { node_ids_to_move: string[]; new_parent_id: string }
+export const ReparentNodesParamsSchema = z.object({
+  node_ids_to_move: z.array(z.string()).nonempty(),
+  new_parent_id: z.string().min(1),
 }).strict();
-export interface PerformBooleanOperationParams { node_ids: string[]; operation: "UNION"|"SUBTRACT"|"INTERSECT"|"EXCLUDE"; parent_id: string }
-export interface PerformBooleanOperationResult { created_node_id: string | null; summary: string; unresolved_node_ids: string[] }
-export function isPerformBooleanOperationParams(input: unknown): input is PerformBooleanOperationParams { try { PerformBooleanOperationParamsSchema.parse(input); return true; } catch { return false; } }
-export function assertPerformBooleanOperationParams(input: unknown): asserts input is PerformBooleanOperationParams { PerformBooleanOperationParamsSchema.parse(input); }
-export const FlattenNodesParamsSchema = z.object({
-  node_ids: z.array(z.string()).nonempty(),
-  parent_id: z.string().min(1),
-}).strict();
-export interface FlattenNodesParams { node_ids: string[]; parent_id: string }
-export interface FlattenNodesResult { created_node_id: string | null; summary: string; unresolved_node_ids: string[] }
-export function isFlattenNodesParams(input: unknown): input is FlattenNodesParams { try { FlattenNodesParamsSchema.parse(input); return true; } catch { return false; } }
-export function assertFlattenNodesParams(input: unknown): asserts input is FlattenNodesParams { FlattenNodesParamsSchema.parse(input); }
+
 
 // === Config & Constants ===
 const PORT = 3055;
@@ -674,6 +588,7 @@ type Message = JoinMessage | NewChatMessage | UserPromptMessage | AgentResponseM
 
 // === Helpers: logging, file I/O, and message utilities ===
 // === Logging & File I/O ===
+
 function log(level: string, message: string, data?: any) {
   const timestamp = new Date().toISOString();
   console.log(`[${timestamp}] [bridge] [${level}] ${message}`, data ? JSON.stringify(data) : "");
@@ -693,6 +608,19 @@ const LOG_CANDIDATES = [
 ];
 
 let SELECTED_LOG_PATH: string | null = null;
+
+// === Token logging candidates & state ===
+const TOKEN_LOG_CANDIDATES = [
+  ...(ENV_LOG ? [ENV_LOG.replace(/\.txt$|\.jsonl?$/i, ".tokens.jsonl")] : []),
+  path.resolve(BRIDGE_DIR, "../token_logs.jsonl"),
+  path.resolve(BRIDGE_DIR, "token_logs.jsonl"),
+  path.resolve(process.cwd(), "token_logs.jsonl"),
+];
+
+let SELECTED_TOKEN_LOG_PATH: string | null = null;
+
+// Tracker to maintain cumulative token summaries per channel
+const TOKEN_SUMMARY_TRACKER = new Map<string, { requests: number; input_tokens: number; output_tokens: number; total_tokens: number }>();
 
 function tryAppendTo(filePath: string, line: string): boolean {
   try {
@@ -779,31 +707,213 @@ function persistToolEventIfNeeded(message: any, senderChannel: string, senderRol
       const tool = tracked ? tracked.command : undefined;
       const params = tracked ? tracked.params : undefined;
 
+      // Prefer an explicit structured error, but tolerate legacy shapes
       const error_structured = m.error_structured || (typeof m.error === "object" ? m.error : undefined) || undefined;
       const ok = !error_structured;
 
       // Once logged, drop tracker entry
       if (tracked) TOOL_CALL_TRACKER.delete(id);
 
+      // Build verbose metadata for errors to aid debugging (includes raw payload,
+      // plugin-provided details, tracked params, duration and command name).
+      const verbose_meta: Record<string, any> = {
+        id,
+        tool,
+        ok,
+        status: ok ? "success" : "error",
+        duration_ms,
+        params,
+      };
+
+      if (ok) {
+        verbose_meta.result = m.result;
+      } else {
+        // Capture multiple layers of error information if available
+        verbose_meta.error_structured = error_structured || undefined;
+        // Preserve any raw stringified error the plugin returned
+        verbose_meta.error_raw = m.error_raw ?? (typeof m.error === "string" ? m.error : undefined);
+        // Keep the raw `error` field too for maximum fidelity
+        verbose_meta.error_field = m.error;
+        // Plugin may attach implementation-specific details under `error.details`
+        verbose_meta.plugin_details = (m.error && typeof m.error === "object" && m.error.details) ? m.error.details : undefined;
+        // If the parser added a normalized `details` inside structured error, include it
+        if (error_structured && error_structured.details) verbose_meta.error_structured_details = error_structured.details;
+
+        // Add a lightweight pointer to the tool schema presence so engineers know
+        // which tool validation applies (useful when cross-referencing docs).
+        verbose_meta.schema_present = !!(tool && TOOL_SCHEMAS[tool]);
+
+        // Surface a console-level error for immediate visibility when running the bridge
+        log("error", "Tool call resulted in error", { id, tool, duration_ms, params, error: error_structured || m.error });
+      }
+
+      // Persist the verbose meta for both success and error cases (errors have
+      // extra fields populated above). This ensures logs.txt contains the full
+      // payload needed to debug against the Figma Plugin API docs.
       logToFile({
         channel: senderChannel,
         from: senderRole,
         type: "tool_response",
         text: tool || "<unknown_tool>",
-        meta: {
-          id,
-          tool,
-          ok,
-          status: ok ? "success" : "error",
-          duration_ms,
-          params,
-          result: ok ? m.result : undefined,
-          error: error_structured || (typeof m.error === "string" ? m.error : undefined)
-        }
+        meta: verbose_meta
       });
     }
   } catch (e) {
     log("warn", "persistToolEventIfNeeded failed", { error: (e as Error).message });
+  }
+}
+
+// Persist token usage events to a separate token log JSONL file. Accepts a
+// variety of usage shapes commonly emitted by LLM providers or agent layers.
+function tokenLogToFile(entry: any) {
+  const line = JSON.stringify(entry) + "\n";
+
+  if (SELECTED_TOKEN_LOG_PATH) {
+    try {
+      const dir = path.dirname(SELECTED_TOKEN_LOG_PATH);
+      mkdirSync(dir, { recursive: true });
+      appendFileSync(SELECTED_TOKEN_LOG_PATH, line, { encoding: "utf8" });
+      return;
+    } catch {
+      SELECTED_TOKEN_LOG_PATH = null;
+    }
+  }
+
+  for (const candidate of TOKEN_LOG_CANDIDATES) {
+    try {
+      const dir = path.dirname(candidate);
+      mkdirSync(dir, { recursive: true });
+      appendFileSync(candidate, line, { encoding: "utf8" });
+      SELECTED_TOKEN_LOG_PATH = candidate;
+      log("info", "📝 Using token logs file", { path: SELECTED_TOKEN_LOG_PATH });
+      return;
+    } catch {
+      // try next candidate
+    }
+  }
+
+  // Fall back to console if file writes fail
+  log("warn", "Failed writing to token logs file", { tried: TOKEN_LOG_CANDIDATES });
+}
+
+// Attempt to extract usage/token info from a variety of message shapes.
+function extractUsageFromMessage(m: any) {
+  if (!m || typeof m !== "object") return null;
+
+  // Common places: m.usage, m.meta?.usage, m.result?.usage, m.token_usage
+  const candidates = [
+    m.usage,
+    m.meta && m.meta.usage,
+    m.result && m.result.usage,
+    m.token_usage,
+    m.usage_snapshot,
+    m.message && m.message.usage,
+  ];
+  for (const c of candidates) {
+    if (c && typeof c === "object") return c;
+  }
+
+  // Some layers provide explicit numeric fields
+  if (typeof m.input_tokens === "number" || typeof m.output_tokens === "number" || typeof m.total_tokens === "number") {
+    return { requests: m.requests || 0, input_tokens: m.input_tokens || 0, output_tokens: m.output_tokens || 0, total_tokens: m.total_tokens || 0 };
+  }
+
+  return null;
+}
+
+// Persist token event and update running summary per channel
+function persistTokenEventIfNeeded(message: any, senderChannel: string, senderRole: "plugin" | "agent") {
+  try {
+    const usage = extractUsageFromMessage(message);
+    if (!usage) return;
+
+    const requests = Number(usage.requests || usage.request_count || 0) || 0;
+    let input_tokens = Number(usage.input_tokens || usage.prompt_tokens || usage.input || 0) || 0;
+    let output_tokens = Number(usage.output_tokens || usage.completion_tokens || usage.output || 0) || 0;
+    let total_tokens = Number(usage.total_tokens || (input_tokens + output_tokens) || 0) || 0;
+    const meta_scope = (message && (message.scope || (message.message && (message.message.scope || message.message.kind)))) || undefined;
+    const meta_turn_id = (message && (message.turn_id || (message.message && message.message.turn_id))) || undefined;
+    const meta_session_id = (message && (message.session_id || (message.message && message.message.session_id))) || undefined;
+    const meta_tool = (message && (message.tool || (message.message && message.message.tool))) || undefined;
+    const meta_breakdown = (usage && (usage.breakdown || usage.details || undefined)) || undefined;
+
+    const individual: any = {
+      timestamp: new Date().toISOString(),
+      channel: senderChannel,
+      from: senderRole,
+      type: "token_usage",
+      requests,
+      input_tokens,
+      output_tokens,
+      total_tokens,
+      raw: usage,
+    };
+
+    if (meta_scope) individual.scope = meta_scope;
+    if (meta_turn_id) individual.turn_id = meta_turn_id;
+    if (meta_session_id) individual.session_id = meta_session_id;
+    if (meta_tool) individual.tool = meta_tool;
+    if (meta_breakdown) individual.breakdown = meta_breakdown;
+
+    // Decide how to treat this event for cumulative totals
+    // - Only accumulate "turn_summary" scope to avoid double-counting.
+    // - Treat tool_output tokens as INPUT-side attribution (even if a sender misclassifies).
+    // - Ignore tool_input and input_breakdown in cumulative totals.
+    let includeInCumulative = false;
+    if (meta_scope === "turn_summary") includeInCumulative = true;
+
+    // Normalize tool_output attribution to input side for per-tool rollup
+    let toolOutputTokensForRollup = 0;
+    if (meta_scope === "tool_output") {
+      if (output_tokens > 0 && input_tokens === 0) {
+        input_tokens = output_tokens;
+        total_tokens = input_tokens; // single-scope event
+        output_tokens = 0;
+        individual.input_tokens = input_tokens;
+        individual.output_tokens = 0;
+        individual.total_tokens = total_tokens;
+      }
+      toolOutputTokensForRollup = input_tokens;
+    }
+
+    // Update cumulative summary per channel (turn_summary only)
+    const prev: any = TOKEN_SUMMARY_TRACKER.get(senderChannel) || { requests: 0, input_tokens: 0, output_tokens: 0, total_tokens: 0, per_tool_output_tokens: {} };
+    const updated: any = includeInCumulative ? {
+      requests: prev.requests + requests,
+      input_tokens: prev.input_tokens + input_tokens,
+      output_tokens: prev.output_tokens + output_tokens,
+      total_tokens: prev.total_tokens + total_tokens,
+      per_tool_output_tokens: { ...(prev.per_tool_output_tokens || {}) }
+    } : {
+      ...prev,
+      per_tool_output_tokens: { ...(prev.per_tool_output_tokens || {}) }
+    };
+
+    // Per-tool rollup (applies to tool_output scope; independent of cumulative inclusion)
+    try {
+      if (meta_scope === "tool_output" && meta_tool && toolOutputTokensForRollup > 0) {
+        const toolName = String(meta_tool.command || meta_tool.name || "<unknown>");
+        updated.per_tool_output_tokens[toolName] = (updated.per_tool_output_tokens[toolName] || 0) + toolOutputTokensForRollup;
+      }
+    } catch {}
+
+    TOKEN_SUMMARY_TRACKER.set(senderChannel, updated);
+
+    // Always write the individual entry
+    tokenLogToFile(individual);
+    // Write a summary snapshot only when we actually updated cumulative totals (turn_summary)
+    if (includeInCumulative) {
+      const summary = {
+        timestamp: new Date().toISOString(),
+        channel: senderChannel,
+        from: senderRole,
+        type: "token_summary",
+        cumulative: updated
+      };
+      tokenLogToFile(summary);
+    }
+  } catch (e) {
+    log("warn", "persistTokenEventIfNeeded failed", { error: (e as Error).message });
   }
 }
 
@@ -853,6 +963,27 @@ function normalizeParamsToSnakeCase(_params: any): void {
   }
 }
 
+// Normalize common human synonyms to Figma Plugin API enums for constraints
+function normalizeConstraintEnum(value: any, axis: "horizontal" | "vertical"): any {
+  try {
+    if (typeof value !== "string") return value;
+    const raw = value.trim().toUpperCase();
+    const direct = ["MIN", "MAX", "CENTER", "STRETCH", "SCALE"];
+    if (direct.includes(raw)) return raw;
+    if (axis === "vertical") {
+      if (raw === "TOP") return "MIN";
+      if (raw === "BOTTOM") return "MAX";
+    }
+    if (axis === "horizontal") {
+      if (raw === "LEFT") return "MIN";
+      if (raw === "RIGHT") return "MAX";
+    }
+    return value;
+  } catch {
+    return value;
+  }
+}
+
 // === Schema Registry ===
 // Central tool schemas map (single source of truth for validation)
 // Centralized schema registry used for runtime validation of incoming tool calls
@@ -870,16 +1001,10 @@ const TOOL_SCHEMAS: Record<string, any> = {
   get_document_styles: GetDocumentStylesParamsSchema,
   get_style_consumers: GetStyleConsumersParamsSchema,
   get_document_components: GetDocumentComponentsParamsSchema,
-  get_prototype_interactions: GetPrototypeInteractionsParamsSchema,
 
   // Category 3: Mutation & Creation
   // Subcategory 3.1: Create Tools
   create_frame: CreateFrameParamsSchema,
-  create_rectangle: CreateRectangleParamsSchema,
-  create_ellipse: CreateEllipseParamsSchema,
-  create_polygon: CreatePolygonParamsSchema,
-  create_star: CreateStarParamsSchema,
-  create_line: CreateLineParamsSchema,
   create_text: CreateTextParamsSchema,
 
   // Subcategory 3.2: Modify (General Properties)
@@ -888,7 +1013,6 @@ const TOOL_SCHEMAS: Record<string, any> = {
   set_corner_radius: SetCornerRadiusParamsSchema,
   set_size: SetSizeParamsSchema,
   set_position: SetPositionParamsSchema,
-  set_rotation: SetRotationParamsSchema,
   set_layer_properties: SetLayerPropertiesParamsSchema,
   set_effects: SetEffectsParamsSchema,
 
@@ -896,6 +1020,7 @@ const TOOL_SCHEMAS: Record<string, any> = {
   set_auto_layout: SetAutoLayoutParamsSchema,
   set_auto_layout_child: SetAutoLayoutChildParamsSchema,
   set_constraints: SetConstraintsParamsSchema,
+  set_child_index: SetChildIndexParamsSchema,
 
   // Subcategory 3.4: Modify (Text)
   set_text_characters: SetTextCharactersParamsSchema,
@@ -903,14 +1028,11 @@ const TOOL_SCHEMAS: Record<string, any> = {
 
   // Subcategory 3.5: Hierarchy & Structure
   clone_nodes: CloneNodesParamsSchema,
-  group_nodes: GroupNodesParamsSchema,
-  ungroup_node: UngroupNodeParamsSchema,
   reparent_nodes: ReparentNodesParamsSchema,
   reorder_nodes: ReorderNodesParamsSchema,
 
   // Subcategory 3.6: Vector & Boolean
-  perform_boolean_operation: PerformBooleanOperationParamsSchema,
-  flatten_nodes: FlattenNodesParamsSchema,
+  
 
   // Subcategory 3.7: Components & Styles
   create_component_from_node: CreateComponentFromNodeParamsSchema,
@@ -927,7 +1049,7 @@ const TOOL_SCHEMAS: Record<string, any> = {
   bind_variable_to_property: BindVariableToPropertyParamsSchema,
 
   // Subcategory 3.9: Prototyping
-  set_reaction: SetReactionParamsSchema,
+  
 
   // Category 4: Meta & Utility
   scroll_and_zoom_into_view: ScrollAndZoomIntoViewParamsSchema,
@@ -955,9 +1077,42 @@ function validateMessage(data: any): data is Message {
       return typeof data.chunk === "string" && typeof data.is_partial === "boolean";
     case "tool_call":
       normalizeParamsToSnakeCase(data.params);
+
+      // Backwards-compatibility shim: accept legacy `filters.name` and map to
+      // the canonical `filters.name_regex` expected by the current schema.
+      // This allows older agents or model-generated calls to continue working
+      // without failing strict validation.
+      try {
+        if (data.command === "find_nodes" && data.params && typeof data.params === "object") {
+          const filters = (data.params as any).filters;
+          if (filters && typeof filters === "object" && Object.prototype.hasOwnProperty.call(filters, "name") && !Object.prototype.hasOwnProperty.call(filters, "name_regex")) {
+            const nameVal = String(filters.name);
+            // Escape regex special chars so a literal name becomes a safe exact-match regex
+            const escapeRegExp = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+            filters.name_regex = `^${escapeRegExp(nameVal)}$`;
+            delete filters.name;
+          }
+        }
+      } catch (_) {
+        // Non-fatal; continue to validation which will catch remaining issues
+      }
+
       if (!(typeof data.id === "string" && typeof data.command === "string" && data.params !== undefined)) {
         return false;
       }
+      // Backwards-compatibility shims and human-synonym normalization
+      try {
+        if (data.command === "set_constraints" && data.params && typeof data.params === "object") {
+          const original = { horizontal: (data.params as any).horizontal, vertical: (data.params as any).vertical };
+          (data.params as any).horizontal = normalizeConstraintEnum((data.params as any).horizontal, "horizontal");
+          (data.params as any).vertical = normalizeConstraintEnum((data.params as any).vertical, "vertical");
+          const normalized = { horizontal: (data.params as any).horizontal, vertical: (data.params as any).vertical };
+          if (original.horizontal !== normalized.horizontal || original.vertical !== normalized.vertical) {
+            log("info", "🔁 Normalized set_constraints enums", { original, normalized });
+          }
+        }
+      } catch (_) {}
+
       const schema = TOOL_SCHEMAS[data.command];
       if (schema) {
         try { schema.parse(data.params); }
@@ -1148,10 +1303,14 @@ function handleMessage(ws: ServerWebSocket<unknown>, message: NewChatMessage | U
     return;
   }
 
+
   // Forward message and persist tool events (only)
   sendMessage(targetSocket, message);
   log("info", "Message forwarded", { from: senderRole, to: targetRole, channel: senderChannel, type: message.type, id: (message as any).id || "no-id" });
   persistToolEventIfNeeded(message, senderChannel, senderRole);
+  // Also persist any token/usage info if present in the message to a
+  // dedicated token log for cost estimation and rollups.
+  persistTokenEventIfNeeded(message, senderChannel, senderRole);
 }
 
  

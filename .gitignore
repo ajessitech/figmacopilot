@@ -39,3 +39,6 @@ Thumbs.db
 docs/agents-book.md 
 docs/ignore.md
 docs/design-encyclopedia.md
+
+bridge/logs.txt
+bridge/token_logs.jsonl

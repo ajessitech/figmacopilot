@@ -69,6 +69,17 @@ class FigmaCommunicator:
         self.pending_requests: Dict[str, asyncio.Future] = {}
         self.request_timestamps: Dict[str, float] = {}  # Track request start times
         self.request_meta: Dict[str, Dict[str, Any]] = {}  # Track command/params per request
+        # Token logging context and hook
+        self.current_turn_id: Optional[str] = None
+        self._token_counter_hook = None  # Optional[Callable[[Dict[str, Any]], None]]
+
+    def set_token_counter_hook(self, hook) -> None:
+        """Register a callback to record token usage per tool IO locally in the agent.
+
+        The hook will be called with a dict containing: { scope: str, turn_id: str | None,
+        command: str | None, tokens: int, direction: "input" | "output" }.
+        """
+        self._token_counter_hook = hook
         
     def generate_id(self) -> str:
         """Generate a unique ID for tool calls."""
@@ -128,6 +139,29 @@ class FigmaCommunicator:
             logger.info(f"🚀 Sending tool_call: {command} with ID: {request_id} at {start_time:.3f}")
             logger.debug(f"🚀 Tool call payload: {json.dumps(tool_call_message)}")
             await self.websocket.send(json.dumps(tool_call_message))
+
+            # Emit token_usage progress update for tool input size (heuristic: chars/4)
+            try:
+                serialized = json.dumps({"command": command, "params": params or {}}, ensure_ascii=False)
+                est_tokens = max(1, int(len(serialized) / 4))
+                usage_msg = {
+                    "type": "progress_update",
+                    "message": {
+                        "kind": "token_usage",
+                        "scope": "tool_input",
+                        "turn_id": self.current_turn_id,
+                        "usage": {"requests": 0, "input_tokens": est_tokens, "output_tokens": 0, "total_tokens": est_tokens},
+                        "tool": {"command": command, "id": request_id}
+                    }
+                }
+                await self.websocket.send(json.dumps(usage_msg))
+                if callable(self._token_counter_hook):
+                    try:
+                        self._token_counter_hook({"scope": "tool_input", "turn_id": self.current_turn_id, "command": command, "tokens": est_tokens, "direction": "input"})
+                    except Exception:
+                        pass
+            except Exception:
+                pass
             
             # Wait for the response with timeout
             result = await asyncio.wait_for(future, timeout=self.timeout)
@@ -257,6 +291,34 @@ class FigmaCommunicator:
         logger.info(f"✅ Tool call {request_id} completed successfully after {elapsed:.3f}s")
         logger.debug(f"🎯 Result payload: {result}")
         logger.debug(f"🔄 Setting result on future for {request_id}")
+        # Emit token_usage progress update for tool output size (heuristic: chars/4)
+        try:
+            serialized_result = json.dumps(result, ensure_ascii=False)
+            est_tokens = max(1, int(len(serialized_result) / 4))
+            token_msg = {
+                "type": "progress_update",
+                "message": {
+                    "kind": "token_usage",
+                    "scope": "tool_output",
+                    "turn_id": self.current_turn_id,
+                    # Tool output is read by the next LLM call → count on input side
+                    "usage": {"requests": 0, "input_tokens": est_tokens, "output_tokens": 0, "total_tokens": est_tokens},
+                    "tool": {"command": cmd, "id": request_id}
+                }
+            }
+            # handle_tool_response is sync; schedule the send in the current loop
+            try:
+                loop = asyncio.get_running_loop()
+                loop.create_task(self.websocket.send(json.dumps(token_msg)))
+            except Exception:
+                pass
+            if callable(self._token_counter_hook):
+                try:
+                    self._token_counter_hook({"scope": "tool_output", "turn_id": self.current_turn_id, "command": cmd, "tokens": est_tokens, "direction": "output"})
+                except Exception:
+                    pass
+        except Exception:
+            pass
         if not future.done():
             future.set_result(result)
         else:
